@@ -1,0 +1,34 @@
+{
+  "preferences": {
+    "platform": "pc",
+    "crossplay": true,
+    "max_results": 5
+  },
+  "price_alerts": [
+    {
+      "item_id": "arcane_energize",
+      "direction": "below",
+      "price": 45,
+      "note": "充沛低于45提醒"
+    }
+  ],
+  "favorite_items": [
+    "arcane_energize"
+  ],
+  "common_questions": [
+    "我有 Lex Prime 蓝图和枪管，还差多少钱做一套",
+    "Lex Prime 一套多少钱",
+    "现在呢",
+    "充沛现在价格怎么样",
+    "那个回蓝的赋能现在行情怎样",
+    "你好啊",
+    "我要买充沛",
+    "我想卖充沛",
+    "Lex Prime 枪管最高收多少",
+    "Lex Prime 一套最低卖多少",
+    "伏特p机体多少钱",
+    "伏特p一套现在多少钱",
+    "升腾现在最高价格是多少",
+    "咬碎的买家最高出价是多少，满级的"
+  ]
+}

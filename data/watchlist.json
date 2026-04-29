@@ -1,0 +1,24 @@
+﻿{
+  "arcanes": [
+    "arcane_energize",
+    "arcane_grace",
+    "arcane_avenger",
+    "arcane_guardian",
+    "arcane_strike",
+    "arcane_nullifier"
+  ],
+  "prime_warframe_parts": [
+    "volt_prime_chassis_blueprint",
+    "rhino_prime_systems_blueprint",
+    "saryn_prime_neuroptics_blueprint",
+    "mesa_prime_systems_blueprint",
+    "wukong_prime_chassis_blueprint"
+  ],
+  "popular_mods": [
+    "primed_flow",
+    "split_chamber",
+    "serration",
+    "heavy_caliber",
+    "condition_overload"
+  ]
+}

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.db
+*.egg-info/
+dist/
+build/
+.idea/
+.vscode/
+*.lnk
+SESSION_HANDOFF_*.md
