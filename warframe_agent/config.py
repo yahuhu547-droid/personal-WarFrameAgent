@@ -3,7 +3,7 @@
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 REPORT_DIR = BASE_DIR / "reports"
-EXPORT_DIR = Path(r"C:\Users\ASUSYBT4-P325\Downloads\warframe-public-export-senpai")
+EXPORT_DIR = DATA_DIR / "export"
 ALIAS_PATH = DATA_DIR / "item_aliases.json"
 GENERATED_ALIAS_PATH = DATA_DIR / "generated_aliases.json"
 ITEMS_FULL_PATH = DATA_DIR / "items_full.json"
