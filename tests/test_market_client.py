@@ -1,10 +1,13 @@
 ﻿import unittest
 from unittest.mock import patch
 
-from warframe_agent.market import fetch_orders
+from warframe_agent.market import fetch_orders, clear_cache
 
 
 class MarketClientTests(unittest.TestCase):
+    def setUp(self):
+        clear_cache()
+
     def test_fetch_orders_sends_market_headers(self):
         class Response:
             def raise_for_status(self):

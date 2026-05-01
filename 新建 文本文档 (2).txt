@@ -1,0 +1,219 @@
+ Warframe Agent 升级计划：从 CLI 到面向玩家的 Web UI
+
+ Context
+
+ 项目已完成 Phase 0-4 的 Agent 化改造（bug 修复、后台监控、价格历史、会话上下文、LLM 工具路由），95 个测试全部通过，已上传 GitHub。
+
+ 当前问题：项目是纯终端应用，只适合开发者自用。要推向玩家使用，需要：
+ - 可视化界面（Web UI）
+ - 更好的交互体验（流式输出、加载状态、价格图表）
+ - 实时通知（价格提醒推送到浏览器）
+ - 更友好的错误处理和引导
+
+ 用户选择 Web UI 方案：FastAPI 后端 + 前端页面，浏览器访问 localhost。
+
+ ---
+ Phase 5: FastAPI 后端 + WebSocket 基础
+
+ 将 CLI 的 ChatAgent.answer() 暴露为 Web API，支持流式输出。
+
+ 5.1 新增依赖
+
+ - fastapi, uvicorn[standard], websockets — Web 框架 + ASGI 服务器
+ - aiosqlite — 异步 SQLite（解决并发写入锁问题）
+ - 安装到项目 .venv/
+
+ 5.2 新建 warframe_agent/web/app.py — FastAPI 应用
+
+ - POST /api/chat — 接收消息，返回 Agent 回复（JSON）
+ - GET /api/memory — 获取当前记忆摘要
+ - POST /api/fav, POST /api/alert, POST /api/pref — 记忆操作 API
+ - GET /api/history/{item_id} — 获取价格历史数据（供图表使用）
+ - WebSocket /ws/chat — 流式对话（LLM token 逐字推送）
+ - WebSocket /ws/notifications — 实时价格提醒推送
+
+ 5.3 异步适配
+
+ - 文件: warframe_agent/market.py
+ - 将 fetch_orders() 包装为 asyncio.to_thread() 调用（保留同步版本给 CLI）
+ - 文件: warframe_agent/llm.py
+ - 添加 stream_ollama_chat() 使用 ollama.AsyncClient 流式生成
+ - 文件: warframe_agent/price_history.py
+ - 添加 WAL 模式：conn.execute("PRAGMA journal_mode=WAL")
+
+ 5.4 Monitor 推送适配
+
+ - 文件: warframe_agent/monitor.py
+ - 添加 on_alert 回调支持，Web 模式下通过 WebSocket 广播通知
+ - 保留 CLI 的 drain_notifications() 兼容
+
+ 5.5 启动入口
+
+ - 新建 start_web.py：启动 uvicorn 服务器
+ - 新建 start_web.bat：一键启动 Web 版
+ - main.py 菜单新增选项 5：启动 Web 界面
+
+ 5.6 测试
+
+ - tests/test_web_api.py：使用 FastAPI TestClient 测试所有端点
+ - 验证 WebSocket 连接和消息推送
+
+ ---
+ Phase 6: 前端界面
+
+ 6.1 技术选择
+
+ - 纯 HTML + CSS + JavaScript（无需 Node.js 构建工具）
+ - 前端文件放在 warframe_agent/web/static/ 目录
+ - FastAPI 的 StaticFiles 直接托管
+
+ 6.2 页面布局（单页应用）
+
+ - 左侧边栏：
+   - 收藏列表（实时价格 + 涨跌标记）
+   - 价格提醒列表（状态指示灯）
+   - 快捷操作按钮（添加收藏、设置提醒）
+ - 中间主区域：
+   - 对话窗口（聊天气泡样式，支持流式打字效果）
+   - 输入框 + 发送按钮
+   - 快捷提问按钮（"充沛多少钱"、"扫描关注"等）
+ - 右侧面板（查价时展开）：
+   - 物品详情卡片（卖价/收价/价差）
+   - 价格趋势折线图（使用 Chart.js）
+   - 一键复制私聊命令按钮
+   - 卖家/买家排行表格
+
+ 6.3 视觉设计
+
+ - 暗色主题（贴合 Warframe 游戏风格）
+ - 配色：深灰背景 + 金色/蓝色强调色（Warframe 标志色）
+ - 字体：等宽字体用于价格数据，无衬线字体用于对话
+ - 响应式布局，支持窄屏（手机浏览器）
+
+ 6.4 交互细节
+
+ - LLM 回复流式显示（逐字打出效果）
+ - API 请求时显示加载动画
+ - 价格提醒触发时浏览器通知（Notification API）+ 页面内弹窗
+ - 私聊命令点击即复制，显示"已复制"反馈
+ - 收藏/提醒的添加和删除有确认对话框
+
+ ---
+ Phase 7: 体验优化
+
+ 7.1 智能搜索建议
+
+ - 文件: warframe_agent/web/app.py
+ - GET /api/suggest?q=充 — 输入时实时返回匹配的物品名列表
+ - 前端输入框下拉补全（从别名表 + 字典中搜索）
+
+ 7.2 错误处理优化
+
+ - 文件: warframe_agent/chat.py
+ - 网络错误：显示"warframe.market 暂时无法连接，请检查网络"而非 Python 异常
+ - LLM 超时：显示"模型响应较慢，已为你展示实时数据"
+ - 物品未找到：显示"未找到该物品，你是不是想找：xxx？"（模糊匹配建议）
+
+ 7.3 价格图表
+
+ - 文件: warframe_agent/web/static/js/chart.js
+ - 使用 Chart.js 绘制价格趋势折线图
+ - 支持 24h / 7d / 30d 时间范围切换
+ - 卖价线（红色）+ 收价线（绿色）+ 价差区域填充
+
+ 7.4 首次使用引导
+
+ - 新用户打开时显示欢迎弹窗
+ - 引导设置平台偏好（PC/PS/Xbox/Switch）
+ - 推荐添加几个热门物品到收藏
+ - 展示核心功能（查价、提醒、追问）
+
+ 7.5 快捷操作
+
+ - 查价结果中的"添加收藏"、"设置提醒"按钮
+ - 收藏列表中的"查看详情"、"移除"按钮
+ - 键盘快捷键：Enter 发送、Esc 关闭面板
+
+ ---
+ Phase 8: 进阶功能
+
+ 8.1 多物品对比
+
+ - 支持"对比充沛和活力"，同时查询两个物品并排展示
+ - 对比卡片：价格、趋势、价差一目了然
+
+ 8.2 API 请求优化
+
+ - 文件: warframe_agent/market.py
+ - 添加内存缓存（TTL 60 秒），避免短时间内重复请求同一物品
+ - 添加请求限速（每秒最多 3 次），防止被 warframe.market 封禁
+ - Monitor 扫描改为并发请求（asyncio.gather）
+
+ 8.3 导出与分享
+
+ - 查价结果导出为图片（截图分享到游戏群/Discord）
+ - 每日报告在 Web 页面内直接展示，不再只写文件
+
+ 8.4 系统托盘通知（可选）
+
+ - 使用 plyer 库发送 Windows 系统通知
+ - 价格提醒触发时弹出桌面通知，即使浏览器最小化也能看到
+
+ ---
+ 关键文件清单
+
+ ┌──────┬───────────────────────────────────────────────────┐
+ │ 操作 │                       文件                        │
+ ├──────┼───────────────────────────────────────────────────┤
+ │ 新建 │ warframe_agent/web/__init__.py                    │
+ ├──────┼───────────────────────────────────────────────────┤
+ │ 新建 │ warframe_agent/web/app.py（FastAPI 应用）         │
+ ├──────┼───────────────────────────────────────────────────┤
+ │ 新建 │ warframe_agent/web/static/index.html              │
+ ├──────┼───────────────────────────────────────────────────┤
+ │ 新建 │ warframe_agent/web/static/css/style.css           │
+ ├──────┼───────────────────────────────────────────────────┤
+ │ 新建 │ warframe_agent/web/static/js/app.js（主逻辑）     │
+ ├──────┼───────────────────────────────────────────────────┤
+ │ 新建 │ warframe_agent/web/static/js/chat.js（对话组件）  │
+ ├──────┼───────────────────────────────────────────────────┤
+ │ 新建 │ warframe_agent/web/static/js/chart.js（价格图表） │
+ ├──────┼───────────────────────────────────────────────────┤
+ │ 新建 │ warframe_agent/web/static/js/sidebar.js（侧边栏） │
+     │ ├──────┼───────────────────────────────────────────────────┤                                                                       │
+     │ │ 新建 │ warframe_agent/web/static/js/chart.js（价格图表） │                                                                       │
+     │ ├──────┼───────────────────────────────────────────────────┤                                                                       │
+     │ │ 新建 │ warframe_agent/web/static/js/sidebar.js（侧边栏） │                                                                       │
+     │ ├──────┼───────────────────────────────────────────────────┤                                                                       │
+     │ │ 新建 │ start_web.py（Web 启动入口）                      │                                                                       │
+     │ ├──────┼───────────────────────────────────────────────────┤                                                                       │
+     │ │ 新建 │ start_web.bat（一键启动）                         │                                                                       │
+     │ ├──────┼───────────────────────────────────────────────────┤                                                                       │
+     │ │ 新建 │ tests/test_web_api.py                             │                                                                       │
+     │ ├──────┼───────────────────────────────────────────────────┤                                                                       │
+     │ │ 修改 │ warframe_agent/market.py（缓存 + 限速）           │                                                                       │
+     │ ├──────┼───────────────────────────────────────────────────┤                                                                       │
+     │ │ 修改 │ warframe_agent/llm.py（流式输出）                 │                                                                       │
+     │ ├──────┼───────────────────────────────────────────────────┤                                                                       │
+     │ │ 修改 │ warframe_agent/price_history.py（WAL 模式）       │                                                                       │
+     │ ├──────┼───────────────────────────────────────────────────┤                                                                       │
+     │ │ 修改 │ warframe_agent/monitor.py（WebSocket 推送）       │                                                                       │
+     │ ├──────┼───────────────────────────────────────────────────┤                                                                       │
+     │ │ 修改 │ warframe_agent/chat.py（错误信息优化）            │                                                                       │
+     │ ├──────┼───────────────────────────────────────────────────┤                                                                       │
+     │ │ 修改 │ main.py（新增 Web 启动选项）                      │                                                                       │
+     │ ├──────┼───────────────────────────────────────────────────┤                                                                       │
+     │ │ 修改 │ requirements.txt（新增依赖）                      │                                                                       │
+     │ └──────┴───────────────────────────────────────────────────┘                                                                       │
+     │                                                                                                                                    │
+     │ ---                                                                                                                                │
+     │ 实施顺序                                                                                                                           │
+     │                                                                                                                                    │
+     │ Phase 5（后端 API）→ Phase 6（前端界面）→ Phase 7（体验优化）→ Phase 8（进阶功能）                                                 │
+     │                                                                                                                                    │
+     │ 每个 Phase 完成后验证：                                                                                                            │
+     │ 1. 全量测试通过（python -m unittest discover -s tests -v）                                                                         │
+     │ 2. Phase 5：curl 测试所有 API 端点 + WebSocket 连接                                                                                │
+     │ 3. Phase 6：浏览器打开 http://localhost:8000，测试完整对话流程                                                                     │
+     │ 4. Phase 7：测试搜索建议、错误场景、图表渲染                                                                                       │
+     │ 5. Phase 8：测试并发请求、缓存命中、通知推送                                                                                       

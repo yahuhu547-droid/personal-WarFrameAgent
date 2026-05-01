@@ -1,0 +1,8 @@
+  - data/item_aliases.json：加入你自己的中文叫法、缩写、黑话。
+  - data/watchlist.json：加入你每天关心的物品。
+  - warframe_agent/config.py：修改默认模型名，例如从 qwen2.5:1.5b 换成你本地的其他模型。
+  - warframe_agent/llm.py：修改 Ollama 提示词，让它更懂你的命名习惯。
+  - reports/：查看每天生成的价格表。
+
+
+ 在当前项目上新增后端的增删改，前端添加新增按钮和删除按钮，新增按钮，后端并添加定时任务，凌晨1点，通过log.info打印输出

@@ -21,3 +21,15 @@ def resolve_with_ollama(name: str, model: str = config.MODEL_NAME) -> str | None
     text = response.get("response", "").strip().splitlines()[0]
     item_id = normalize_market_id(text)
     return item_id or None
+
+
+async def stream_ollama_chat(prompt: str, model: str = config.MODEL_NAME):
+    try:
+        import ollama
+    except ImportError as exc:
+        raise RuntimeError("Ollama Python package is not installed") from exc
+
+    client = ollama.AsyncClient()
+    async for chunk in await client.generate(model=model, prompt=prompt, stream=True):
+        if text := chunk.get("response"):
+            yield text

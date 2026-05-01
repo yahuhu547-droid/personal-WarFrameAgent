@@ -36,6 +36,7 @@ def print_menu() -> None:
     print("2. \u751f\u6210\u6bcf\u65e5\u4ef7\u683c\u8868")
     print("3. \u91cd\u5efa\u672c\u5730\u7269\u54c1\u5b57\u5178")
     print("4. \u5bf9\u8bdd\u5f0f\u4ea4\u6613\u52a9\u624b")
+    print("5. \u542f\u52a8 Web \u754c\u9762")
     print("q. \u9000\u51fa")
 
 
@@ -91,6 +92,17 @@ def handle_chat(agent: WarframeAgent) -> None:
         monitor.stop()
 
 
+def handle_web() -> None:
+    import subprocess
+    print("\n\u6b63\u5728\u542f\u52a8 Web \u754c\u9762...")
+    print("\u6d4f\u89c8\u5668\u8bbf\u95ee: http://127.0.0.1:8000")
+    print("\u6309 Ctrl+C \u505c\u6b62\u670d\u52a1\u5668")
+    try:
+        subprocess.run([sys.executable, "start_web.py"])
+    except KeyboardInterrupt:
+        print("\n\u5df2\u505c\u6b62 Web \u670d\u52a1\u5668\u3002")
+
+
 def main() -> None:
     configure_console_encoding()
     agent = WarframeAgent()
@@ -105,11 +117,13 @@ def main() -> None:
             handle_rebuild(agent)
         elif choice == "4":
             handle_chat(agent)
+        elif choice == "5":
+            handle_web()
         elif choice == "q":
             print("\u5df2\u9000\u51fa\u3002")
             break
         else:
-            print("\u65e0\u6548\u9009\u9879\uff0c\u8bf7\u8f93\u5165 1\u30012\u30013\u30014 \u6216 q\u3002")
+            print("\u65e0\u6548\u9009\u9879\uff0c\u8bf7\u8f93\u5165 1\u30012\u30013\u30014\u30015 \u6216 q\u3002")
 
 
 if __name__ == "__main__":

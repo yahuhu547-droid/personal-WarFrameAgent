@@ -25,7 +25,9 @@ class PriceHistoryDB:
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        return sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
 
     def _ensure_table(self) -> None:
         conn = self._connect()

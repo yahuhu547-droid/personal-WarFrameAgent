@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Warframe 交易助手</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <aside class="sidebar">
+            <h2>收藏列表</h2>
+            <div id="favorites-list" class="list"></div>
+            <h2>价格提醒</h2>
+            <div id="alerts-list" class="list"></div>
+        </aside>
+
+        <main class="chat-area">
+            <div class="chat-header">
+                <h1>Warframe 交易助手</h1>
+            </div>
+            <div id="chat-messages" class="chat-messages"></div>
+            <div class="chat-input-area">
+                <div class="input-wrapper">
+                    <input type="text" id="chat-input" placeholder="输入物品名称或问题..." autocomplete="off" />
+                    <div id="suggestions" class="suggestions"></div>
+                </div>
+                <button id="send-btn">发送</button>
+            </div>
+            <div class="quick-actions">
+                <button class="quick-btn" data-msg="充沛多少钱">充沛价格</button>
+                <button class="quick-btn" data-msg="扫描关注">扫描关注</button>
+                <button class="quick-btn" data-msg="/memory">查看记忆</button>
+                <button class="quick-btn" id="compare-btn">对比物品</button>
+            </div>
+        </main>
+
+        <aside class="detail-panel" id="detail-panel">
+            <button class="close-btn" id="close-detail">&times;</button>
+            <div id="detail-content"></div>
+        </aside>
+    </div>
+
+    <div id="welcome-modal" class="modal">
+        <div class="modal-content">
+            <h2>欢迎使用 Warframe 交易助手</h2>
+            <p>开始前，请选择您的游戏平台：</p>
+            <div class="platform-buttons">
+                <button class="platform-btn" data-platform="pc">PC</button>
+                <button class="platform-btn" data-platform="ps">PlayStation</button>
+                <button class="platform-btn" data-platform="xbox">Xbox</button>
+                <button class="platform-btn" data-platform="switch">Switch</button>
+            </div>
+            <button id="start-btn" class="primary-btn">开始使用</button>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/chat.js"></script>
+    <script src="/static/js/sidebar.js"></script>
+    <script src="/static/js/chart.js"></script>
+</body>
+</html>
