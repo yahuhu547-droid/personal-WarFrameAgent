@@ -420,39 +420,6 @@ function isItemNotFoundResponse(text) {
     return patterns.some(p => text.includes(p)) && text.includes('物品');
 }
 
-// ===== 物品未找到引导 =====
-
-function showItemSuggestions(query) {
-    fetch(`/api/suggest?q=${encodeURIComponent(query)}`)
-        .then(res => res.json())
-        .then(data => {
-            if (data.suggestions && data.suggestions.length > 0) {
-                const msg = document.createElement('div');
-                msg.className = 'message system';
-
-                const decoration = document.createElement('div');
-                decoration.className = 'message-decoration';
-
-                const content = document.createElement('div');
-                content.className = 'message-content';
-                content.innerHTML = `
-                    <div class="suggestions-hint">你是不是想找：</div>
-                    <div class="suggestion-buttons">
-                        ${data.suggestions.map(s => `
-                            <button class="suggestion-btn" onclick="queryItemPrice('${s}')">${s}</button>
-                        `).join('')}
-                    </div>
-                `;
-
-                msg.appendChild(decoration);
-                msg.appendChild(content);
-                chatMessages.appendChild(msg);
-                scrollToBottom();
-            }
-        })
-        .catch(() => {});
-}
-
 // ===== 搜索建议 =====
 
 async function fetchSuggestions(query) {
@@ -541,6 +508,203 @@ async function handleCompare() {
     }
 }
 
+// ===== 批量查价 =====
+
+async function handleBatchQuery() {
+    const input = prompt('输入要查询的物品名称（每行一个或用逗号分隔）：');
+    if (!input) return;
+
+    // 支持逗号、换行、空格分隔
+    const items = input.split(/[,\n\r]+/).map(s => s.trim()).filter(s => s.length > 0);
+
+    if (items.length === 0) {
+        addChatMessage('system', '请输入至少一个物品名称');
+        return;
+    }
+
+    if (items.length === 1) {
+        // 单个物品直接查询
+        chatInput.value = items[0];
+        handleSend();
+        return;
+    }
+
+    addChatMessage('user', `批量查价: ${items.join(', ')}`);
+
+    const loadingMsg = createLoadingMessage();
+    chatMessages.appendChild(loadingMsg);
+    scrollToBottom();
+
+    try {
+        const res = await fetch('/api/batch_query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(items)
+        });
+        const data = await res.json();
+        chatMessages.removeChild(loadingMsg);
+
+        let result = `**批量查价结果** (共 ${data.total} 个，成功 ${data.success} 个)\n\n`;
+
+        data.items.forEach(item => {
+            if (item.error) {
+                result += `❌ **${item.name}**: ${item.error}\n\n`;
+            } else {
+                result += `📦 **${item.name}**\n`;
+                result += `   卖价: ${item.sell_price !== null ? item.sell_price + 'p' : '暂无'}`;
+                if (item.seller) result += ` (${item.seller})`;
+                result += `\n`;
+                result += `   收价: ${item.buy_price !== null ? item.buy_price + 'p' : '暂无'}`;
+                if (item.buyer) result += ` (${item.buyer})`;
+                result += `\n`;
+
+                if (item.spread !== undefined && item.spread !== null) {
+                    result += `   价差: ${item.spread}p\n`;
+                }
+
+                // 杜卡特信息
+                if (item.ducat_value) {
+                    result += `   杜卡特: ${item.ducat_value} ducats`;
+                    if (item.ducat_efficiency) {
+                        const eff = item.ducat_efficiency;
+                        result += ` (${eff.ducats_per_plat} ducats/p)`;
+                        if (eff.recommendation === 'ducat') {
+                            result += ` → 建议拆杜卡特`;
+                        }
+                    }
+                    result += `\n`;
+                }
+
+                result += `\n`;
+            }
+        });
+
+        addChatMessage('agent', result);
+    } catch (err) {
+        chatMessages.removeChild(loadingMsg);
+        addChatMessage('system', '批量查价失败: ' + err.message);
+    }
+}
+
+// ===== 扫描关注 =====
+
+async function handleScanWatchlist() {
+    // 获取当前关注列表
+    try {
+        const res = await fetch(`${API_BASE}/api/watchlist`);
+        const data = await res.json();
+        const watchlist = data.watchlist || [];
+
+        if (watchlist.length === 0) {
+            // 如果没有关注项，提示用户添加
+            const input = prompt('当前没有关注的物品，请输入要关注的物品名称（每行一个或用逗号分隔）：');
+            if (!input) return;
+
+            const items = input.split(/[,\n\r]+/).map(s => s.trim()).filter(s => s.length > 0);
+            if (items.length === 0) return;
+
+            // 添加到关注列表
+            for (const itemName of items) {
+                try {
+                    // 解析物品ID
+                    const resolveRes = await fetch(`/api/resolve/${encodeURIComponent(itemName)}`);
+                    const resolveData = await resolveRes.json();
+                    const itemId = resolveData.found ? resolveData.item_id : itemName;
+
+                    await fetch(`${API_BASE}/api/watchlist`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            item_id: itemId,
+                            item_name: itemName,
+                            frequency: 'daily',
+                            time: '09:00',
+                            content: 'top3_buyers'
+                        })
+                    });
+                } catch (e) {
+                    console.error('添加关注失败:', itemName, e);
+                }
+            }
+
+            showToast(`已添加 ${items.length} 个关注物品`, 'success');
+            loadWatchlist();
+            return;
+        }
+
+        // 如果有关注项，显示选择界面
+        const itemNames = watchlist.map(w => w.item_name).join(', ');
+        const input = prompt(`当前关注物品：${itemNames}\n\n输入要扫描的物品名称（留空扫描全部）：`);
+
+        let itemsToScan;
+        if (!input || input.trim() === '') {
+            // 扫描全部
+            itemsToScan = watchlist.map(w => w.item_id);
+        } else {
+            // 扫描指定物品
+            const requested = input.split(/[,\n\r]+/).map(s => s.trim()).filter(s => s.length > 0);
+            itemsToScan = requested.map(name => {
+                const found = watchlist.find(w =>
+                    w.item_name.toLowerCase().includes(name.toLowerCase()) ||
+                    w.item_id.toLowerCase().includes(name.toLowerCase())
+                );
+                return found ? found.item_id : name;
+            });
+        }
+
+        if (itemsToScan.length === 0) {
+            addChatMessage('system', '没有找到要扫描的物品');
+            return;
+        }
+
+        // 发送扫描请求
+        addChatMessage('user', `扫描关注: ${itemsToScan.length} 个物品`);
+
+        const loadingMsg = createLoadingMessage();
+        chatMessages.appendChild(loadingMsg);
+        scrollToBottom();
+
+        try {
+            const batchRes = await fetch('/api/batch_query', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(itemsToScan)
+            });
+            const batchData = await batchRes.json();
+            chatMessages.removeChild(loadingMsg);
+
+            let result = `**关注扫描结果** (共 ${batchData.total} 个)\n\n`;
+
+            batchData.items.forEach(item => {
+                if (item.error) {
+                    result += `❌ **${item.name}**: ${item.error}\n\n`;
+                } else {
+                    result += `📦 **${item.name}**\n`;
+                    result += `   卖价: ${item.sell_price !== null ? item.sell_price + 'p' : '暂无'}`;
+                    if (item.seller) result += ` (${item.seller})`;
+                    result += `\n`;
+                    result += `   收价: ${item.buy_price !== null ? item.buy_price + 'p' : '暂无'}`;
+                    if (item.buyer) result += ` (${item.buyer})`;
+                    result += `\n`;
+
+                    if (item.spread !== undefined && item.spread !== null) {
+                        result += `   价差: ${item.spread}p\n`;
+                    }
+
+                    result += `\n`;
+                }
+            });
+
+            addChatMessage('agent', result);
+        } catch (err) {
+            chatMessages.removeChild(loadingMsg);
+            addChatMessage('system', '扫描失败: ' + err.message);
+        }
+    } catch (err) {
+        addChatMessage('system', '获取关注列表失败: ' + err.message);
+    }
+}
+
 function createLoadingMessage() {
     const msg = document.createElement('div');
     msg.className = 'message agent loading-message';
@@ -595,6 +759,10 @@ document.querySelectorAll('.quick-btn').forEach(btn => {
     btn.addEventListener('click', () => {
         if (btn.id === 'compare-btn') {
             handleCompare();
+        } else if (btn.id === 'batch-query-btn') {
+            handleBatchQuery();
+        } else if (btn.id === 'scan-watch-btn') {
+            handleScanWatchlist();
         } else {
             chatInput.value = btn.dataset.msg;
             handleSend();

@@ -32,11 +32,21 @@ class PriceAlert:
 
 
 @dataclass(frozen=True)
+class WatchItem:
+    item_id: str
+    item_name: str
+    frequency: str = "daily"  # daily, hourly, weekly
+    time: str = "09:00"
+    content: str = "top3_buyers"  # top3_sellers, top3_buyers, price_change, all
+
+
+@dataclass(frozen=True)
 class AgentMemory:
     preferences: TradingPreferences
     price_alerts: list[PriceAlert]
     favorite_items: list[str]
     common_questions: list[str]
+    watchlist: list[WatchItem]
 
     @classmethod
     def load(cls, path: Path = MEMORY_PATH) -> "AgentMemory":
@@ -46,11 +56,13 @@ class AgentMemory:
             data = json.load(file)
         preferences = TradingPreferences(**data.get("preferences", {}))
         alerts = [PriceAlert(**alert) for alert in data.get("price_alerts", [])]
+        watchlist = [WatchItem(**item) for item in data.get("watchlist", [])]
         return cls(
             preferences=preferences,
             price_alerts=alerts,
             favorite_items=list(data.get("favorite_items", [])),
             common_questions=list(data.get("common_questions", [])),
+            watchlist=watchlist,
         )
 
     @classmethod
@@ -60,6 +72,7 @@ class AgentMemory:
             price_alerts=[],
             favorite_items=[],
             common_questions=[],
+            watchlist=[],
         )
 
     def save(self, path: Path = MEMORY_PATH) -> None:
@@ -84,6 +97,16 @@ class AgentMemory:
             ],
             "favorite_items": list(self.favorite_items),
             "common_questions": list(self.common_questions),
+            "watchlist": [
+                {
+                    "item_id": item.item_id,
+                    "item_name": item.item_name,
+                    "frequency": item.frequency,
+                    "time": item.time,
+                    "content": item.content,
+                }
+                for item in self.watchlist
+            ],
         }
 
     def with_updated_preferences(
@@ -137,3 +160,23 @@ class AgentMemory:
 
     def alerts_for(self, item_id: str, current_price: int) -> list[PriceAlert]:
         return [alert for alert in self.price_alerts if alert.item_id == item_id and alert.matches(current_price)]
+
+    def with_watch_item(self, item_id: str, item_name: str, frequency: str = "daily", time: str = "09:00", content: str = "top3_buyers") -> "AgentMemory":
+        # 检查是否已存在相同的关注项
+        for item in self.watchlist:
+            if item.item_id == item_id:
+                return self
+        watch_item = WatchItem(item_id=item_id, item_name=item_name, frequency=frequency, time=time, content=content)
+        return replace(self, watchlist=[*self.watchlist, watch_item])
+
+    def without_watch_item(self, item_id: str) -> "AgentMemory":
+        return replace(self, watchlist=[item for item in self.watchlist if item.item_id != item_id])
+
+    def with_updated_watch_item(self, item_id: str, **kwargs) -> "AgentMemory":
+        watchlist = []
+        for item in self.watchlist:
+            if item.item_id == item_id:
+                watchlist.append(replace(item, **kwargs))
+            else:
+                watchlist.append(item)
+        return replace(self, watchlist=watchlist)

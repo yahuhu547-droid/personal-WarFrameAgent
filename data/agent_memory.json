@@ -12,9 +12,7 @@
       "note": "充沛低于45提醒"
     }
   ],
-  "favorite_items": [
-    "arcane_energize"
-  ],
+  "favorite_items": [],
   "common_questions": [
     "我有 Lex Prime 蓝图和枪管，还差多少钱做一套",
     "Lex Prime 一套多少钱",
@@ -28,5 +26,6 @@
     "Lex Prime 一套最低卖多少",
     "伏特p机体多少钱",
     "伏特p一套现在多少钱"
-  ]
+  ],
+  "watchlist": []
 }

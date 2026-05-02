@@ -151,6 +151,7 @@ warframe_agent/        # 核心模块
 tests/                 # 30 个测试文件，95 个测试用例
 data/                  # 物品数据、别名映射、记忆存储
 tools/                 # Ollama 模型构建 + 数据生成脚本
+md/                    #md文档存放位置
 ```
 
 ## 测试

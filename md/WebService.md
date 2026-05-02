@@ -1168,6 +1168,643 @@ POST /api/aliases {name: "充沛", item_id: "arcane_energize"}
 
 ---
 
-**文档版本**：v3.2
-**最后更新**：2026-05-01
+## Phase 14: 交易效率工具（已实现）
+
+**目标**: 为玩家提供更高效的交易决策和管理工具。
+
+**实现日期**: 2026-05-02
+
+### 14.1 杜卡特计算器 ✅
+
+**功能**: 在物品详情卡片中显示杜卡特价值和效率分析，帮助玩家判断拆成杜卡特还是直接卖白金更划算。
+
+**后端实现**:
+
+| 端点 | 方法 | 功能 |
+|------|------|------|
+| `/api/ducats/{item_id}` | GET | 获取物品的杜卡特价值和效率分析 |
+| `/api/ducats/batch` | POST | 批量获取物品的杜卡特价值 |
+
+**核心函数**:
+```python
+def get_ducat_value(item_id: str) -> int | None:
+    """获取物品的杜卡特价值"""
+    # 静态映射 + 模式推断
+    # Prime 部件: 45 ducats
+    # 赋能 (Arcane): 100 ducats
+
+def calculate_ducat_efficiency(platinum_price: int, ducat_value: int) -> dict:
+    """计算杜卡特效率（每白金获得的杜卡特数）"""
+    # 效率 ≥ 3: 建议拆成杜卡特
+    # 效率 < 3: 建议直接卖白金
+```
+
+**前端显示**:
+```
+┌─────────────────────────────────────┐
+│  ◆ 杜卡特分析                       │
+│  ─────────────────────────────────  │
+│  杜卡特价值        45 ducats        │
+│  ─────────────────────────────────  │
+│  杜卡特效率        3.0 ducats/p     │
+│  ✓ 建议拆成杜卡特                   │
+│  每白金获得 3.0 杜卡特 (高于3:1阈值) │
+└─────────────────────────────────────┘
+```
+
+**判断逻辑**:
+- 每白金 ≥ 3 杜卡特: 建议拆成杜卡特（绿色提示）
+- 每白金 < 3 杜卡特: 建议直接卖白金（蓝色提示）
+
+**关键文件变更**:
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `warframe_agent/web/app.py` | 杜卡特计算函数、API 端点 |
+| 修改 | `warframe_agent/web/static/js/chart.js` | 杜卡特信息渲染、CSS 样式 |
+| 新增 | `data/ducat_values.json` | 杜卡特静态映射数据 |
+
+---
+
+### 14.2 批量查价 ✅
+
+**功能**: 一次性查询多个物品价格，支持逗号或换行分隔，适合整理库存时使用。
+
+**后端实现**:
+
+| 端点 | 方法 | 功能 |
+|------|------|------|
+| `/api/batch_query` | POST | 批量查询物品价格（最多 10 个） |
+
+**返回数据**:
+```json
+{
+  "items": [
+    {
+      "name": "充沛赋能",
+      "item_id": "arcane_energize",
+      "sell_price": 45,
+      "buy_price": 38,
+      "seller": "Player1",
+      "buyer": "Player2",
+      "spread": 7,
+      "ducat_value": 100,
+      "ducat_efficiency": { "ducats_per_plat": 2.22, "recommendation": "sell" }
+    }
+  ],
+  "total": 3,
+  "success": 3
+}
+```
+
+**前端交互**:
+- 侧边栏新增"批量查价"快捷按钮
+- 弹窗输入框支持多行输入（逗号、换行、空格分隔）
+- 结果以 Markdown 格式显示，包含价格、卖家/买家、杜卡特信息
+
+**关键文件变更**:
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `warframe_agent/web/app.py` | batch_query 端点 |
+| 修改 | `warframe_agent/web/static/js/chat.js` | handleBatchQuery 函数 |
+| 修改 | `warframe_agent/web/static/index.html` | 批量查价按钮 |
+
+---
+
+### 14.3 交易历史记录 ✅
+
+**功能**: 记录玩家实际完成的交易，用于统计和回溯。
+
+**后端实现**:
+
+**新增文件**: `warframe_agent/trade_history.py`
+
+```python
+@dataclass(frozen=True)
+class TradeRecord:
+    id: int
+    item_id: str
+    item_name: str
+    trade_type: str  # "buy" or "sell"
+    price: int
+    player_name: str
+    timestamp: str
+    notes: str
+
+class TradeHistoryDB:
+    def add_trade(...) -> int
+    def get_recent_trades(limit) -> list[TradeRecord]
+    def get_trades_by_item(item_id) -> list[TradeRecord]
+    def get_trade_stats() -> dict
+    def delete_trade(trade_id) -> bool
+```
+
+| 端点 | 方法 | 功能 |
+|------|------|------|
+| `/api/trades` | GET | 获取最近的交易记录 |
+| `/api/trades` | POST | 添加交易记录 |
+| `/api/trades/{trade_id}` | DELETE | 删除交易记录 |
+| `/api/trades/stats` | GET | 获取交易统计信息 |
+| `/api/trades/item/{item_id}` | GET | 获取指定物品的交易记录 |
+
+**前端显示**:
+```
+┌─────────────────────────────────────┐
+│  交易历史                    [+ 记录] │
+│  ─────────────────────────────────  │
+│  总交易  买入  卖出  净收入           │
+│    12     5     7    +156p          │
+│  ─────────────────────────────────  │
+│  📤 卖出  充沛赋能    45p           │
+│     玩家: Player1  2026-05-01      │
+│  ─────────────────────────────────  │
+│  📥 买入  川流不息    28p           │
+│     玩家: Player2  2026-04-28      │
+└─────────────────────────────────────┘
+```
+
+**关键文件变更**:
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 新增 | `warframe_agent/trade_history.py` | 交易历史数据库模块 |
+| 修改 | `warframe_agent/web/app.py` | 交易历史 API 端点 |
+| 修改 | `warframe_agent/web/static/index.html` | 交易历史按钮 |
+| 修改 | `warframe_agent/web/static/js/sidebar.js` | 交易历史前端逻辑、CSS 样式 |
+
+---
+
+### 14.4 套利检测 ✅
+
+**功能**: 自动检测收藏物品的低买高卖机会，帮助玩家发现盈利机会。
+
+**后端实现**:
+
+| 端点 | 方法 | 功能 |
+|------|------|------|
+| `/api/arbitrage` | GET | 检测套利机会（支持 min_profit 参数） |
+| `/api/arbitrage/scan` | GET | 从 watchlist 扫描套利机会 |
+
+**判断逻辑**:
+- 计算每个物品的最低卖价和最高收价
+- 利润 = 最低卖价 - 最高收价
+- 利润 ≥ 3p 的机会会被标记
+
+**前端显示**:
+```
+┌─────────────────────────────────────┐
+│  套利机会                           │
+│  低买高卖的盈利机会                  │
+│  ─────────────────────────────────  │
+│  发现机会: 5    最低利润: 3p        │
+│  ─────────────────────────────────  │
+│  充沛赋能                    +7p    │
+│  买入 38p (Player2) → 卖出 45p     │
+│  杜卡特: 100 (2.22 ducats/p)       │
+│  [复制买入私聊] [复制卖出私聊]      │
+└─────────────────────────────────────┘
+```
+
+**关键文件变更**:
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `warframe_agent/web/app.py` | 套利检测 API 端点 |
+| 修改 | `warframe_agent/web/static/index.html` | 套利检测按钮 |
+| 修改 | `warframe_agent/web/static/js/sidebar.js` | 套利检测前端逻辑、CSS 样式 |
+
+---
+
+### 14.5 收藏夹仪表盘 ✅
+
+**功能**: 将所有收藏物品的价格变化汇总到一个仪表盘，提供总览视角。
+
+**后端实现**:
+- 复用 `/api/memory` 和 `/api/favorites_prices` 端点
+
+**前端显示**:
+```
+┌─────────────────────────────────────┐
+│  收藏夹仪表盘                       │
+│  收藏物品价格概览                    │
+│  ─────────────────────────────────  │
+│  总价值      物品数    有价格        │
+│  1,234p       12        10         │
+│  ─────────────────────────────────  │
+│  价格变动                           │
+│  ▲ 上涨  ─ 持平  ▼ 下跌            │
+│    3       5        2              │
+│  ─────────────────────────────────  │
+│  物品列表                           │
+│  充沛赋能              45p ▲3      │
+│  川流不息              29p ▼1      │
+│  活力赋能              52p         │
+│  ─────────────────────────────────  │
+│  [导出数据] [刷新数据]              │
+└─────────────────────────────────────┘
+```
+
+**功能特性**:
+- 显示收藏物品总价值
+- 统计价格变动（上涨/持平/下跌）
+- 物品列表带价格变化指示器
+- 支持一键导出数据
+
+**关键文件变更**:
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `warframe_agent/web/static/index.html` | 仪表盘按钮 |
+| 修改 | `warframe_agent/web/static/js/sidebar.js` | 仪表盘前端逻辑、CSS 样式 |
+
+---
+
+### 14.6 私聊快捷复制增强 ✅
+
+**功能**: 优化私聊命令的复制体验，确保一键复制功能正常工作。
+
+**实现细节**:
+- 物品详情卡片中的私聊按钮使用 `copyToClipboard()` 函数
+- 私聊命令自动检测和高亮显示
+- 复制成功后显示 Toast 提示
+
+**关键文件变更**:
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `warframe_agent/web/static/js/chart.js` | 优化 copyToClipboard 函数 |
+
+---
+
+### Phase 14 实施总结
+
+| 功能 | 状态 | 后端 | 前端 | 数据 |
+|------|------|------|------|------|
+| 杜卡特计算器 | ✅ | 2 个端点 | 详情卡片增强 | 静态映射 |
+| 批量查价 | ✅ | 1 个端点 | 快捷按钮 + 弹窗 | - |
+| 交易历史 | ✅ | 5 个端点 | 侧边栏面板 | SQLite 新表 |
+| 套利检测 | ✅ | 2 个端点 | 侧边栏面板 | - |
+| 收藏仪表盘 | ✅ | 复用现有 | 侧边栏面板 | - |
+| 私聊复制 | ✅ | 无改动 | 函数优化 | - |
+
+**测试结果**: 102 个测试全部通过
+
+**新增文件**:
+- `warframe_agent/trade_history.py` - 交易历史数据库模块
+- `data/ducat_values.json` - 杜卡特静态映射数据
+
+**修改文件**:
+- `warframe_agent/web/app.py` - 新增 10 个 API 端点
+- `warframe_agent/web/static/index.html` - 新增 4 个侧边栏按钮
+- `warframe_agent/web/static/js/chart.js` - 杜卡特信息渲染
+- `warframe_agent/web/static/js/chat.js` - 批量查价功能
+- `warframe_agent/web/static/js/sidebar.js` - 交易历史、套利、仪表盘
+
+---
+
+## Phase 15: 交互体验优化与 Bug 修复
+
+**目标**: 修复关键 Bug，优化侧边栏布局，增强物品信息展示。
+
+**实现日期**: 2026-05-02
+
+### 15.1 修复收藏和提醒移除功能 ✅
+
+**问题**: 收藏列表和价格提醒的移除功能无效，弹窗显示后点击确定无反应。
+
+**根因**: `app.py` 中调用的 AgentMemory 方法名不匹配：
+- `memory.remove_favorite()` → 应为 `memory.without_favorite_item()`
+- `memory.add_alert()` → 应为 `memory.with_price_alert()`
+- `memory.remove_alert()` → 应为 `memory.without_price_alert()`
+
+**修复**:
+```python
+# 修复前（错误）
+memory = memory.remove_favorite(request.item_id)
+memory = memory.add_alert(alert)
+memory = memory.remove_alert(alert)
+
+# 修复后（正确）
+memory = memory.without_favorite_item(request.item_id)
+memory = memory.with_price_alert(request.item_id, request.direction, request.price)
+memory = memory.without_price_alert(request.item_id, request.direction, request.price)
+```
+
+**关键文件变更**:
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `warframe_agent/web/app.py` | 修复 3 个方法调用 |
+
+---
+
+### 15.2 侧边栏布局重新设计 ✅
+
+**问题**: 侧边栏底部按钮过多（8个），显得拥挤。
+
+**方案**: 将功能整合为 3 个主按钮 + 弹出菜单。
+
+**新布局**:
+```
+┌─────────────────────────────┐
+│  收藏列表            [✏️] [+] │
+│  ─────────────────────────  │
+│  收藏物品列表...              │
+│  ─────────────────────────  │
+│  价格提醒               [+]  │
+│  ─────────────────────────  │
+│  提醒列表...                 │
+│  ─────────────────────────  │
+│  定时关注               [+]  │
+│  ─────────────────────────  │
+│  关注列表...                 │
+│  ─────────────────────────  │
+│  [🌙] [☰] [⚙️]             │
+│  ● 系统在线                  │
+└─────────────────────────────┘
+```
+
+**更多功能菜单**（点击 ☰ 展开）:
+- 📊 每日报告
+- 📋 交易历史
+- 💰 套利检测
+- 📈 收藏仪表盘
+- 🏷️ 自定义别名
+- 🗑️ 清空对话
+
+**关键文件变更**:
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `warframe_agent/web/static/index.html` | 重构侧边栏 HTML、添加更多功能菜单 |
+| 修改 | `warframe_agent/web/static/css/style.css` | 侧边栏按钮、菜单样式 |
+| 修改 | `warframe_agent/web/static/js/app.js` | 菜单切换、模态框函数 |
+
+---
+
+### 15.3 自定义价格提醒（带备注）✅
+
+**功能**: 用户可以自定义设置价格提醒，并添加备注信息。
+
+**API 更新**:
+```python
+class AlertRequest(BaseModel):
+    item_id: str
+    direction: str
+    price: int
+    note: str = ""  # 新增备注字段
+```
+
+**前端交互**:
+```
+┌─────────────────────────────┐
+│  添加价格提醒                 │
+│  ─────────────────────────  │
+│  物品名称                    │
+│  [输入物品名称           ▼]  │
+│  ─────────────────────────  │
+│  提醒方向                    │
+│  [低于目标价格时提醒      ▼]  │
+│  ─────────────────────────  │
+│  目标价格 (白金)              │
+│  [输入价格              ]    │
+│  ─────────────────────────  │
+│  备注 (可选)                  │
+│  [添加备注信息           ]    │
+│  ─────────────────────────  │
+│  [取消]  [添加提醒]           │
+└─────────────────────────────┘
+```
+
+**侧边栏显示**:
+```
+┌─────────────────────────────┐
+│  充沛赋能              📉    │
+│  低于 45p 时提醒 - 充沛低于45提醒 │
+│  [查价] [移除]               │
+└─────────────────────────────┘
+```
+
+**关键文件变更**:
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `warframe_agent/web/app.py` | AlertRequest 添加 note 字段 |
+| 修改 | `warframe_agent/web/static/js/app.js` | addAlert 支持 note 参数 |
+| 修改 | `warframe_agent/web/static/js/sidebar.js` | 显示备注信息 |
+
+---
+
+### 15.4 优化提醒列表显示 ✅
+
+**问题**: 自定义价格提醒过多时影响观感。
+
+**方案**: 添加"展开/收起"功能，默认显示 5 个提醒。
+
+**实现**:
+```javascript
+const MAX_VISIBLE_ALERTS = 5;
+let showAllAlerts = false;
+
+function renderAlerts(alerts) {
+    // 默认显示前 5 个
+    const visibleAlerts = showAllAlerts ? alerts : alerts.slice(0, MAX_VISIBLE_ALERTS);
+
+    // 渲染列表...
+
+    // 添加展开/收起按钮
+    if (alerts.length > MAX_VISIBLE_ALERTS) {
+        const toggleBtn = document.createElement('div');
+        toggleBtn.className = 'list-toggle';
+        toggleBtn.innerHTML = `
+            <button class="toggle-btn" onclick="toggleAlertsView()">
+                ${showAllAlerts ? '收起' : `查看全部 (${alerts.length})`}
+            </button>
+        `;
+        list.appendChild(toggleBtn);
+    }
+}
+```
+
+**CSS 样式**:
+```css
+.list-toggle {
+    display: flex;
+    justify-content: center;
+    padding: 8px 0;
+}
+
+.toggle-btn {
+    padding: 4px 12px;
+    background: rgba(212, 167, 55, 0.1);
+    border: 1px solid rgba(212, 167, 55, 0.2);
+    border-radius: 3px;
+    color: var(--gold-primary);
+    font-size: 11px;
+    cursor: pointer;
+}
+```
+
+**关键文件变更**:
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `warframe_agent/web/static/js/sidebar.js` | 添加展开/收起逻辑 |
+| 修改 | `warframe_agent/web/static/css/style.css` | 添加 toggle 按钮样式 |
+
+---
+
+### 15.5 自定义关注与定时推送 ✅
+
+**功能**: 用户可以添加自己想要长期关注的物品，支持自定义定时推送。
+
+**数据模型**:
+```python
+@dataclass(frozen=True)
+class WatchItem:
+    item_id: str
+    item_name: str
+    frequency: str = "daily"  # daily, hourly, weekly
+    time: str = "09:00"
+    content: str = "top3_buyers"  # top3_sellers, top3_buyers, price_change, all
+```
+
+**API 端点**:
+| 端点 | 方法 | 功能 |
+|------|------|------|
+| `/api/watchlist` | GET | 获取关注列表 |
+| `/api/watchlist` | POST | 添加关注项 |
+| `/api/watchlist/{item_id}` | DELETE | 移除关注项 |
+
+**前端交互**:
+```
+┌─────────────────────────────┐
+│  添加定时关注                 │
+│  ─────────────────────────  │
+│  物品名称                    │
+│  [输入物品名称           ▼]  │
+│  ─────────────────────────  │
+│  关注频率                    │
+│  [每天                   ▼]  │
+│  ─────────────────────────  │
+│  推送时间                    │
+│  [09:00                ]    │
+│  ─────────────────────────  │
+│  关注内容                    │
+│  [前3个最高买家          ▼]  │
+│  ─────────────────────────  │
+│  [取消]  [添加关注]           │
+└─────────────────────────────┘
+```
+
+**侧边栏显示**:
+```
+┌─────────────────────────────┐
+│  充沛赋能              每天  │
+│  09:00 | 前3买家              │
+│  [移除]                      │
+└─────────────────────────────┘
+```
+
+**关键文件变更**:
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `warframe_agent/memory.py` | 添加 WatchItem 类、watchlist 字段 |
+| 修改 | `warframe_agent/web/app.py` | watchlist API 端点 |
+| 修改 | `warframe_agent/web/static/js/app.js` | 改用服务器端 API |
+| 修改 | `tests/test_web_api.py` | 更新测试用例 |
+| 修改 | `tests/test_chat_memory_integration.py` | 更新测试用例 |
+
+---
+
+### 15.6 赋能/Mod 等级显示 ✅
+
+**功能**: 在物品详情卡片中显示赋能和 Mod 的等级信息。
+
+**物品类型检测**:
+```python
+def get_item_type_info(item_id: str) -> dict | None:
+    """获取物品类型和最大等级信息"""
+    # 检查是否是赋能 (Arcane) - max_rank = 5
+    # 检查是否是 Mod - max_rank = 10
+```
+
+**前端显示**:
+```
+┌─────────────────────────────┐
+│  充沛赋能                    │
+│  ⚡ 赋能  Rank 5/5           │
+│  ─────────────────────────  │
+│  卖价    收价    价差         │
+│  45p     38p     7p         │
+│  ─────────────────────────  │
+│  📊 等级信息                  │
+│  ─────────────────────────  │
+│  类型        赋能             │
+│  稀有度      传说             │
+│  最大等级    5/5              │
+│  ─────────────────────────  │
+│  💡 赋能满级为 5/5，需要 6    │
+│     个相同赋能融合            │
+└─────────────────────────────┘
+```
+
+**Mod 显示**:
+```
+┌─────────────────────────────┐
+│  活力                        │
+│  🔧 Mod  Rank 10/10         │
+│  ─────────────────────────  │
+│  📊 等级信息                  │
+│  ─────────────────────────  │
+│  类型        Mod              │
+│  稀有度      普通             │
+│  最大等级    10/10            │
+│  ─────────────────────────  │
+│  💡 Mod 满级为 10/10，需要   │
+│     消耗内融核心升级          │
+└─────────────────────────────┘
+```
+
+**API 返回数据**:
+```json
+{
+    "item_id": "arcane_energize",
+    "item_type": "arcane",
+    "item_type_display": "赋能",
+    "max_rank": 5,
+    "rarity": "LEGENDARY"
+}
+```
+
+**关键文件变更**:
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `warframe_agent/web/app.py` | get_item_type_info 函数、API 返回 |
+| 修改 | `warframe_agent/web/static/js/chart.js` | 等级信息渲染、CSS 样式 |
+
+---
+
+### Phase 15 实施总结
+
+| 功能 | 状态 | 后端 | 前端 | 说明 |
+|------|------|------|------|------|
+| 修复移除功能 | ✅ | 方法名修复 | - | 关键 Bug |
+| 侧边栏重构 | ✅ | - | HTML/CSS/JS | 布局优化 |
+| 价格提醒备注 | ✅ | note 字段 | 模态框 | 功能增强 |
+| 提醒列表优化 | ✅ | - | 展开/收起 | 观感优化 |
+| 自定义关注 | ✅ | watchlist API | 服务器端存储 | 新功能 |
+| 等级显示 | ✅ | 类型检测 | 详情卡片 | 信息增强 |
+
+**测试结果**: 102 个测试全部通过
+
+**新增文件**:
+- 无
+
+**修改文件**:
+- `warframe_agent/memory.py` - 添加 WatchItem 类
+- `warframe_agent/web/app.py` - watchlist API、等级检测、Bug 修复
+- `warframe_agent/web/static/index.html` - 侧边栏重构
+- `warframe_agent/web/static/css/style.css` - 新增样式
+- `warframe_agent/web/static/js/app.js` - 服务器端 watchlist
+- `warframe_agent/web/static/js/sidebar.js` - 展开/收起、备注显示
+- `warframe_agent/web/static/js/chart.js` - 等级信息渲染
+- `tests/test_web_api.py` - 更新测试
+- `tests/test_chat_memory_integration.py` - 更新测试
+
+---
+
+**文档版本**：v3.4
+**最后更新**：2026-05-02
 **维护者**：Claude (Frontend Design Specialist)

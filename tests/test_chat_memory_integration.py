@@ -51,6 +51,7 @@ class ChatMemoryIntegrationTests(unittest.TestCase):
             price_alerts=[PriceAlert("arcane_energize", "below", 45, "充沛低于45提醒")],
             favorite_items=["arcane_energize"],
             common_questions=[],
+            watchlist=[],
         )
         prompts = []
         agent = ChatAgent(

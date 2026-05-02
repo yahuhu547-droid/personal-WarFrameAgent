@@ -39,11 +39,11 @@ async function removeFavorite(itemId) {
     return await res.json();
 }
 
-async function addAlert(itemId, direction, price) {
+async function addAlert(itemId, direction, price, note = '') {
     const res = await fetch(`${API_BASE}/api/alert`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ item_id: itemId, direction, price })
+        body: JSON.stringify({ item_id: itemId, direction, price, note })
     });
     return await res.json();
 }
@@ -1156,3 +1156,428 @@ document.head.appendChild(style);
 if (Notification.permission === 'default') {
     Notification.requestPermission();
 }
+
+// ===== 更多功能菜单 =====
+
+function toggleMoreMenu() {
+    const menu = document.getElementById('more-menu');
+    menu.classList.toggle('active');
+}
+
+// 点击其他地方关闭菜单
+document.addEventListener('click', (e) => {
+    const menu = document.getElementById('more-menu');
+    const btn = document.getElementById('more-menu-btn');
+    if (menu && !menu.contains(e.target) && (!btn || !btn.contains(e.target))) {
+        menu.classList.remove('active');
+    }
+});
+
+// 更多菜单按钮事件
+document.getElementById('more-menu-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleMoreMenu();
+});
+
+// ===== 搜索建议（模态框用） =====
+
+async function fetchSuggestionsForModal(query, suggestionsDiv, input) {
+    if (!query || query.length < 1) {
+        suggestionsDiv.classList.remove('active');
+        return;
+    }
+
+    try {
+        const res = await fetch(`/api/suggest?q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+
+        if (!data.suggestions || data.suggestions.length === 0) {
+            suggestionsDiv.classList.remove('active');
+            return;
+        }
+
+        suggestionsDiv.innerHTML = '';
+        data.suggestions.forEach(item => {
+            const div = document.createElement('div');
+            div.className = 'suggestion-item';
+            div.textContent = item;
+            div.addEventListener('click', () => {
+                input.value = item;
+                suggestionsDiv.classList.remove('active');
+            });
+            suggestionsDiv.appendChild(div);
+        });
+
+        suggestionsDiv.classList.add('active');
+    } catch (err) {
+        suggestionsDiv.classList.remove('active');
+    }
+}
+
+// ===== 加载关注列表 =====
+
+async function loadWatchlist() {
+    const list = document.getElementById('watchlist');
+    if (!list) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/api/watchlist`);
+        const data = await res.json();
+        const watchlist = data.watchlist || [];
+        const header = list.previousElementSibling;
+
+        if (watchlist.length === 0) {
+            list.classList.add('collapsed');
+            if (header) header.classList.add('collapsed');
+            return;
+        }
+
+        list.classList.remove('collapsed');
+        if (header) header.classList.remove('collapsed');
+
+        list.innerHTML = '';
+        watchlist.forEach((watch, index) => {
+            const div = document.createElement('div');
+            div.className = 'list-item watch-item';
+            div.style.animationDelay = `${index * 100}ms`;
+
+            const frequencyText = {
+                'daily': '每天',
+                'hourly': '每小时',
+                'weekly': '每周'
+            }[watch.frequency] || watch.frequency;
+
+            const contentText = {
+                'top3_sellers': '前3卖家',
+                'top3_buyers': '前3买家',
+                'price_change': '价格变动',
+                'all': '全部'
+            }[watch.content] || watch.content;
+
+            div.innerHTML = `
+                <div class="item-header">
+                    <span class="item-name">${watch.item_name}</span>
+                    <span class="item-badge">${frequencyText}</span>
+                </div>
+                <div class="item-sub">${watch.time} | ${contentText}</div>
+                <div class="item-actions">
+                    <button class="action-btn danger" onclick="event.stopPropagation(); removeWatchItem('${watch.item_id}')">
+                        <span>移除</span>
+                    </button>
+                </div>
+            `;
+
+            list.appendChild(div);
+        });
+    } catch (err) {
+        console.error('加载关注列表失败:', err);
+        list.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">⚠️</div>
+                <div class="empty-state-text">加载失败</div>
+                <div class="empty-state-sub">请刷新页面重试</div>
+            </div>
+        `;
+    }
+}
+
+async function removeWatchItem(itemId) {
+    if (!confirm('确定要移除此关注吗？')) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/api/watchlist/${itemId}`, {
+            method: 'DELETE',
+        });
+
+        if (res.ok) {
+            showToast('已移除关注', 'success');
+            loadWatchlist();
+        } else {
+            showToast('移除失败', 'error');
+        }
+    } catch (err) {
+        showToast('移除失败', 'error');
+    }
+}
+
+// ===== 按钮事件绑定 =====
+
+// 确保函数在全局作用域（HTML onclick 需要）
+window.showAddFavoriteModal = function() {
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.id = 'add-favorite-modal';
+    modal.innerHTML = `
+        <div class="modal-content add-modal-content">
+            <div class="modal-decoration-top"></div>
+            <button class="modal-close-btn" onclick="document.getElementById('add-favorite-modal').remove()">&times;</button>
+            <h2>添加收藏</h2>
+            <div class="add-modal-form">
+                <div class="form-group">
+                    <label class="form-label">物品名称</label>
+                    <input type="text" id="fav-item-input" class="form-input" placeholder="输入物品名称（如：充沛赋能）" autocomplete="off">
+                    <div id="fav-suggestions" class="suggestions"></div>
+                </div>
+                <div class="form-actions">
+                    <button class="form-btn secondary" onclick="document.getElementById('add-favorite-modal').remove()">取消</button>
+                    <button class="form-btn primary" onclick="confirmAddFavorite()">添加</button>
+                </div>
+            </div>
+            <div class="modal-decoration-bottom"></div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    const input = document.getElementById('fav-item-input');
+    const suggestions = document.getElementById('fav-suggestions');
+    let debounceTimer;
+
+    input.addEventListener('input', (e) => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            fetchSuggestionsForModal(e.target.value, suggestions, input);
+        }, 300);
+    });
+
+    input.focus();
+};
+
+window.showAlertModal = function() {
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.id = 'add-alert-modal';
+    modal.innerHTML = `
+        <div class="modal-content add-modal-content">
+            <div class="modal-decoration-top"></div>
+            <button class="modal-close-btn" onclick="document.getElementById('add-alert-modal').remove()">&times;</button>
+            <h2>添加价格提醒</h2>
+            <div class="add-modal-form">
+                <div class="form-group">
+                    <label class="form-label">物品名称</label>
+                    <input type="text" id="alert-item-input" class="form-input" placeholder="输入物品名称" autocomplete="off">
+                    <div id="alert-suggestions" class="suggestions"></div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">提醒方向</label>
+                    <select id="alert-direction" class="form-select">
+                        <option value="below">低于目标价格时提醒</option>
+                        <option value="above">高于目标价格时提醒</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">目标价格 (白金)</label>
+                    <input type="number" id="alert-price" class="form-input" placeholder="输入价格" min="1">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">备注 (可选)</label>
+                    <input type="text" id="alert-note" class="form-input" placeholder="添加备注信息">
+                </div>
+                <div class="form-actions">
+                    <button class="form-btn secondary" onclick="document.getElementById('add-alert-modal').remove()">取消</button>
+                    <button class="form-btn primary" onclick="confirmAddAlert()">添加提醒</button>
+                </div>
+            </div>
+            <div class="modal-decoration-bottom"></div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    const input = document.getElementById('alert-item-input');
+    const suggestions = document.getElementById('alert-suggestions');
+    let debounceTimer;
+
+    input.addEventListener('input', (e) => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            fetchSuggestionsForModal(e.target.value, suggestions, input);
+        }, 300);
+    });
+
+    input.focus();
+};
+
+window.showAddWatchModal = function() {
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.id = 'add-watch-modal';
+    modal.innerHTML = `
+        <div class="modal-content add-modal-content">
+            <div class="modal-decoration-top"></div>
+            <button class="modal-close-btn" onclick="document.getElementById('add-watch-modal').remove()">&times;</button>
+            <h2>添加定时关注</h2>
+            <div class="add-modal-form">
+                <div class="form-group">
+                    <label class="form-label">物品名称</label>
+                    <input type="text" id="watch-item-input" class="form-input" placeholder="输入物品名称" autocomplete="off">
+                    <div id="watch-suggestions" class="suggestions"></div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">关注频率</label>
+                    <select id="watch-frequency" class="form-select">
+                        <option value="daily">每天</option>
+                        <option value="hourly">每小时</option>
+                        <option value="weekly">每周</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">推送时间</label>
+                    <input type="time" id="watch-time" class="form-input" value="09:00">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">关注内容</label>
+                    <select id="watch-content" class="form-select">
+                        <option value="top3_sellers">前3个最低卖家</option>
+                        <option value="top3_buyers">前3个最高买家</option>
+                        <option value="price_change">价格变动</option>
+                        <option value="all">全部信息</option>
+                    </select>
+                </div>
+                <div class="form-actions">
+                    <button class="form-btn secondary" onclick="document.getElementById('add-watch-modal').remove()">取消</button>
+                    <button class="form-btn primary" onclick="confirmAddWatch()">添加关注</button>
+                </div>
+            </div>
+            <div class="modal-decoration-bottom"></div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    const input = document.getElementById('watch-item-input');
+    const suggestions = document.getElementById('watch-suggestions');
+    let debounceTimer;
+
+    input.addEventListener('input', (e) => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            fetchSuggestionsForModal(e.target.value, suggestions, input);
+        }, 300);
+    });
+
+    input.focus();
+};
+
+// 确认添加函数
+window.confirmAddFavorite = async function() {
+    const input = document.getElementById('fav-item-input');
+    const itemName = input.value.trim();
+    if (!itemName) {
+        showToast('请输入物品名称', 'warning');
+        return;
+    }
+
+    try {
+        const res = await fetch(`/api/resolve/${encodeURIComponent(itemName)}`);
+        const data = await res.json();
+
+        let itemId;
+        if (data.found) {
+            itemId = data.item_id;
+        } else {
+            itemId = itemName;
+        }
+
+        await addFavorite(itemId);
+        showToast(`已添加收藏: ${itemName}`, 'success');
+        document.getElementById('add-favorite-modal').remove();
+        loadSidebar();
+    } catch (err) {
+        showToast('添加收藏失败', 'error');
+    }
+};
+
+window.confirmAddAlert = async function() {
+    const itemInput = document.getElementById('alert-item-input');
+    const directionSelect = document.getElementById('alert-direction');
+    const priceInput = document.getElementById('alert-price');
+    const noteInput = document.getElementById('alert-note');
+
+    const itemName = itemInput.value.trim();
+    const direction = directionSelect.value;
+    const price = parseInt(priceInput.value);
+    const note = noteInput.value.trim();
+
+    if (!itemName) {
+        showToast('请输入物品名称', 'warning');
+        return;
+    }
+
+    if (!price || price <= 0) {
+        showToast('请输入有效的价格', 'warning');
+        return;
+    }
+
+    try {
+        const res = await fetch(`/api/resolve/${encodeURIComponent(itemName)}`);
+        const data = await res.json();
+
+        let itemId;
+        if (data.found) {
+            itemId = data.item_id;
+        } else {
+            itemId = itemName;
+        }
+
+        await addAlert(itemId, direction, price, note);
+        showToast(`已添加提醒: ${itemName} ${direction === 'below' ? '低于' : '高于'} ${price}p`, 'success');
+        document.getElementById('add-alert-modal').remove();
+        loadSidebar();
+    } catch (err) {
+        showToast('添加提醒失败', 'error');
+    }
+};
+
+window.confirmAddWatch = async function() {
+    const itemInput = document.getElementById('watch-item-input');
+    const frequencySelect = document.getElementById('watch-frequency');
+    const timeInput = document.getElementById('watch-time');
+    const contentSelect = document.getElementById('watch-content');
+
+    const itemName = itemInput.value.trim();
+    const frequency = frequencySelect.value;
+    const time = timeInput.value;
+    const content = contentSelect.value;
+
+    if (!itemName) {
+        showToast('请输入物品名称', 'warning');
+        return;
+    }
+
+    try {
+        const res = await fetch(`/api/resolve/${encodeURIComponent(itemName)}`);
+        const data = await res.json();
+
+        let itemId;
+        if (data.found) {
+            itemId = data.item_id;
+        } else {
+            itemId = itemName;
+        }
+
+        const response = await fetch(`${API_BASE}/api/watchlist`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                item_id: itemId,
+                item_name: itemName,
+                frequency: frequency,
+                time: time,
+                content: content,
+            })
+        });
+
+        if (response.ok) {
+            showToast(`已添加关注: ${itemName}`, 'success');
+            document.getElementById('add-watch-modal').remove();
+            loadSidebar();
+        } else {
+            showToast('添加关注失败', 'error');
+        }
+    } catch (err) {
+        showToast('添加关注失败', 'error');
+    }
+};
+
+// 页面加载时初始化
+document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(loadWatchlist, 600);
+});

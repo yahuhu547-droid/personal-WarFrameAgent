@@ -26,6 +26,7 @@ class TestWebAPI(unittest.TestCase):
         mock_memory.favorite_items = ["arcane_energize"]
         mock_memory.price_alerts = []
         mock_memory.preferences = {"platform": "pc"}
+        mock_memory.watchlist = []
         mock_memory_class.load.return_value = mock_memory
 
         response = self.client.get("/api/memory")
@@ -34,6 +35,7 @@ class TestWebAPI(unittest.TestCase):
         self.assertIn("favorites", data)
         self.assertIn("alerts", data)
         self.assertIn("preferences", data)
+        self.assertIn("watchlist", data)
 
     @patch("warframe_agent.web.app.AgentMemory")
     def test_add_favorite(self, mock_memory_class):

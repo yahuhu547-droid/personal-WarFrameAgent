@@ -27,38 +27,77 @@
         <aside class="sidebar" id="sidebar">
             <div class="sidebar-header">
                 <h2>收藏列表</h2>
-                <button class="sidebar-edit-btn" id="batch-edit-btn" title="批量管理">✏️</button>
+                <div class="sidebar-header-actions">
+                    <button class="sidebar-edit-btn" id="batch-edit-btn" title="批量管理">✏️</button>
+                    <button class="sidebar-edit-btn" id="add-favorite-btn" title="添加收藏" onclick="showAddFavoriteModal()">+</button>
+                </div>
             </div>
             <div id="favorites-list" class="list"></div>
 
             <div class="sidebar-header">
                 <h2>价格提醒</h2>
+                <button class="sidebar-edit-btn" id="add-alert-btn" title="添加提醒" onclick="showAlertModal()">+</button>
             </div>
             <div id="alerts-list" class="list"></div>
 
-            <!-- 序列号装饰 -->
+            <!-- 关注列表 -->
+            <div class="sidebar-header">
+                <h2>定时关注</h2>
+                <button class="sidebar-edit-btn" id="add-watch-btn" title="添加关注" onclick="showAddWatchModal()">+</button>
+            </div>
+            <div id="watchlist" class="list"></div>
+
+            <!-- 底部操作栏 -->
             <div class="sidebar-footer">
                 <div class="sidebar-actions">
                     <button class="sidebar-btn" id="theme-toggle" title="切换主题">
                         <span class="theme-icon">🌙</span>
                     </button>
-                    <button class="sidebar-btn" id="report-btn" title="每日报告">
-                        <span>📊</span>
-                    </button>
-                    <button class="sidebar-btn" id="alias-btn" title="自定义别名">
-                        <span>🏷️</span>
+                    <button class="sidebar-btn" id="more-menu-btn" title="更多功能">
+                        <span>☰</span>
                     </button>
                     <button class="sidebar-btn" id="settings-btn" title="设置">
                         <span>⚙️</span>
                     </button>
-                    <button class="sidebar-btn" id="clear-chat-btn" title="清空对话">
-                        <span>🗑️</span>
-                    </button>
                 </div>
-                <div class="serial-number">WARFRAME-AGENT-V3.0</div>
                 <div class="status-indicator">
                     <span class="status-dot"></span>
                     <span class="status-text">系统在线</span>
+                </div>
+            </div>
+
+            <!-- 更多功能菜单 -->
+            <div id="more-menu" class="more-menu">
+                <div class="more-menu-header">
+                    <span>更多功能</span>
+                    <button class="more-menu-close" onclick="toggleMoreMenu()">&times;</button>
+                </div>
+                <div class="more-menu-items">
+                    <button class="more-menu-item" id="report-btn">
+                        <span class="menu-icon">📊</span>
+                        <span class="menu-text">每日报告</span>
+                    </button>
+                    <button class="more-menu-item" id="trade-history-btn">
+                        <span class="menu-icon">📋</span>
+                        <span class="menu-text">交易历史</span>
+                    </button>
+                    <button class="more-menu-item" id="arbitrage-btn">
+                        <span class="menu-icon">💰</span>
+                        <span class="menu-text">套利检测</span>
+                    </button>
+                    <button class="more-menu-item" id="dashboard-btn">
+                        <span class="menu-icon">📈</span>
+                        <span class="menu-text">收藏仪表盘</span>
+                    </button>
+                    <button class="more-menu-item" id="alias-btn">
+                        <span class="menu-icon">🏷️</span>
+                        <span class="menu-text">自定义别名</span>
+                    </button>
+                    <div class="more-menu-divider"></div>
+                    <button class="more-menu-item" id="clear-chat-btn">
+                        <span class="menu-icon">🗑️</span>
+                        <span class="menu-text">清空对话</span>
+                    </button>
                 </div>
             </div>
         </aside>
@@ -103,7 +142,7 @@
                 <button class="quick-btn" data-msg="充沛多少钱">
                     <span>充沛价格</span>
                 </button>
-                <button class="quick-btn" data-msg="扫描关注">
+                <button class="quick-btn" id="scan-watch-btn">
                     <span>扫描关注</span>
                 </button>
                 <button class="quick-btn" data-msg="/memory">
@@ -111,6 +150,9 @@
                 </button>
                 <button class="quick-btn" id="compare-btn">
                     <span>对比物品</span>
+                </button>
+                <button class="quick-btn" id="batch-query-btn">
+                    <span>批量查价</span>
                 </button>
                 <button class="add-quick-btn" id="add-quick-btn" title="添加快捷操作">+</button>
             </div>

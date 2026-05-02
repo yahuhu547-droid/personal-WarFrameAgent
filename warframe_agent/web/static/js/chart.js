@@ -123,6 +123,13 @@ function renderItemDetailCard(data) {
         <div class="item-detail-card">
             <div class="item-detail-header">
                 <h3 class="item-detail-name">${data.display || data.item_id}</h3>
+                ${data.item_type ? `
+                <div class="item-type-badge ${data.item_type}">
+                    <span class="type-icon">${data.item_type === 'arcane' ? '⚡' : '🔧'}</span>
+                    <span class="type-text">${data.item_type_display}</span>
+                    <span class="type-rank">Rank ${data.max_rank}/${data.max_rank}</span>
+                </div>
+                ` : ''}
             </div>
             <div class="item-detail-prices">
                 <div class="price-block sell">
@@ -142,8 +149,66 @@ function renderItemDetailCard(data) {
             </div>
     `;
 
+    // 物品类型和等级信息
+    if (data.item_type) {
+        const rarityColors = {
+            'COMMON': '#a0a0a0',
+            'UNCOMMON': '#e0e0e0',
+            'RARE': '#ffd700',
+            'LEGENDARY': '#ff8c00',
+            'PRIME': '#00bfff'
+        };
+        const rarityColor = rarityColors[data.rarity] || '#a0a0a0';
+        const rarityText = {
+            'COMMON': '普通',
+            'UNCOMMON': '罕见',
+            'RARE': '稀有',
+            'LEGENDARY': '传说',
+            'PRIME': 'Prime'
+        }[data.rarity] || data.rarity;
+
+        card += `
+            <div class="rank-info-section">
+                <div class="rank-header">
+                    <span class="rank-icon">📊</span>
+                    <span class="rank-title">等级信息</span>
+                </div>
+                <div class="rank-details">
+                    <div class="rank-row">
+                        <span class="rank-label">类型</span>
+                        <span class="rank-value" style="color: ${rarityColor}">${data.item_type_display}</span>
+                    </div>
+                    <div class="rank-row">
+                        <span class="rank-label">稀有度</span>
+                        <span class="rank-value" style="color: ${rarityColor}">${rarityText}</span>
+                    </div>
+                    <div class="rank-row">
+                        <span class="rank-label">最大等级</span>
+                        <span class="rank-value">${data.max_rank}/${data.max_rank}</span>
+                    </div>
+                    ${data.item_type === 'arcane' ? `
+                    <div class="rank-note">
+                        <span class="note-icon">💡</span>
+                        <span class="note-text">赋能满级为 ${data.max_rank}/${data.max_rank}，需要 ${data.max_rank + 1} 个相同赋能融合</span>
+                    </div>
+                    ` : `
+                    <div class="rank-note">
+                        <span class="note-icon">💡</span>
+                        <span class="note-text">Mod 满级为 ${data.max_rank}/${data.max_rank}，需要消耗内融核心升级</span>
+                    </div>
+                    `}
+                </div>
+            </div>
+        `;
+    }
+
+    // 杜卡特信息
+    if (data.ducat_value !== null && data.ducat_value !== undefined) {
+        card += renderDucatInfo(data);
+    }
+
     if (data.max_level_cost) {
-        card += `<div class="item-detail-extra">满级估算: 21 个约 ${data.max_level_cost}p</div>`;
+        card += `<div class="item-detail-extra">满级估算: ${data.max_rank + 1 || 21} 个约 ${data.max_level_cost}p</div>`;
     }
 
     card += `
@@ -174,6 +239,50 @@ function copyToClipboard(text) {
     }).catch(() => {
         showToast('复制失败', 'error');
     });
+}
+
+function renderDucatInfo(data) {
+    let html = `
+        <div class="ducat-info">
+            <div class="ducat-header">
+                <span class="ducat-icon">◆</span>
+                <span class="ducat-title">杜卡特分析</span>
+            </div>
+            <div class="ducat-details">
+                <div class="ducat-value-row">
+                    <span class="ducat-label">杜卡特价值</span>
+                    <span class="ducat-amount">${data.ducat_value} ducats</span>
+                </div>
+    `;
+
+    if (data.ducat_efficiency) {
+        const eff = data.ducat_efficiency;
+        const isGoodDeal = eff.recommendation === 'ducat';
+        const recommendationClass = isGoodDeal ? 'recommend-ducat' : 'recommend-sell';
+        const recommendationText = isGoodDeal ? '建议拆成杜卡特' : '建议直接卖白金';
+        const reasonText = `每白金获得 ${eff.ducats_per_plat} 杜卡特`;
+
+        html += `
+                <div class="ducat-efficiency">
+                    <div class="efficiency-row">
+                        <span class="efficiency-label">杜卡特效率</span>
+                        <span class="efficiency-value ${eff.ducats_per_plat >= 3 ? 'good' : 'normal'}">${eff.ducats_per_plat} ducats/p</span>
+                    </div>
+                    <div class="ducat-recommendation ${recommendationClass}">
+                        <span class="recommend-icon">${isGoodDeal ? '✓' : '✗'}</span>
+                        <span class="recommend-text">${recommendationText}</span>
+                    </div>
+                    <div class="ducat-reason">${reasonText}${eff.ducats_per_plat >= 3 ? ' (高于3:1阈值)' : ' (低于3:1阈值)'}</div>
+                </div>
+        `;
+    }
+
+    html += `
+            </div>
+        </div>
+    `;
+
+    return html;
 }
 
 // ===== 渲染图表 =====
@@ -350,12 +459,15 @@ document.getElementById('report-btn')?.addEventListener('click', async () => {
         content.innerHTML = `
             <div class="report-container">
                 <h3 class="report-title">每日价格报告</h3>
-                <pre class="report-text">${data.report}</pre>
-                <button class="detail-action-btn" onclick="copyToClipboard(\`${data.report.replace(/`/g, '\\`')}\`)">
+                <pre class="report-text">${escapeHtml(data.report)}</pre>
+                <button class="detail-action-btn" id="copy-report-btn">
                     复制报告
                 </button>
             </div>
         `;
+        document.getElementById('copy-report-btn')?.addEventListener('click', () => {
+            copyToClipboard(data.report);
+        });
     } catch (err) {
         content.innerHTML = createChartError('加载报告失败');
     }
@@ -552,6 +664,254 @@ chartStyles.textContent = `
         background: rgba(0, 0, 0, 0.2); padding: 12px; border-radius: 4px;
         white-space: pre-wrap; word-break: break-all; margin-bottom: 12px;
         border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    /* 杜卡特信息样式 */
+    .ducat-info {
+        background: rgba(212, 167, 55, 0.05);
+        border: 1px solid rgba(212, 167, 55, 0.2);
+        border-radius: 6px;
+        padding: 12px;
+        margin: 12px 0;
+        animation: fadeInUp 0.4s ease-out;
+    }
+
+    .ducat-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 10px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid rgba(212, 167, 55, 0.15);
+    }
+
+    .ducat-icon {
+        color: var(--gold-primary);
+        font-size: 14px;
+    }
+
+    .ducat-title {
+        font-family: var(--font-display);
+        font-size: 13px;
+        color: var(--gold-primary);
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+    }
+
+    .ducat-details {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    .ducat-value-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .ducat-label {
+        font-size: 12px;
+        color: var(--text-secondary);
+    }
+
+    .ducat-amount {
+        font-family: var(--font-mono);
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--gold-primary);
+    }
+
+    .ducat-efficiency {
+        background: rgba(0, 0, 0, 0.2);
+        border-radius: 4px;
+        padding: 10px;
+        margin-top: 4px;
+    }
+
+    .efficiency-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 8px;
+    }
+
+    .efficiency-label {
+        font-size: 11px;
+        color: var(--text-tertiary);
+        letter-spacing: 0.05em;
+    }
+
+    .efficiency-value {
+        font-family: var(--font-mono);
+        font-size: 13px;
+        font-weight: 600;
+    }
+
+    .efficiency-value.good {
+        color: var(--green-success);
+    }
+
+    .efficiency-value.normal {
+        color: var(--text-secondary);
+    }
+
+    .ducat-recommendation {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border-radius: 4px;
+        margin-bottom: 6px;
+    }
+
+    .ducat-recommendation.recommend-ducat {
+        background: rgba(74, 222, 128, 0.1);
+        border: 1px solid rgba(74, 222, 128, 0.2);
+    }
+
+    .ducat-recommendation.recommend-sell {
+        background: rgba(74, 158, 255, 0.1);
+        border: 1px solid rgba(74, 158, 255, 0.2);
+    }
+
+    .recommend-icon {
+        font-size: 14px;
+        font-weight: bold;
+    }
+
+    .recommend-ducat .recommend-icon {
+        color: var(--green-success);
+    }
+
+    .recommend-sell .recommend-icon {
+        color: var(--blue-primary);
+    }
+
+    .recommend-text {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    .ducat-reason {
+        font-size: 11px;
+        color: var(--text-tertiary);
+        padding-left: 22px;
+    }
+
+    /* 物品类型和等级信息样式 */
+    .item-type-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        border-radius: 4px;
+        font-size: 11px;
+        margin-top: 6px;
+        letter-spacing: 0.05em;
+    }
+
+    .item-type-badge.arcane {
+        background: rgba(255, 140, 0, 0.15);
+        border: 1px solid rgba(255, 140, 0, 0.3);
+        color: #ff8c00;
+    }
+
+    .item-type-badge.mod {
+        background: rgba(74, 158, 255, 0.15);
+        border: 1px solid rgba(74, 158, 255, 0.3);
+        color: var(--blue-primary);
+    }
+
+    .type-icon {
+        font-size: 12px;
+    }
+
+    .type-text {
+        font-weight: 600;
+    }
+
+    .type-rank {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        opacity: 0.8;
+    }
+
+    .rank-info-section {
+        background: rgba(74, 158, 255, 0.05);
+        border: 1px solid rgba(74, 158, 255, 0.2);
+        border-radius: 6px;
+        padding: 12px;
+        margin: 12px 0;
+        animation: fadeInUp 0.4s ease-out;
+    }
+
+    .rank-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 10px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid rgba(74, 158, 255, 0.15);
+    }
+
+    .rank-icon {
+        color: var(--blue-primary);
+        font-size: 14px;
+    }
+
+    .rank-title {
+        font-family: var(--font-display);
+        font-size: 13px;
+        color: var(--blue-primary);
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+    }
+
+    .rank-details {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    .rank-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .rank-label {
+        font-size: 12px;
+        color: var(--text-secondary);
+    }
+
+    .rank-value {
+        font-family: var(--font-mono);
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    .rank-note {
+        display: flex;
+        align-items: flex-start;
+        gap: 6px;
+        padding: 8px 10px;
+        background: rgba(0, 0, 0, 0.2);
+        border-radius: 4px;
+        margin-top: 4px;
+    }
+
+    .note-icon {
+        font-size: 12px;
+        margin-top: 1px;
+    }
+
+    .note-text {
+        font-size: 11px;
+        color: var(--text-tertiary);
+        line-height: 1.4;
     }
 `;
 document.head.appendChild(chartStyles);
