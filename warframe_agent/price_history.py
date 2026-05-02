@@ -74,6 +74,21 @@ class PriceHistoryDB:
             conn.close()
         return [PriceSnapshot(*row) for row in rows]
 
+    def recent_since(self, item_id: str, hours: int = 24) -> list[PriceSnapshot]:
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT item_id, sell_price, buy_price, timestamp "
+                "FROM price_snapshots WHERE item_id = ? AND timestamp >= ? "
+                "ORDER BY timestamp DESC",
+                (item_id, cutoff),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [PriceSnapshot(*row) for row in rows]
+
     def trend_summary(self, item_id: str) -> str | None:
         snapshots = self.recent(item_id, limit=5)
         if len(snapshots) < 2:

@@ -2,6 +2,8 @@
 
 基于 Python + Ollama 本地大模型（qwen3:8b）的 Warframe 游戏交易智能助手。完全本地运行，无需云端 API，保护用户隐私。
 
+![UI Preview](docs/ui_preview.png)
+
 ## 功能特性
 
 ### 核心查价
@@ -187,6 +189,13 @@ python -m unittest discover -s tests -v
        ├─ LLM 工具路由 → 选择工具 → 执行 → 回复
        └─ RAG 语义搜索 → 降级回复
 ```
+
+## 相关文档
+
+- [UI 设计计划](docs/ui_design_plan.md) - 详细的设计理念和规范
+- [UI 实现报告](docs/ui_implementation_report.md) - 实现的功能和技术细节
+- [升级计划](docs/upgrade_plan.md) - Phase 5-8 的完整升级计划
+- [UI 预览](docs/ui_preview.html) - 在线预览设计效果
 
 ## License
 

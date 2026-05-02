@@ -3,59 +3,246 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Warframe 交易助手</title>
+    <title>Warframe 交易助手 - Tenno 科技终端</title>
+
+    <!-- CSS 文件 -->
+    <link rel="stylesheet" href="/static/css/variables.css">
+    <link rel="stylesheet" href="/static/css/animations.css">
     <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/responsive.css">
+
+    <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+    <!-- Markdown 渲染 + XSS 防护 -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
+
+    <!-- Favicon -->
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
 </head>
 <body>
     <div class="container">
-        <aside class="sidebar">
-            <h2>收藏列表</h2>
+        <!-- 左侧边栏 - 收藏和提醒 -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <h2>收藏列表</h2>
+                <button class="sidebar-edit-btn" id="batch-edit-btn" title="批量管理">✏️</button>
+            </div>
             <div id="favorites-list" class="list"></div>
-            <h2>价格提醒</h2>
+
+            <div class="sidebar-header">
+                <h2>价格提醒</h2>
+            </div>
             <div id="alerts-list" class="list"></div>
+
+            <!-- 序列号装饰 -->
+            <div class="sidebar-footer">
+                <div class="sidebar-actions">
+                    <button class="sidebar-btn" id="theme-toggle" title="切换主题">
+                        <span class="theme-icon">🌙</span>
+                    </button>
+                    <button class="sidebar-btn" id="report-btn" title="每日报告">
+                        <span>📊</span>
+                    </button>
+                    <button class="sidebar-btn" id="alias-btn" title="自定义别名">
+                        <span>🏷️</span>
+                    </button>
+                    <button class="sidebar-btn" id="settings-btn" title="设置">
+                        <span>⚙️</span>
+                    </button>
+                    <button class="sidebar-btn" id="clear-chat-btn" title="清空对话">
+                        <span>🗑️</span>
+                    </button>
+                </div>
+                <div class="serial-number">WARFRAME-AGENT-V3.0</div>
+                <div class="status-indicator">
+                    <span class="status-dot"></span>
+                    <span class="status-text">系统在线</span>
+                </div>
+            </div>
         </aside>
 
+        <div class="resize-handle" id="resize-sidebar"></div>
+
+        <!-- 主聊天区域 -->
         <main class="chat-area">
             <div class="chat-header">
                 <h1>Warframe 交易助手</h1>
+                <div class="header-decoration">
+                    <div class="header-line"></div>
+                    <div class="header-dot"></div>
+                    <div class="header-line"></div>
+                </div>
             </div>
-            <div id="chat-messages" class="chat-messages"></div>
+
+            <div id="chat-messages" class="chat-messages">
+                <!-- 欢迎消息 -->
+                <div class="welcome-message">
+                    <div class="welcome-icon">⚡</div>
+                    <h3>Tenno，欢迎回来</h3>
+                    <p>输入物品名称或问题，开始交易查询</p>
+                </div>
+            </div>
+
             <div class="chat-input-area">
                 <div class="input-wrapper">
                     <input type="text" id="chat-input" placeholder="输入物品名称或问题..." autocomplete="off" />
                     <div id="suggestions" class="suggestions"></div>
+                    <div class="input-decoration">
+                        <div class="input-line"></div>
+                    </div>
                 </div>
-                <button id="send-btn">发送</button>
+                <button id="send-btn">
+                    <span>发送</span>
+                    <div class="btn-glow"></div>
+                </button>
             </div>
-            <div class="quick-actions">
-                <button class="quick-btn" data-msg="充沛多少钱">充沛价格</button>
-                <button class="quick-btn" data-msg="扫描关注">扫描关注</button>
-                <button class="quick-btn" data-msg="/memory">查看记忆</button>
-                <button class="quick-btn" id="compare-btn">对比物品</button>
+
+            <div class="quick-actions" id="quick-actions">
+                <button class="quick-btn" data-msg="充沛多少钱">
+                    <span>充沛价格</span>
+                </button>
+                <button class="quick-btn" data-msg="扫描关注">
+                    <span>扫描关注</span>
+                </button>
+                <button class="quick-btn" data-msg="/memory">
+                    <span>查看记忆</span>
+                </button>
+                <button class="quick-btn" id="compare-btn">
+                    <span>对比物品</span>
+                </button>
+                <button class="add-quick-btn" id="add-quick-btn" title="添加快捷操作">+</button>
             </div>
         </main>
 
+        <div class="resize-handle" id="resize-detail"></div>
+
+        <!-- 右侧详情面板 -->
         <aside class="detail-panel" id="detail-panel">
-            <button class="close-btn" id="close-detail">&times;</button>
+            <button class="close-btn" id="close-detail">
+                <span>&times;</span>
+            </button>
+            <div class="panel-header">
+                <h2>物品详情</h2>
+                <div class="panel-decoration"></div>
+            </div>
             <div id="detail-content"></div>
         </aside>
     </div>
 
+    <!-- 欢迎模态弹窗 -->
     <div id="welcome-modal" class="modal">
         <div class="modal-content">
+            <div class="modal-decoration-top"></div>
+
             <h2>欢迎使用 Warframe 交易助手</h2>
             <p>开始前，请选择您的游戏平台：</p>
+
             <div class="platform-buttons">
                 <button class="platform-btn" data-platform="pc">PC</button>
                 <button class="platform-btn" data-platform="ps">PlayStation</button>
                 <button class="platform-btn" data-platform="xbox">Xbox</button>
                 <button class="platform-btn" data-platform="switch">Switch</button>
             </div>
-            <button id="start-btn" class="primary-btn">开始使用</button>
+
+            <button id="start-btn" class="primary-btn">
+                <span>开始使用</span>
+                <div class="btn-glow"></div>
+            </button>
+
+            <div class="modal-decoration-bottom"></div>
         </div>
     </div>
 
+    <!-- 通知容器 -->
+    <div id="toast-container"></div>
+
+    <!-- 设置模态框 -->
+    <div id="settings-modal" class="modal">
+        <div class="modal-content settings-modal-content">
+            <div class="modal-decoration-top"></div>
+            <button class="modal-close-btn" onclick="document.getElementById('settings-modal').classList.remove('active')">&times;</button>
+            <h2>设置</h2>
+            <div class="settings-group">
+                <h3>通知</h3>
+                <label class="setting-item">
+                    <span class="setting-label">浏览器通知</span>
+                    <input type="checkbox" id="setting-browser-notify" class="setting-toggle">
+                </label>
+                <label class="setting-item">
+                    <span class="setting-label">价格提醒音效</span>
+                    <input type="checkbox" id="setting-sound" class="setting-toggle">
+                </label>
+            </div>
+            <div class="settings-group">
+                <h3>显示</h3>
+                <label class="setting-item">
+                    <span class="setting-label">显示价格变动</span>
+                    <input type="checkbox" id="setting-price-change" class="setting-toggle" checked>
+                </label>
+            </div>
+            <div class="modal-decoration-bottom"></div>
+        </div>
+    </div>
+
+    <!-- 快捷键帮助模态框 -->
+    <div id="shortcuts-modal" class="modal">
+        <div class="modal-content shortcuts-modal-content">
+            <div class="modal-decoration-top"></div>
+            <button class="modal-close-btn" onclick="document.getElementById('shortcuts-modal').classList.remove('active')">&times;</button>
+            <h2>键盘快捷键</h2>
+            <div class="shortcuts-list">
+                <div class="shortcut-item"><kbd>Enter</kbd><span>发送消息</span></div>
+                <div class="shortcut-item"><kbd>Esc</kbd><span>关闭面板/建议</span></div>
+                <div class="shortcut-item"><kbd>Ctrl+K</kbd><span>聚焦输入框</span></div>
+                <div class="shortcut-item"><kbd>Ctrl+P</kbd><span>命令面板</span></div>
+                <div class="shortcut-item"><kbd>Ctrl+/</kbd><span>显示快捷键帮助</span></div>
+                <div class="shortcut-item"><kbd>1-4</kbd><span>触发快捷按钮（输入框未聚焦时）</span></div>
+            </div>
+            <div class="modal-decoration-bottom"></div>
+        </div>
+    </div>
+
+    <!-- 命令面板模态框 -->
+    <div id="command-modal" class="modal">
+        <div class="modal-content command-modal-content">
+            <input type="text" id="command-input" placeholder="输入命令或物品名..." autocomplete="off">
+            <div id="command-list" class="command-list"></div>
+        </div>
+    </div>
+
+    <!-- 自定义别名管理模态框 -->
+    <div id="alias-modal" class="modal">
+        <div class="modal-content alias-modal-content">
+            <div class="modal-decoration-top"></div>
+            <button class="modal-close-btn" onclick="document.getElementById('alias-modal').classList.remove('active')">&times;</button>
+            <h2>自定义物品别名</h2>
+            <p class="alias-desc">输入你熟悉的叫法，再搜索游戏内物品名称完成绑定</p>
+            <div class="alias-add-section">
+                <div class="alias-add-row">
+                    <input type="text" id="alias-name-input" placeholder="你的叫法（如：充沛）" autocomplete="off">
+                </div>
+                <div class="alias-search-row">
+                    <div class="alias-search-wrapper">
+                        <input type="text" id="alias-search-input" placeholder="搜索物品名称（如：Arcane Energize）" autocomplete="off">
+                        <div id="alias-search-results" class="alias-search-results"></div>
+                    </div>
+                </div>
+                <div id="alias-selected" class="alias-selected" style="display:none;">
+                    <span class="alias-selected-label">绑定目标：</span>
+                    <span id="alias-selected-name" class="alias-selected-name"></span>
+                    <span id="alias-selected-id" class="alias-selected-id"></span>
+                    <button id="alias-clear-btn" class="alias-clear-btn" title="取消选择">&times;</button>
+                </div>
+                <button id="alias-add-btn" class="alias-add-btn" disabled>确认绑定</button>
+            </div>
+            <div id="alias-list" class="alias-list"></div>
+            <div class="modal-decoration-bottom"></div>
+        </div>
+    </div>
+
+    <!-- JavaScript 文件 -->
     <script src="/static/js/app.js"></script>
     <script src="/static/js/chat.js"></script>
     <script src="/static/js/sidebar.js"></script>

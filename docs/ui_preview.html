@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Warframe 交易助手 - UI 预览</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: #0a0e1a;
+            color: #e0e0e0;
+            padding: 40px;
+        }
+
+        .preview-container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: #d4af37;
+            font-size: 32px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .preview-description {
+            text-align: center;
+            color: #9ca3af;
+            margin-bottom: 40px;
+            line-height: 1.6;
+        }
+
+        .preview-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 24px;
+            margin-bottom: 40px;
+        }
+
+        .preview-card {
+            background: #141824;
+            border: 1px solid rgba(212, 167, 55, 0.3);
+            border-radius: 8px;
+            padding: 24px;
+            transition: all 0.3s ease-out;
+        }
+
+        .preview-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 0 30px rgba(212, 167, 55, 0.2);
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .card-icon {
+            font-size: 32px;
+        }
+
+        .card-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #d4af37;
+        }
+
+        .card-content {
+            color: #9ca3af;
+            line-height: 1.6;
+            font-size: 14px;
+        }
+
+        .color-palette {
+            display: flex;
+            gap: 12px;
+            margin-top: 16px;
+            flex-wrap: wrap;
+        }
+
+        .color-swatch {
+            width: 60px;
+            height: 60px;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .feature-list {
+            list-style: none;
+            margin-top: 12px;
+        }
+
+        .feature-list li {
+            padding: 4px 0;
+            font-size: 13px;
+        }
+
+        .feature-list li::before {
+            content: '✓ ';
+            color: #4ade80;
+            font-weight: 600;
+        }
+
+        .screenshot-container {
+            margin-top: 40px;
+            text-align: center;
+        }
+
+        .screenshot-placeholder {
+            background: #141824;
+            border: 2px dashed rgba(212, 167, 55, 0.3);
+            border-radius: 8px;
+            padding: 60px 20px;
+            margin-top: 20px;
+        }
+
+        .screenshot-text {
+            color: #6b7280;
+            font-size: 14px;
+        }
+
+        .demo-link {
+            display: inline-block;
+            margin-top: 30px;
+            padding: 12px 32px;
+            background: linear-gradient(135deg, #d4a737, #b8860b);
+            color: #070a14;
+            text-decoration: none;
+            font-weight: 600;
+            border-radius: 4px;
+            transition: all 0.3s ease-out;
+        }
+
+        .demo-link:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 0 20px rgba(212, 167, 55, 0.4);
+        }
+
+        .tech-stack {
+            margin-top: 40px;
+            padding: 24px;
+            background: #141824;
+            border-radius: 8px;
+            border: 1px solid rgba(212, 167, 55, 0.2);
+        }
+
+        .tech-title {
+            font-size: 16px;
+            color: #d4af37;
+            margin-bottom: 16px;
+        }
+
+        .tech-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 12px;
+        }
+
+        .tech-item {
+            padding: 8px 12px;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 4px;
+            font-size: 13px;
+        }
+
+        .tech-label {
+            color: #6b7280;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .tech-value {
+            color: #e0e0e0;
+            margin-top: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="preview-container">
+        <h1>Warframe 交易助手 - UI 预览</h1>
+        <p class="preview-description">
+            采用 "Tenno 科技终端" 设计风格，打造沉浸式的 Warframe 交易体验
+        </p>
+
+        <div class="preview-grid">
+            <div class="preview-card">
+                <div class="card-header">
+                    <span class="card-icon">🎨</span>
+                    <span class="card-title">色彩方案</span>
+                </div>
+                <div class="card-content">
+                    深空黑 + Tenno 金 + 能量蓝的配色方案，完美契合 Warframe 游戏风格
+                </div>
+                <div class="color-palette">
+                    <div class="color-swatch" style="background: #070a14; color: #e0e0e0;">深空黑</div>
+                    <div class="color-swatch" style="background: #d4a737; color: #070a14;">Tenno 金</div>
+                    <div class="color-swatch" style="background: #4a9eff; color: #070a14;">能量蓝</div>
+                    <div class="color-swatch" style="background: #4ade80; color: #070a14;">成功绿</div>
+                    <div class="color-swatch" style="background: #ef4444; color: #ffffff;">错误红</div>
+                </div>
+            </div>
+
+            <div class="preview-card">
+                <div class="card-header">
+                    <span class="card-icon">🔤</span>
+                    <span class="card-title">字体设计</span>
+                </div>
+                <div class="card-content">
+                    使用三种特色字体，打造层次分明的视觉体验
+                </div>
+                <ul class="feature-list">
+                    <li>Orbitron - 未来感标题字体</li>
+                    <li>Rajdhani - 科技感正文字体</li>
+                    <li>JetBrains Mono - 等宽数据字体</li>
+                </ul>
+            </div>
+
+            <div class="preview-card">
+                <div class="card-header">
+                    <span class="card-icon">✨</span>
+                    <span class="card-title">动画效果</span>
+                </div>
+                <div class="card-content">
+                    丰富的动画效果，提升交互体验
+                </div>
+                <ul class="feature-list">
+                    <li>扫描线终端效果</li>
+                    <li>消息滑入动画</li>
+                    <li>价格变化闪烁</li>
+                    <li>按钮光效扫过</li>
+                    <li>模态弹窗动画</li>
+                </ul>
+            </div>
+
+            <div class="preview-card">
+                <div class="card-header">
+                    <span class="card-icon">📱</span>
+                    <span class="card-title">响应式设计</span>
+                </div>
+                <div class="card-content">
+                    完美适配各种设备尺寸
+                </div>
+                <ul class="feature-list">
+                    <li>桌面端 (>1024px)</li>
+                    <li>平板端 (640-1024px)</li>
+                    <li>移动端 (<640px)</li>
+                    <li>触摸设备优化</li>
+                    <li>安全区域适配</li>
+                </ul>
+            </div>
+
+            <div class="preview-card">
+                <div class="card-header">
+                    <span class="card-icon">🎯</span>
+                    <span class="card-title">交互设计</span>
+                </div>
+                <div class="card-content">
+                    直观的交互反馈，提升用户体验
+                </div>
+                <ul class="feature-list">
+                    <li>搜索建议下拉</li>
+                    <li>键盘快捷键支持</li>
+                    <li>Toast 通知系统</li>
+                    <li>加载状态动画</li>
+                    <li>错误状态提示</li>
+                </ul>
+            </div>
+
+            <div class="preview-card">
+                <div class="card-header">
+                    <span class="card-icon">♿</span>
+                    <span class="card-title">无障碍设计</span>
+                </div>
+                <div class="card-content">
+                    关注所有用户的使用体验
+                </div>
+                <ul class="feature-list">
+                    <li>高对比度模式</li>
+                    <li>减少动画模式</li>
+                    <li>焦点样式优化</li>
+                    <li>键盘导航支持</li>
+                    <li>屏幕阅读器友好</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="tech-stack">
+            <div class="tech-title">技术栈</div>
+            <div class="tech-grid">
+                <div class="tech-item">
+                    <div class="tech-label">前端框架</div>
+                    <div class="tech-value">原生 HTML/CSS/JavaScript</div>
+                </div>
+                <div class="tech-item">
+                    <div class="tech-label">图表库</div>
+                    <div class="tech-value">Chart.js 4.4.0</div>
+                </div>
+                <div class="tech-item">
+                    <div class="tech-label">CSS 架构</div>
+                    <div class="tech-value">CSS 变量 + 模块化</div>
+                </div>
+                <div class="tech-item">
+                    <div class="tech-label">动画</div>
+                    <div class="tech-value">CSS 动画 + 关键帧</div>
+                </div>
+                <div class="tech-item">
+                    <div class="tech-label">响应式</div>
+                    <div class="tech-value">媒体查询 + Flexbox/Grid</div>
+                </div>
+                <div class="tech-item">
+                    <div class="tech-label">浏览器支持</div>
+                    <div class="tech-value">Chrome/Firefox/Safari/Edge</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="screenshot-container">
+            <h2 style="color: #d4a737; margin-bottom: 20px;">界面预览</h2>
+            <div class="screenshot-placeholder">
+                <p class="screenshot-text">启动 Web 服务器后访问 http://127.0.0.1:8000 查看实际效果</p>
+            </div>
+        </div>
+
+        <div style="text-align: center; margin-top: 40px;">
+            <a href="http://127.0.0.1:8000" class="demo-link">访问演示</a>
+        </div>
+    </div>
+</body>
+</html>
