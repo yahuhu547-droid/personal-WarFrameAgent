@@ -1920,6 +1920,24 @@ async def relic_search(q: str = ""):
     return {"results": results[:100], "total": len(results)}
 
 
+@app.get("/api/relic/sources/{relic_name}")
+async def get_relic_sources(relic_name: str):
+    """获取遗物的掉落来源（哪些任务掉落）"""
+    sources_path = config.DATA_DIR / "relic_sources.json"
+    if not sources_path.exists():
+        return JSONResponse({"sources": [], "error": "来源数据不可用"})
+
+    with open(sources_path, "r", encoding="utf-8") as f:
+        all_sources = json.load(f)
+
+    sources = all_sources.get(relic_name, [])
+    return JSONResponse({
+        "relicName": relic_name,
+        "sources": sources[:30],  # 最多返回30个来源
+        "total": len(sources),
+    })
+
+
 @app.get("/api/relic/drops/{tier}/{relic_name}")
 async def get_relic_drops(tier: str, relic_name: str):
     """获取指定遗物的掉落信息（包含所有精炼等级）"""

@@ -3035,7 +3035,13 @@ async function showRelicDrops(tier, relicName) {
             <p style="margin-top:8px"><strong>组队建议：</strong>4人组队每人开不同遗物，效率最高</p>
         </div>`;
 
+        // 加载遗物来源
+        html += '<div id="relic-sources" style="margin-top:12px"><div class="loading-spinner" style="padding:8px"><p style="font-size:12px;color:var(--text-tertiary)">加载掉落来源...</p></div></div>';
+
         content.innerHTML = html;
+
+        // 异步加载来源数据
+        loadRelicSources(data.displayName || `${tier} ${relicName}`);
     } catch (err) {
         content.innerHTML = `<div class="empty-state"><div class="empty-icon">🔮</div>
             <span class="empty-primary">加载失败</span><span class="empty-sub">${err.message}</span></div>`;
@@ -3052,6 +3058,78 @@ function switchRelicState(btn, state) {
     document.querySelectorAll('.relic-state-panel').forEach(p => p.style.display = 'none');
     const panel = document.getElementById(`relic-state-${state}`);
     if (panel) panel.style.display = 'block';
+}
+
+// 加载遗物来源
+async function loadRelicSources(relicDisplayName) {
+    const container = document.getElementById('relic-sources');
+    if (!container) return;
+
+    try {
+        // 提取遗物名 (如 "古纪 A1" -> "Lith A1")
+        const tierMap = { '古纪': 'Lith', '前纪': 'Meso', '中纪': 'Neo', '后纪': 'Axi', '安魂': 'Requiem' };
+        let relicName = relicDisplayName;
+        for (const [zh, en] of Object.entries(tierMap)) {
+            if (relicDisplayName.startsWith(zh)) {
+                relicName = relicDisplayName.replace(zh, en).trim();
+                break;
+            }
+        }
+
+        const resp = await fetch(`/api/relic/sources/${encodeURIComponent(relicName)}`);
+        const data = await resp.json();
+        const sources = data.sources || [];
+
+        if (sources.length === 0) {
+            container.innerHTML = `<div style="padding:12px;background:rgba(0,0,0,0.2);border-radius:8px;font-size:12px;color:var(--text-tertiary)">
+                <strong>掉落来源：</strong>该遗物已入库或无当前掉落来源
+            </div>`;
+            return;
+        }
+
+        // 按星球分组
+        const byPlanet = {};
+        sources.forEach(s => {
+            const key = s.planetZh || s.planet;
+            if (!byPlanet[key]) byPlanet[key] = [];
+            byPlanet[key].push(s);
+        });
+
+        let html = `<div style="padding:12px;background:rgba(0,0,0,0.2);border-radius:8px;font-size:12px">
+            <strong style="color:var(--gold-primary)">掉落来源</strong>
+            <span style="color:var(--text-tertiary);margin-left:8px">共 ${sources.length} 个任务</span>
+            <div style="margin-top:8px;max-height:300px;overflow-y:auto">`;
+
+        for (const [planet, items] of Object.entries(byPlanet)) {
+            html += `<div style="margin-bottom:8px">
+                <div style="color:var(--blue-primary);font-weight:600;font-size:11px;text-transform:uppercase;margin-bottom:4px">${planet}</div>`;
+
+            // 去重显示
+            const seen = new Set();
+            items.forEach(s => {
+                const key = `${s.location}_${s.rotation}`;
+                if (seen.has(key)) return;
+                seen.add(key);
+
+                const rotLabel = s.rotation !== '-' ? `轮次 ${s.rotation}` : '无轮次';
+                const chanceColor = s.chance >= 10 ? 'var(--green-success)' : s.chance >= 5 ? 'var(--gold-primary)' : 'var(--text-tertiary)';
+
+                html += `<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.03)">
+                    <span>${s.location} <span style="color:var(--text-tertiary)">(${rotLabel})</span></span>
+                    <span style="font-family:var(--font-mono);color:${chanceColor};font-weight:600">${s.chance}%</span>
+                </div>`;
+            });
+            html += '</div>';
+        }
+
+        html += '</div></div>';
+        container.innerHTML = html;
+
+    } catch (err) {
+        container.innerHTML = `<div style="padding:12px;background:rgba(0,0,0,0.2);border-radius:8px;font-size:12px;color:var(--text-tertiary)">
+            <strong>掉落来源：</strong>加载失败 - ${err.message}
+        </div>`;
+    }
 }
 
 document.getElementById('fissure-btn')?.addEventListener('click', () => showFissures());
