@@ -557,6 +557,53 @@ document.getElementById('trade-history-btn')?.addEventListener('click', () => {
     loadTradeHistory();
 });
 
+// ===== 每日报告 =====
+document.getElementById('report-btn')?.addEventListener('click', async () => {
+    toggleMoreMenu();
+    const content = openDetailPanel('生成每日报告...');
+    if (!content) return;
+
+    try {
+        const res = await fetch('/api/report');
+        const data = await res.json();
+        const report = data.report || '无报告数据';
+
+        let html = `<div class="panel-title-row">
+            <span class="panel-title-eyebrow">每日价格报告</span>
+            <span class="badge badge-gold">${new Date().toLocaleDateString('zh-CN')}</span>
+        </div>`;
+
+        html += '<div class="card"><div class="card-body">';
+        const lines = report.split('\n');
+        lines.forEach(line => {
+            if (line.startsWith('# ')) {
+                html += `<h3 style="color:var(--gold-primary);margin-bottom:12px;font-size:16px;">${line.substring(2)}</h3>`;
+            } else if (line.startsWith('- ')) {
+                const parts = line.substring(2).split(':');
+                const name = parts[0] || '';
+                const details = parts.slice(1).join(':');
+                html += `<div class="fissure-item">
+                    <div><div class="fissure-node">${name}</div></div>
+                    <span style="font-family:var(--font-mono);font-size:12px;color:var(--text-secondary)">${details}</span>
+                </div>`;
+            } else if (line.trim()) {
+                html += `<p style="color:var(--text-secondary);font-size:13px;margin:4px 0;">${line}</p>`;
+            }
+        });
+        html += '</div></div>';
+
+        html += `<div style="margin-top:12px;display:flex;gap:8px;">
+            <button class="btn-gradient" onclick="navigator.clipboard.writeText(\`${report.replace(/`/g, '\\`')}\`).then(()=>showToast('已复制','success'))">复制报告</button>
+            <button class="btn-gradient btn-gradient-cyan" onclick="document.getElementById('report-btn').click()">刷新</button>
+        </div>`;
+
+        content.innerHTML = html;
+    } catch (err) {
+        content.innerHTML = `<div class="empty-state"><div class="empty-icon">📊</div>
+            <span class="empty-primary">报告生成失败</span><span class="empty-sub">${err.message}</span></div>`;
+    }
+});
+
 // ===== 套利检测功能 =====
 
 async function loadArbitrageOpportunities() {
@@ -685,8 +732,16 @@ async function loadFavoritesDashboard() {
         const favorites = memoryData.favorites || [];
         const prices = pricesData.items || [];
 
+        if (favorites.length === 0) {
+            content.innerHTML = `<div class="empty-state"><div class="empty-icon">⭐</div>
+                <span class="empty-primary">收藏夹为空</span>
+                <span class="empty-sub">在对话中输入 物品名 添加收藏，或使用 /fav add 物品名</span></div>`;
+            return;
+        }
+
         // 计算统计数据
-        let totalValue = 0;
+        let totalSell = 0;
+        let totalBuy = 0;
         let itemsWithPrices = 0;
         let priceChanges = { up: 0, down: 0, stable: 0 };
 
@@ -695,21 +750,24 @@ async function loadFavoritesDashboard() {
 
         const priceMap = {};
         prices.forEach(item => {
+            priceMap[item.item_id] = item;
             if (item.sell_price) {
-                priceMap[item.item_id] = item;
-                totalValue += item.sell_price;
+                totalSell += item.sell_price;
                 itemsWithPrices++;
+            }
+            if (item.buy_price) {
+                totalBuy += item.buy_price;
+            }
 
-                // 检查价格变化
-                const prev = previousPrices[item.item_id];
-                if (prev && prev.sell !== null && item.sell_price !== null) {
-                    const diff = item.sell_price - prev.sell;
-                    if (diff > 0) priceChanges.up++;
-                    else if (diff < 0) priceChanges.down++;
-                    else priceChanges.stable++;
-                } else {
-                    priceChanges.stable++;
-                }
+            // 检查价格变化
+            const prev = previousPrices[item.item_id];
+            if (prev && prev.sell !== null && item.sell_price !== null) {
+                const diff = item.sell_price - prev.sell;
+                if (diff > 0) priceChanges.up++;
+                else if (diff < 0) priceChanges.down++;
+                else priceChanges.stable++;
+            } else {
+                priceChanges.stable++;
             }
         });
 
@@ -717,21 +775,23 @@ async function loadFavoritesDashboard() {
             <div class="dashboard-container">
                 <div class="dashboard-header">
                     <h3 class="dashboard-title">收藏夹仪表盘</h3>
-                    <div class="dashboard-subtitle">收藏物品价格概览</div>
+                    <div class="dashboard-subtitle">收藏物品价格概览 · 点击物品查看详情</div>
                 </div>
 
                 <div class="dashboard-summary">
                     <div class="dashboard-stat main">
-                        <div class="dashboard-stat-label">总价值</div>
-                        <div class="dashboard-stat-value">${totalValue}p</div>
+                        <div class="dashboard-stat-label">总卖出价值</div>
+                        <div class="dashboard-stat-value">${totalSell}p</div>
+                        <div style="font-size:11px;color:var(--text-tertiary)">全部收藏按最低卖价</div>
+                    </div>
+                    <div class="dashboard-stat">
+                        <div class="dashboard-stat-label">总收购价值</div>
+                        <div class="dashboard-stat-value" style="color:var(--blue-primary)">${totalBuy}p</div>
+                        <div style="font-size:11px;color:var(--text-tertiary)">全部收藏按最高收价</div>
                     </div>
                     <div class="dashboard-stat">
                         <div class="dashboard-stat-label">物品数</div>
                         <div class="dashboard-stat-value">${favorites.length}</div>
-                    </div>
-                    <div class="dashboard-stat">
-                        <div class="dashboard-stat-label">有价格</div>
-                        <div class="dashboard-stat-value">${itemsWithPrices}</div>
                     </div>
                 </div>
 
@@ -756,7 +816,7 @@ async function loadFavoritesDashboard() {
                     </div>
                 </div>
 
-                <div class="dashboard-items-title">物品列表</div>
+                <div class="dashboard-items-title">物品列表 <span style="font-size:11px;color:var(--text-tertiary);font-weight:normal">（点击查看详情）</span></div>
                 <div class="dashboard-items">
         `;
 
@@ -777,6 +837,9 @@ async function loadFavoritesDashboard() {
                 }
             }
 
+            const spread = price && price.sell_price && price.buy_price ? price.sell_price - price.buy_price : null;
+            const spreadClass = spread !== null ? (spread > 20 ? 'high' : spread > 5 ? 'mid' : 'low') : '';
+
             html += `
                 <div class="dashboard-item" style="animation-delay: ${index * 50}ms" onclick="queryItemPrice('${itemId}')">
                     <div class="dashboard-item-header">
@@ -786,15 +849,12 @@ async function loadFavoritesDashboard() {
                             ${changeHtml}
                         </span>
                     </div>
-                    ${price && price.buy_price ? `
-                        <div class="dashboard-item-detail">
-                            <span class="detail-label">收价</span>
-                            <span class="detail-value">${price.buy_price}p</span>
-                            ${price.sell_price && price.buy_price ? `
-                                <span class="detail-spread">差 ${price.sell_price - price.buy_price}p</span>
-                            ` : ''}
-                        </div>
-                    ` : ''}
+                    <div class="dashboard-item-detail">
+                        <span class="detail-label">收价</span>
+                        <span class="detail-value" style="color:var(--blue-primary)">${price && price.buy_price ? price.buy_price + 'p' : '-'}</span>
+                        ${spread !== null ? `<span class="detail-spread ${spreadClass}">差 ${spread}p</span>` : ''}
+                        <button class="copy-whisper-btn" onclick="event.stopPropagation();copyWhisperMessage('seller','${display.split(' / ')[0]}',${price?.sell_price || 0})" title="复制私聊" style="margin-left:auto">📋</button>
+                    </div>
                 </div>
             `;
         });
@@ -803,19 +863,15 @@ async function loadFavoritesDashboard() {
                 </div>
 
                 <div class="dashboard-actions">
-                    <button class="detail-action-btn" onclick="exportDashboardData()">
-                        导出数据
-                    </button>
-                    <button class="detail-action-btn" onclick="loadFavoritesDashboard()">
-                        刷新数据
-                    </button>
+                    <button class="btn-gradient" onclick="exportDashboardData()">导出数据</button>
+                    <button class="btn-gradient btn-gradient-cyan" onclick="loadFavoritesDashboard()">刷新数据</button>
                 </div>
             </div>
         `;
 
         content.innerHTML = html;
     } catch (err) {
-        content.innerHTML = createChartError('加载仪表盘失败');
+        content.innerHTML = createChartError('加载仪表盘失败: ' + err.message);
     }
 }
 
@@ -2849,9 +2905,11 @@ async function showFissures() {
             items.forEach(f => {
                 const eta = f.eta || '';
                 const isExpiring = eta.includes('m') && !eta.includes('h');
-                html += `<div class="fissure-item">
+                // 从节点名提取遗物信息 (如 "Lith A1" -> tier=Lith, name=A1)
+                const node = f.node || '';
+                html += `<div class="fissure-item" onclick="showRelicDrops('${tier}', '${f.tierNum || ''}')" style="cursor:pointer" title="点击查看遗物掉落">
                     <div>
-                        <div class="fissure-node">${f.node || 'Unknown'}</div>
+                        <div class="fissure-node">${node}</div>
                         <div class="fissure-mission">${f.missionType || ''} ${f.enemy || ''}</div>
                     </div>
                     <span class="fissure-countdown ${isExpiring ? 'expiring' : ''}">${eta}</span>
@@ -2867,6 +2925,133 @@ async function showFissures() {
             <span class="empty-primary">无法加载裂隙数据</span>
             <span class="empty-sub">${err.message}</span></div>`;
     }
+}
+
+// ===== 遗物掉落详情 =====
+async function showRelicDrops(tier, relicName) {
+    const content = document.getElementById('detail-content');
+    if (!content) return;
+    content.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>加载遗物掉落...</p></div>';
+
+    try {
+        // 查询单个遗物的详细掉落数据
+        const resp = await fetch(`/api/relic/drops/${tier}/${relicName}`);
+        const data = await resp.json();
+
+        if (data.error) {
+            content.innerHTML = `<div class="empty-state"><div class="empty-icon">🔮</div>
+                <span class="empty-primary">未找到遗物</span><span class="empty-sub">${data.error}</span></div>`;
+            return;
+        }
+
+        let html = `<div class="panel-title-row">
+            <span class="panel-title-eyebrow">遗物掉落</span>
+            <span class="badge badge-gold">${data.displayName || tier + ' ' + relicName}</span>
+            ${data.vaultStatus ? `<span class="badge ${data.vaultStatus === '已入库' ? 'badge-red' : 'badge-green'}">${data.vaultStatus}</span>` : ''}
+            <button class="btn-gradient" style="margin-left:auto;padding:4px 12px;font-size:11px" onclick="showFissures()">← 返回裂隙</button>
+        </div>`;
+
+        // 如果有分状态数据（新格式）
+        if (data.rewardsByState) {
+            const stateLabels = data.stateLabels || { Intact: '完好', Exceptional: '卓越', Flawless: '无瑕', Radiant: '光辉' };
+            const states = data.states || Object.keys(data.rewardsByState);
+
+            // 精炼等级选择器
+            html += `<div class="mode-toggle" style="margin-bottom:12px">`;
+            states.forEach((state, i) => {
+                html += `<button class="mode-toggle-btn ${i === 0 ? 'active' : ''}" onclick="switchRelicState(this, '${state}')">${stateLabels[state] || state}</button>`;
+            });
+            html += `</div>`;
+
+            // 每个精炼等级的内容
+            states.forEach((state, i) => {
+                const rewards = data.rewardsByState[state] || [];
+                html += `<div class="relic-state-panel" id="relic-state-${state}" style="display:${i === 0 ? 'block' : 'none'}">`;
+
+                // 按稀有度排序
+                const sorted = [...rewards].sort((a, b) => {
+                    const order = { 'Rare': 0, 'Uncommon': 1, 'Common': 2 };
+                    return (order[a.rarity] || 3) - (order[b.rarity] || 3);
+                });
+
+                sorted.forEach(r => {
+                    const rarityColors = {
+                        'Rare': { bg: 'rgba(212, 167, 55, 0.15)', color: 'var(--gold-primary)', border: 'rgba(212, 167, 55, 0.3)' },
+                        'Uncommon': { bg: 'rgba(148, 163, 184, 0.15)', color: '#94a3b8', border: 'rgba(148, 163, 184, 0.3)' },
+                        'Common': { bg: 'rgba(180, 83, 9, 0.15)', color: '#b45309', border: 'rgba(180, 83, 9, 0.3)' },
+                    };
+                    const rc = rarityColors[r.rarity] || rarityColors['Common'];
+
+                    html += `<div class="fissure-item" onclick="queryItemPrice('${r.itemName}')" style="cursor:pointer" title="点击查询价格">
+                        <div style="display:flex;align-items:center;gap:8px">
+                            <span class="rarity-dot ${r.rarity?.toLowerCase() || 'common'}"></span>
+                            <div>
+                                <div class="fissure-node">${r.itemName}</div>
+                                <div class="fissure-mission">${r.rarityZh || r.rarity}</div>
+                            </div>
+                        </div>
+                        <span style="font-family:var(--font-mono);font-size:13px;font-weight:600;color:${rc.color};background:${rc.bg};padding:2px 8px;border-radius:12px;border:1px solid ${rc.border}">${r.chance}%</span>
+                    </div>`;
+                });
+                html += `</div>`;
+            });
+        } else {
+            // 旧格式兼容
+            const rewards = data.rewards || [];
+            const sorted = [...rewards].sort((a, b) => {
+                const order = { 'Rare': 0, 'Uncommon': 1, 'Common': 2 };
+                return (order[a.rarity] || 3) - (order[b.rarity] || 3);
+            });
+
+            sorted.forEach(r => {
+                const rarityColors = {
+                    'Rare': { bg: 'rgba(212, 167, 55, 0.15)', color: 'var(--gold-primary)', border: 'rgba(212, 167, 55, 0.3)' },
+                    'Uncommon': { bg: 'rgba(148, 163, 184, 0.15)', color: '#94a3b8', border: 'rgba(148, 163, 184, 0.3)' },
+                    'Common': { bg: 'rgba(180, 83, 9, 0.15)', color: '#b45309', border: 'rgba(180, 83, 9, 0.3)' },
+                };
+                const rc = rarityColors[r.rarity] || rarityColors['Common'];
+
+                html += `<div class="fissure-item" onclick="queryItemPrice('${r.itemName}')" style="cursor:pointer" title="点击查询价格">
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <span class="rarity-dot ${r.rarity?.toLowerCase() || 'common'}"></span>
+                        <div>
+                            <div class="fissure-node">${r.itemName}</div>
+                            <div class="fissure-mission">${r.rarityZh || r.rarity}</div>
+                        </div>
+                    </div>
+                    <span style="font-family:var(--font-mono);font-size:13px;font-weight:600;color:${rc.color};background:${rc.bg};padding:2px 8px;border-radius:12px;border:1px solid ${rc.border}">${r.chance}%</span>
+                </div>`;
+            });
+        }
+
+        html += `<div style="margin-top:12px;padding:12px;background:rgba(0,0,0,0.2);border-radius:8px;font-size:12px;color:var(--text-tertiary)">
+            <strong>精炼等级说明：</strong>
+            <ul style="margin:8px 0 0 16px;list-style:disc">
+                <li><strong>完好 (Intact)</strong> — 无需消耗，稀有掉率 2%</li>
+                <li><strong>卓越 (Exceptional)</strong> — 消耗 25 虚空之尘，稀有掉率 4%</li>
+                <li><strong>无瑕 (Flawless)</strong> — 消耗 50 虚空之尘，稀有掉率 6%</li>
+                <li><strong>光辉 (Radiant)</strong> — 消耗 100 虚空之尘，稀有掉率 10%</li>
+            </ul>
+            <p style="margin-top:8px"><strong>组队建议：</strong>4人组队每人开不同遗物，效率最高</p>
+        </div>`;
+
+        content.innerHTML = html;
+    } catch (err) {
+        content.innerHTML = `<div class="empty-state"><div class="empty-icon">🔮</div>
+            <span class="empty-primary">加载失败</span><span class="empty-sub">${err.message}</span></div>`;
+    }
+}
+
+// 切换精炼等级显示
+function switchRelicState(btn, state) {
+    // 更新按钮状态
+    btn.parentElement.querySelectorAll('.mode-toggle-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+
+    // 切换显示
+    document.querySelectorAll('.relic-state-panel').forEach(p => p.style.display = 'none');
+    const panel = document.getElementById(`relic-state-${state}`);
+    if (panel) panel.style.display = 'block';
 }
 
 document.getElementById('fissure-btn')?.addEventListener('click', () => showFissures());

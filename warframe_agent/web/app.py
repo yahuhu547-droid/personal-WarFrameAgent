@@ -1920,6 +1920,77 @@ async def relic_search(q: str = ""):
     return {"results": results[:100], "total": len(results)}
 
 
+@app.get("/api/relic/drops/{tier}/{relic_name}")
+async def get_relic_drops(tier: str, relic_name: str):
+    """获取指定遗物的掉落信息（包含所有精炼等级）"""
+    tier_upper = tier.capitalize()
+    relic_name_upper = relic_name.upper()
+
+    # 优先使用详细数据（来自 warframe-drop-data）
+    detailed_path = config.DATA_DIR / "relics_detailed" / tier_upper / f"{relic_name_upper}.json"
+    if detailed_path.exists():
+        with open(detailed_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        vault_status = _get_vault_status(f"{tier_upper} {relic_name}")
+
+        # 转换为前端友好格式
+        rewards_by_state = {}
+        for state, rewards in data.get("rewards", {}).items():
+            rewards_by_state[state] = [
+                {
+                    "itemName": r.get("itemName", ""),
+                    "rarity": r.get("rarity", ""),
+                    "rarityZh": {"Rare": "稀有", "Uncommon": "非常规", "Common": "常规"}.get(r.get("rarity", ""), r.get("rarity", "")),
+                    "chance": r.get("chance", 0),
+                }
+                for r in rewards
+            ]
+
+        return JSONResponse({
+            "tier": tier_upper,
+            "relicName": relic_name,
+            "displayName": f"{RELIC_TIER_ZH.get(tier_upper, tier_upper)} {relic_name}",
+            "vaultStatus": vault_status,
+            "rewardsByState": rewards_by_state,
+            "states": ["Intact", "Exceptional", "Flawless", "Radiant"],
+            "stateLabels": {"Intact": "完好", "Exceptional": "卓越", "Flawless": "无瑕", "Radiant": "光辉"},
+        })
+
+    # 回退到旧数据
+    if not RELIC_DROP_DATA_PATH.exists():
+        return JSONResponse({"error": "遗物数据不可用"}, status_code=404)
+
+    with open(RELIC_DROP_DATA_PATH, "r", encoding="utf-8") as f:
+        relic_data = json.load(f)
+
+    results = []
+    for relic in relic_data.get("relics", []):
+        if relic.get("tier", "").upper() == tier_upper and relic.get("relicName", "").upper() == relic_name_upper:
+            state = relic.get("state", "Intact")
+            for reward in relic.get("rewards", []):
+                results.append({
+                    "state": state,
+                    "itemName": reward.get("itemName", ""),
+                    "rarity": reward.get("rarity", ""),
+                    "rarityZh": {"Rare": "稀有", "Uncommon": "非常规", "Common": "常规"}.get(reward.get("rarity", ""), reward.get("rarity", "")),
+                    "chance": reward.get("chance", 0),
+                })
+
+    if not results:
+        return JSONResponse({"error": f"未找到遗物 {tier} {relic_name}"}, status_code=404)
+
+    vault_status = _get_vault_status(f"{tier_upper} {relic_name}")
+
+    return JSONResponse({
+        "tier": tier_upper,
+        "relicName": relic_name,
+        "displayName": f"{RELIC_TIER_ZH.get(tier_upper, tier_upper)} {relic_name}",
+        "vaultStatus": vault_status,
+        "rewards": results,
+    })
+
+
 static_dir = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="root")
