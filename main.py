@@ -72,7 +72,7 @@ def handle_rebuild(agent: WarframeAgent) -> None:
 def handle_chat(agent: WarframeAgent) -> None:
     price_db = PriceHistoryDB()
     chat_agent = ChatAgent(resolver=agent.resolver, price_db=price_db, router_call=call_ollama_router)
-    monitor = PriceMonitor()
+    monitor = PriceMonitor(price_db=price_db)
     monitor.start()
     print("\n\u8fdb\u5165\u5bf9\u8bdd\u5f0f\u4ea4\u6613\u52a9\u624b\u3002\u8f93\u5165 q / quit / \u9000\u51fa \u8fd4\u56de\u4e3b\u83dc\u5355\u3002")
     print("\u793a\u4f8b\uff1a\u5145\u6c9b\u73b0\u5728\u80fd\u4e70\u5417\uff1f / \u5ddd\u6d41p\u591a\u5c11\u94b1\u51fa\u5408\u9002\uff1f")

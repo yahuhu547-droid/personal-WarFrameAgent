@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import config
+
 
 FOLLOWUP_TERMS = [
     "那", "呢", "散件", "部件", "比昨天", "比上次",
@@ -34,6 +36,17 @@ class SessionContext:
         self.history.append((user_msg, reply))
         if len(self.history) > max_history:
             self.history = self.history[-max_history:]
+
+    def to_messages(self, limit: int | None = None) -> list[dict[str, str]]:
+        """将历史对话转为 Ollama messages 格式（最近 N 轮）"""
+        if limit is None:
+            limit = config.CONTEXT_WINDOW
+        recent = self.history[-limit:]
+        messages = []
+        for user_msg, assistant_reply in recent:
+            messages.append({"role": "user", "content": user_msg})
+            messages.append({"role": "assistant", "content": assistant_reply})
+        return messages
 
     def has_context(self) -> bool:
         return bool(self.last_item_ids)

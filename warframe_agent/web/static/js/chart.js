@@ -32,14 +32,11 @@ const CHART_COLORS = {
 // ===== 显示价格图表 =====
 
 async function showPriceChart(itemId, range) {
-    const panel = document.getElementById('detail-panel');
-    const content = document.getElementById('detail-content');
-
     currentItemId = itemId;
     if (range) currentRange = range;
 
-    panel.classList.add('active');
-    content.innerHTML = createChartLoading();
+    const content = openDetailPanel();
+    if (!content) return;
 
     try {
         const [detailData, historyData] = await Promise.all([
@@ -118,11 +115,13 @@ async function getHistoryWithRange(itemId, range) {
 function renderItemDetailCard(data) {
     const spreadClass = data.spread > 0 ? 'positive' : (data.spread < 0 ? 'negative' : '');
     const spreadText = data.spread !== null && data.spread !== undefined ? `${data.spread}p` : '-';
+    const trendClass = data.trend === 'up' ? 'trend-up' : data.trend === 'down' ? 'trend-down' : 'trend-stable';
 
     let card = `
         <div class="item-detail-card">
             <div class="item-detail-header">
                 <h3 class="item-detail-name">${data.display || data.item_id}</h3>
+                ${data.trend_display ? `<span class="trend-badge ${trendClass}">${data.trend_display}</span>` : ''}
                 ${data.item_type ? `
                 <div class="item-type-badge ${data.item_type}">
                     <span class="type-icon">${data.item_type === 'arcane' ? '⚡' : '🔧'}</span>
@@ -148,6 +147,30 @@ function renderItemDetailCard(data) {
                 </div>
             </div>
     `;
+
+    // 增强信息：供需比 + 历史高低
+    if (data.supply_count !== undefined || data.history_high !== undefined) {
+        card += `<div class="item-enhanced-info">`;
+        if (data.supply_count !== undefined) {
+            const ratioText = data.supply_demand_ratio !== null ? data.supply_demand_ratio : '-';
+            const ratioClass = data.supply_demand_ratio > 2 ? 'oversupply' : data.supply_demand_ratio < 0.5 ? 'high-demand' : 'balanced';
+            card += `
+                <div class="enhanced-row">
+                    <span class="enhanced-label">供需比</span>
+                    <span class="enhanced-value ${ratioClass}">${ratioText}</span>
+                    <span class="enhanced-detail">卖 ${data.supply_count} / 收 ${data.demand_count}</span>
+                </div>`;
+        }
+        if (data.history_high !== undefined) {
+            card += `
+                <div class="enhanced-row">
+                    <span class="enhanced-label">历史范围</span>
+                    <span class="enhanced-value">${data.history_low}p ~ ${data.history_high}p</span>
+                    <span class="enhanced-detail">均值 ${data.history_avg}p</span>
+                </div>`;
+        }
+        card += `</div>`;
+    }
 
     // 物品类型和等级信息
     if (data.item_type) {
@@ -221,6 +244,9 @@ function renderItemDetailCard(data) {
                 </button>
                 <button class="detail-action-btn" onclick="addFavorite('${data.item_id}').then(() => { showToast('已收藏', 'success'); loadSidebar(); })">
                     收藏
+                </button>
+                <button class="detail-action-btn share-btn" onclick="shareItemCard('${data.item_id}', '${data.display || data.item_id}', ${data.sell_price || 'null'}, ${data.buy_price || 'null'}, ${data.spread || 'null'})">
+                    分享
                 </button>
             </div>
         </div>
@@ -405,55 +431,20 @@ function renderChartStats(snapshots) {
 
 // ===== 状态模板 =====
 
-function createChartLoading() {
-    return `
-        <div class="chart-loading">
-            <div class="loading"><div class="loading-dot"></div><div class="loading-dot"></div><div class="loading-dot"></div></div>
-            <div class="loading-text">加载价格数据...</div>
-        </div>
-    `;
-}
-
-function createChartEmpty(itemId) {
-    return `
-        <div class="chart-empty">
-            <div class="empty-icon">📊</div>
-            <div class="empty-title">暂无价格数据</div>
-            <div class="empty-subtitle">查询 "${itemId}" 后将显示价格历史</div>
-            <button class="empty-btn" onclick="queryItemPrice('${itemId}')"><span>立即查询</span></button>
-        </div>
-    `;
-}
-
-function createChartError(message) {
-    return `
-        <div class="chart-error">
-            <div class="error-icon">⚠️</div>
-            <div class="error-title">加载失败</div>
-            <div class="error-message">${message}</div>
-        </div>
-    `;
-}
-
-// ===== 关闭面板 =====
-
-document.getElementById('close-detail').addEventListener('click', () => {
-    document.getElementById('detail-panel').classList.remove('active');
-    if (priceChart) {
-        priceChart.destroy();
-        priceChart = null;
-    }
-});
+// ===== 关闭面板（handler moved to app.js） =====
 
 // ===== 每日报告 =====
 
 document.getElementById('report-btn')?.addEventListener('click', async () => {
-    const content = document.getElementById('detail-content');
-    const panel = document.getElementById('detail-panel');
-    panel.classList.add('active');
-    content.innerHTML = createChartLoading();
-
+    console.log('[Report] button clicked');
     try {
+        toggleMoreMenu();
+        const content = openDetailPanel('加载每日报告...');
+        if (!content) {
+            console.error('[Report] openDetailPanel returned null');
+            return;
+        }
+
         const res = await fetch('/api/report');
         const data = await res.json();
         content.innerHTML = `
@@ -469,7 +460,9 @@ document.getElementById('report-btn')?.addEventListener('click', async () => {
             copyToClipboard(data.report);
         });
     } catch (err) {
-        content.innerHTML = createChartError('加载报告失败');
+        console.error('[Report] error:', err);
+        const content = document.getElementById('detail-content');
+        if (content) content.innerHTML = createChartError('加载报告失败: ' + err.message);
     }
 });
 
@@ -571,6 +564,16 @@ chartStyles.textContent = `
     .detail-action-btn:hover {
         background: rgba(74, 158, 255, 0.2);
         transform: translateY(-1px);
+    }
+
+    .detail-action-btn.share-btn {
+        background: rgba(212, 167, 55, 0.1);
+        border-color: rgba(212, 167, 55, 0.25);
+        color: var(--gold-primary);
+    }
+
+    .detail-action-btn.share-btn:hover {
+        background: rgba(212, 167, 55, 0.2);
     }
 
     .chart-range-selector {
@@ -913,5 +916,575 @@ chartStyles.textContent = `
         color: var(--text-tertiary);
         line-height: 1.4;
     }
+
+    /* 多物品对比样式 */
+    .compare-container {
+        padding: 16px;
+    }
+
+    .compare-header {
+        margin-bottom: 16px;
+    }
+
+    .compare-title {
+        font-family: var(--font-display);
+        font-size: 16px;
+        color: var(--gold-primary);
+        letter-spacing: 0.05em;
+        margin-bottom: 8px;
+    }
+
+    .compare-items-selector {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 16px;
+    }
+
+    .compare-item-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+    }
+
+    .compare-item-input {
+        flex: 1;
+        padding: 8px 12px;
+        background: rgba(0, 0, 0, 0.2);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 6px;
+        color: var(--text-primary);
+        font-size: 13px;
+        font-family: var(--font-body);
+    }
+
+    .compare-item-input:focus {
+        outline: none;
+        border-color: rgba(212, 167, 55, 0.3);
+    }
+
+    .compare-remove-btn {
+        width: 28px;
+        height: 28px;
+        background: rgba(239, 68, 68, 0.1);
+        border: 1px solid rgba(239, 68, 68, 0.2);
+        border-radius: 6px;
+        color: var(--red-error);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 14px;
+    }
+
+    .compare-remove-btn:hover {
+        background: rgba(239, 68, 68, 0.2);
+    }
+
+    .compare-add-btn {
+        padding: 8px 16px;
+        background: rgba(74, 158, 255, 0.1);
+        border: 1px solid rgba(74, 158, 255, 0.2);
+        border-radius: 6px;
+        color: var(--blue-primary);
+        cursor: pointer;
+        font-size: 12px;
+        transition: all 0.2s;
+    }
+
+    .compare-add-btn:hover {
+        background: rgba(74, 158, 255, 0.2);
+    }
+
+    .compare-actions {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 16px;
+    }
+
+    .compare-range-selector {
+        display: flex;
+        gap: 4px;
+    }
+
+    .compare-range-btn {
+        padding: 4px 10px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 4px;
+        color: var(--text-secondary);
+        cursor: pointer;
+        font-size: 11px;
+        transition: all 0.2s;
+    }
+
+    .compare-range-btn.active {
+        background: rgba(212, 167, 55, 0.15);
+        border-color: rgba(212, 167, 55, 0.3);
+        color: var(--gold-primary);
+    }
+
+    .compare-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 12px;
+        padding: 8px;
+        background: rgba(0, 0, 0, 0.15);
+        border-radius: 6px;
+    }
+
+    .compare-legend-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        color: var(--text-secondary);
+    }
+
+    .compare-legend-color {
+        width: 12px;
+        height: 3px;
+        border-radius: 2px;
+    }
+
+    .trend-badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 10px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-weight: 600;
+        margin-left: 8px;
+        vertical-align: middle;
+    }
+    .trend-up { background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); }
+    .trend-down { background: rgba(74, 222, 128, 0.15); color: #4ade80; border: 1px solid rgba(74, 222, 128, 0.3); }
+    .trend-stable { background: rgba(255, 255, 255, 0.05); color: var(--text-tertiary); border: 1px solid rgba(255, 255, 255, 0.1); }
+
+    .item-enhanced-info {
+        background: rgba(74, 158, 255, 0.04);
+        border: 1px solid rgba(74, 158, 255, 0.12);
+        border-radius: 4px;
+        padding: 8px 10px;
+        margin: 8px 0;
+    }
+    .enhanced-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 3px 0;
+    }
+    .enhanced-label {
+        font-size: 11px;
+        color: var(--text-tertiary);
+        min-width: 50px;
+    }
+    .enhanced-value {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+    .enhanced-value.oversupply { color: var(--blue-primary); }
+    .enhanced-value.high-demand { color: var(--red-error); }
+    .enhanced-value.balanced { color: var(--text-secondary); }
+    .enhanced-detail {
+        font-size: 10px;
+        color: var(--text-tertiary);
+        margin-left: auto;
+    }
 `;
 document.head.appendChild(chartStyles);
+
+// ===== 多物品价格对比 =====
+
+const COMPARE_COLORS = [
+    { line: '#4a9eff', fill: 'rgba(74, 158, 255, 0.1)' },
+    { line: '#ef4444', fill: 'rgba(239, 68, 68, 0.1)' },
+    { line: '#4ade80', fill: 'rgba(74, 222, 128, 0.1)' },
+    { line: '#f59e0b', fill: 'rgba(245, 158, 11, 0.1)' },
+    { line: '#a855f7', fill: 'rgba(168, 85, 247, 0.1)' },
+];
+
+let compareChart = null;
+let compareItems = ['', ''];
+let compareRange = '7d';
+
+function showComparePanel() {
+    openDetailPanel();
+    renderCompareUI();
+}
+
+function renderCompareUI() {
+    const content = document.getElementById('detail-content');
+
+    let html = `
+        <div class="compare-container">
+            <div class="compare-header">
+                <div class="compare-title">价格走势对比</div>
+            </div>
+            <div class="compare-items-selector" id="compare-items-selector">
+    `;
+
+    compareItems.forEach((item, index) => {
+        html += `
+            <div class="compare-item-row">
+                <input type="text" class="compare-item-input" placeholder="输入物品名称..."
+                    value="${item}" data-index="${index}"
+                    oninput="onCompareInputChange(this, ${index})">
+                <div class="compare-suggestions" id="compare-suggestions-${index}" style="display:none; position:absolute;"></div>
+                ${compareItems.length > 2 ? `
+                <button class="compare-remove-btn" onclick="removeCompareItem(${index})">×</button>
+                ` : ''}
+            </div>
+        `;
+    });
+
+    html += `
+                ${compareItems.length < 5 ? `
+                <button class="compare-add-btn" onclick="addCompareItem()">+ 添加物品</button>
+                ` : ''}
+            </div>
+            <div class="compare-actions">
+                <div class="compare-range-selector">
+                    <button class="compare-range-btn ${compareRange === '24h' ? 'active' : ''}" onclick="setCompareRange('24h')">24h</button>
+                    <button class="compare-range-btn ${compareRange === '7d' ? 'active' : ''}" onclick="setCompareRange('7d')">7天</button>
+                    <button class="compare-range-btn ${compareRange === '30d' ? 'active' : ''}" onclick="setCompareRange('30d')">30天</button>
+                </div>
+                <button class="form-btn primary" onclick="runCompare()" style="flex:none; padding: 6px 16px;">对比</button>
+            </div>
+            <div id="compare-chart-area"></div>
+        </div>
+    `;
+
+    content.innerHTML = html;
+
+    // 绑定输入建议事件
+    compareItems.forEach((_, index) => {
+        const input = document.querySelector(`.compare-item-input[data-index="${index}"]`);
+        if (input) {
+            let debounce;
+            input.addEventListener('input', () => {
+                clearTimeout(debounce);
+                debounce = setTimeout(() => showCompareSuggestions(input, index), 300);
+            });
+        }
+    });
+}
+
+function addCompareItem() {
+    if (compareItems.length >= 5) return;
+    compareItems.push('');
+    renderCompareUI();
+}
+
+function removeCompareItem(index) {
+    compareItems.splice(index, 1);
+    renderCompareUI();
+}
+
+function setCompareRange(range) {
+    compareRange = range;
+    document.querySelectorAll('.compare-range-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.textContent.includes(range === '24h' ? '24h' : range === '7d' ? '7天' : '30天'));
+    });
+}
+
+let compareDebounce = null;
+function onCompareInputChange(input, index) {
+    compareItems[index] = input.value;
+    clearTimeout(compareDebounce);
+    compareDebounce = setTimeout(() => showCompareSuggestions(input, index), 300);
+}
+
+async function showCompareSuggestions(input, index) {
+    const query = input.value.trim();
+    const sugDiv = document.getElementById(`compare-suggestions-${index}`);
+    if (!sugDiv || query.length < 1) {
+        if (sugDiv) sugDiv.style.display = 'none';
+        return;
+    }
+
+    try {
+        const res = await fetch(`/api/suggest?q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        if (!data.suggestions || data.suggestions.length === 0) {
+            sugDiv.style.display = 'none';
+            return;
+        }
+
+        sugDiv.innerHTML = data.suggestions.map(s =>
+            `<div class="suggestion-item" onclick="selectCompareItem(${index}, '${s}')">${s}</div>`
+        ).join('');
+        sugDiv.style.display = 'block';
+        sugDiv.style.cssText = 'display:block; position:absolute; background:var(--glass-bg); border:var(--glass-border); border-radius:8px; max-height:150px; overflow-y:auto; z-index:10; width:100%;';
+    } catch (e) {
+        sugDiv.style.display = 'none';
+    }
+}
+
+function selectCompareItem(index, itemId) {
+    compareItems[index] = itemId;
+    const input = document.querySelector(`.compare-item-input[data-index="${index}"]`);
+    if (input) input.value = itemId;
+    const sugDiv = document.getElementById(`compare-suggestions-${index}`);
+    if (sugDiv) sugDiv.style.display = 'none';
+}
+
+async function runCompare() {
+    const validItems = compareItems.filter(i => i.trim() !== '');
+    if (validItems.length < 2) {
+        showToast('请至少输入2个物品', 'warning');
+        return;
+    }
+
+    const chartArea = document.getElementById('compare-chart-area');
+    chartArea.innerHTML = createChartLoading();
+
+    try {
+        const res = await fetch('/api/history/compare', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_ids: validItems, range: compareRange })
+        });
+        const data = await res.json();
+
+        if (!data.items || Object.keys(data.items).length === 0) {
+            chartArea.innerHTML = '<div class="chart-empty"><p>无数据可对比</p></div>';
+            return;
+        }
+
+        renderCompareChart(data);
+    } catch (err) {
+        chartArea.innerHTML = createChartError('对比请求失败');
+    }
+}
+
+function renderCompareChart(data) {
+    const chartArea = document.getElementById('compare-chart-area');
+
+    let html = `
+        <div class="chart-container" style="height:300px;">
+            <canvas id="compare-chart"></canvas>
+        </div>
+        <div class="compare-legend" id="compare-legend"></div>
+    `;
+    chartArea.innerHTML = html;
+
+    const ctx = document.getElementById('compare-chart');
+    if (!ctx) return;
+
+    if (compareChart) {
+        compareChart.destroy();
+    }
+
+    const datasets = [];
+    const legendItems = [];
+    let colorIndex = 0;
+
+    Object.entries(data.items).forEach(([itemId, itemData]) => {
+        if (!itemData.snapshots || itemData.snapshots.length === 0) return;
+
+        const color = COMPARE_COLORS[colorIndex % COMPARE_COLORS.length];
+        const labels = itemData.snapshots.map(s => s.timestamp).reverse();
+        const sellPrices = itemData.snapshots.map(s => s.sell_price).reverse();
+
+        datasets.push({
+            label: itemData.display || itemId,
+            data: sellPrices,
+            borderColor: color.line,
+            backgroundColor: color.fill,
+            borderWidth: 2,
+            pointRadius: 2,
+            pointHoverRadius: 4,
+            tension: 0.4,
+            fill: false
+        });
+
+        legendItems.push({ name: itemData.display || itemId, color: color.line });
+        colorIndex++;
+    });
+
+    if (datasets.length === 0) {
+        chartArea.innerHTML = '<div class="chart-empty"><p>所选物品无历史数据</p></div>';
+        return;
+    }
+
+    // 使用第一个物品的时间戳作为标签
+    const firstItem = Object.values(data.items).find(i => i.snapshots && i.snapshots.length > 0);
+    const labels = firstItem ? firstItem.snapshots.map(s => formatDate(s.timestamp)).reverse() : [];
+
+    compareChart = new Chart(ctx.getContext('2d'), {
+        type: 'line',
+        data: { labels, datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: CHART_COLORS.tooltip.bg,
+                    borderColor: CHART_COLORS.tooltip.border,
+                    borderWidth: 1,
+                    titleColor: CHART_COLORS.tooltip.text,
+                    bodyColor: CHART_COLORS.tooltip.text,
+                    padding: 12,
+                    titleFont: { family: "'Rajdhani', sans-serif", size: 14, weight: '600' },
+                    bodyFont: { family: "'JetBrains Mono', monospace", size: 12 },
+                    callbacks: {
+                        label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y}p`
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    grid: { color: CHART_COLORS.grid, drawBorder: false },
+                    ticks: {
+                        color: CHART_COLORS.text,
+                        font: { family: "'JetBrains Mono', monospace", size: 10 },
+                        maxRotation: 45,
+                        minRotation: 45
+                    }
+                },
+                y: {
+                    grid: { color: CHART_COLORS.grid, drawBorder: false },
+                    ticks: {
+                        color: CHART_COLORS.text,
+                        font: { family: "'JetBrains Mono', monospace", size: 11 },
+                        callback: (v) => v + 'p'
+                    }
+                }
+            }
+        }
+    });
+
+    // 渲染图例
+    const legendDiv = document.getElementById('compare-legend');
+    if (legendDiv) {
+        legendDiv.innerHTML = legendItems.map(item =>
+            `<div class="compare-legend-item">
+                <div class="compare-legend-color" style="background:${item.color}"></div>
+                <span>${item.name}</span>
+            </div>`
+        ).join('');
+    }
+}
+
+// 绑定对比按钮
+document.getElementById('compare-btn')?.addEventListener('click', showComparePanel);
+
+// ===== 社交分享 - 生成价格卡片图片 =====
+
+async function shareItemCard(itemId, displayName, sellPrice, buyPrice, spread) {
+    try {
+        const canvas = document.createElement('canvas');
+        const W = 600, H = 320;
+        canvas.width = W;
+        canvas.height = H;
+        const ctx = canvas.getContext('2d');
+
+        // 背景
+        const grad = ctx.createLinearGradient(0, 0, W, H);
+        grad.addColorStop(0, '#0c1020');
+        grad.addColorStop(1, '#1a1040');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+
+        // 边框
+        ctx.strokeStyle = 'rgba(212, 167, 55, 0.4)';
+        ctx.lineWidth = 2;
+        roundRect(ctx, 4, 4, W - 8, H - 8, 16);
+        ctx.stroke();
+
+        // 顶部装饰线
+        ctx.fillStyle = 'rgba(212, 167, 55, 0.6)';
+        ctx.fillRect(40, 60, W - 80, 1);
+
+        // 标题
+        ctx.fillStyle = '#d4a737';
+        ctx.font = 'bold 14px sans-serif';
+        ctx.fillText('WARFRAME 交易助手', 40, 42);
+
+        // 物品名
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 28px sans-serif';
+        const name = displayName.length > 20 ? displayName.substring(0, 20) + '...' : displayName;
+        ctx.fillText(name, 40, 105);
+
+        // 价格区域
+        const priceY = 150;
+        // 卖价
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.15)';
+        roundRect(ctx, 40, priceY, 150, 80, 10);
+        ctx.fill();
+        ctx.fillStyle = '#888';
+        ctx.font = '12px sans-serif';
+        ctx.fillText('最低卖价', 55, priceY + 25);
+        ctx.fillStyle = '#ef4444';
+        ctx.font = 'bold 24px sans-serif';
+        ctx.fillText(sellPrice !== null ? sellPrice + 'p' : '暂无', 55, priceY + 58);
+
+        // 收价
+        ctx.fillStyle = 'rgba(74, 222, 128, 0.15)';
+        roundRect(ctx, 210, priceY, 150, 80, 10);
+        ctx.fill();
+        ctx.fillStyle = '#888';
+        ctx.font = '12px sans-serif';
+        ctx.fillText('最高收价', 225, priceY + 25);
+        ctx.fillStyle = '#4ade80';
+        ctx.font = 'bold 24px sans-serif';
+        ctx.fillText(buyPrice !== null ? buyPrice + 'p' : '暂无', 225, priceY + 58);
+
+        // 价差
+        ctx.fillStyle = 'rgba(74, 158, 255, 0.15)';
+        roundRect(ctx, 380, priceY, 150, 80, 10);
+        ctx.fill();
+        ctx.fillStyle = '#888';
+        ctx.font = '12px sans-serif';
+        ctx.fillText('价差', 395, priceY + 25);
+        ctx.fillStyle = '#4a9eff';
+        ctx.font = 'bold 24px sans-serif';
+        ctx.fillText(spread !== null ? spread + 'p' : '-', 395, priceY + 58);
+
+        // 底部
+        ctx.fillStyle = 'rgba(255,255,255,0.15)';
+        ctx.fillRect(40, H - 60, W - 80, 1);
+        ctx.fillStyle = '#666';
+        ctx.font = '11px sans-serif';
+        const now = new Date();
+        ctx.fillText(`生成时间: ${now.toLocaleDateString('zh-CN')} ${now.toLocaleTimeString('zh-CN')}`, 40, H - 30);
+        ctx.fillText('warframe.trade', W - 120, H - 30);
+
+        // 尝试复制到剪贴板
+        if (navigator.clipboard && window.ClipboardItem) {
+            const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+            await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+            showToast('价格卡片已复制到剪贴板', 'success');
+        } else {
+            // 降级：下载图片
+            const link = document.createElement('a');
+            link.download = `warframe-${itemId}-price.png`;
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+            showToast('价格卡片已下载', 'success');
+        }
+    } catch (e) {
+        showToast('分享失败: ' + e.message, 'error');
+    }
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+}

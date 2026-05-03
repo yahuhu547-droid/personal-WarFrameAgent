@@ -1,12 +1,76 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+import re
+from collections import Counter
+from dataclasses import dataclass, replace, field
 from pathlib import Path
 
 from . import config
 
 MEMORY_PATH = config.DATA_DIR / "agent_memory.json"
+
+_BUY_KEYWORDS = ["买", "收", "最低卖", "卖最低"]
+_SELL_KEYWORDS = ["卖", "出", "最高收", "收多少", "有人收"]
+_CATEGORY_KEYWORDS = {
+    "arcane": ["赋能", "arcane"],
+    "prime_set": ["一套", "p套", "prime set", "set"],
+    "prime_part": ["机体", "系统", "蓝图", "头部", "chassis", "systems", "blueprint", "neuroptics"],
+    "mod": ["mod", "卡片", "振幅晶体"],
+}
+
+
+@dataclass(frozen=True)
+class ProactiveSuggestion:
+    item_id: str
+    suggestion_type: str  # anomaly, trend, opportunity
+    priority: int  # 1=critical, 2=important, 3=info
+    message: str
+    timestamp: str = ""
+
+
+@dataclass(frozen=True)
+class UserProfile:
+    preferred_trade_type: str = "neutral"  # buy, sell, neutral
+    queried_items: dict[str, int] = field(default_factory=dict)
+    favorite_categories: list[str] = field(default_factory=list)
+    total_queries: int = 0
+
+    @classmethod
+    def from_questions(cls, questions: list[str]) -> "UserProfile":
+        buy_count = 0
+        sell_count = 0
+        item_counter: Counter[str] = Counter()
+        category_counter: Counter[str] = Counter()
+
+        for q in questions:
+            lower = q.lower()
+            if any(kw in lower for kw in _BUY_KEYWORDS):
+                buy_count += 1
+            if any(kw in lower for kw in _SELL_KEYWORDS):
+                sell_count += 1
+            for cat, keywords in _CATEGORY_KEYWORDS.items():
+                if any(kw in lower for kw in keywords):
+                    category_counter[cat] += 1
+            # 提取可能的物品名（简单启发式：跳过纯关键词）
+            tokens = re.split(r"[\s,，。?？!！]+", q)
+            for tok in tokens:
+                if len(tok) >= 2 and tok not in (*_BUY_KEYWORDS, *_SELL_KEYWORDS):
+                    item_counter[tok] += 1
+
+        if buy_count > sell_count:
+            preferred = "buy"
+        elif sell_count > buy_count:
+            preferred = "sell"
+        else:
+            preferred = "neutral"
+
+        return cls(
+            preferred_trade_type=preferred,
+            queried_items=dict(item_counter.most_common(20)),
+            favorite_categories=[cat for cat, _ in category_counter.most_common(5)],
+            total_queries=len(questions),
+        )
 
 
 @dataclass(frozen=True)
@@ -47,6 +111,8 @@ class AgentMemory:
     favorite_items: list[str]
     common_questions: list[str]
     watchlist: list[WatchItem]
+    user_profile: UserProfile | None = None
+    recent_suggestions: list[ProactiveSuggestion] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path = MEMORY_PATH) -> "AgentMemory":
@@ -57,12 +123,17 @@ class AgentMemory:
         preferences = TradingPreferences(**data.get("preferences", {}))
         alerts = [PriceAlert(**alert) for alert in data.get("price_alerts", [])]
         watchlist = [WatchItem(**item) for item in data.get("watchlist", [])]
+        profile_data = data.get("user_profile")
+        profile = UserProfile(**profile_data) if profile_data else None
+        suggestions = [ProactiveSuggestion(**s) for s in data.get("recent_suggestions", [])]
         return cls(
             preferences=preferences,
             price_alerts=alerts,
             favorite_items=list(data.get("favorite_items", [])),
             common_questions=list(data.get("common_questions", [])),
             watchlist=watchlist,
+            user_profile=profile,
+            recent_suggestions=suggestions,
         )
 
     @classmethod
@@ -73,6 +144,7 @@ class AgentMemory:
             favorite_items=[],
             common_questions=[],
             watchlist=[],
+            user_profile=None,
         )
 
     def save(self, path: Path = MEMORY_PATH) -> None:
@@ -80,7 +152,7 @@ class AgentMemory:
         path.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "preferences": {
                 "platform": self.preferences.platform,
                 "crossplay": self.preferences.crossplay,
@@ -108,6 +180,36 @@ class AgentMemory:
                 for item in self.watchlist
             ],
         }
+        if self.user_profile is not None:
+            result["user_profile"] = {
+                "preferred_trade_type": self.user_profile.preferred_trade_type,
+                "queried_items": self.user_profile.queried_items,
+                "favorite_categories": self.user_profile.favorite_categories,
+                "total_queries": self.user_profile.total_queries,
+            }
+        if self.recent_suggestions:
+            result["recent_suggestions"] = [
+                {
+                    "item_id": s.item_id,
+                    "suggestion_type": s.suggestion_type,
+                    "priority": s.priority,
+                    "message": s.message,
+                    "timestamp": s.timestamp,
+                }
+                for s in self.recent_suggestions
+            ]
+        return result
+
+    def analyze_and_update_profile(self) -> "AgentMemory":
+        """根据 common_questions 重新分析用户画像"""
+        if not self.common_questions:
+            return self
+        profile = UserProfile.from_questions(self.common_questions)
+        return replace(self, user_profile=profile)
+
+    def with_suggestion(self, suggestion: ProactiveSuggestion, limit: int = 20) -> "AgentMemory":
+        suggestions = [*self.recent_suggestions, suggestion]
+        return replace(self, recent_suggestions=suggestions[-limit:])
 
     def with_updated_preferences(
         self,

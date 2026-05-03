@@ -5,12 +5,15 @@ import json
 import time
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+import httpx
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 from pathlib import Path
 
+from .. import config
 from ..chat import ChatAgent, build_item_context_result
 from ..dictionary import normalize_lookup_key, normalize_market_id
 from ..market import fetch_orders_async, best_sellers, best_buyers
@@ -22,6 +25,18 @@ from ..trade_history import TradeHistoryDB
 from ..formatter import build_whisper
 
 app = FastAPI(title="Warframe Trading Agent API")
+
+
+class NoCacheAPIMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
+
+app.add_middleware(NoCacheAPIMiddleware)
 
 chat_agent = ChatAgent()
 monitor = PriceMonitor()
@@ -636,6 +651,218 @@ async def get_history(item_id: str, range: str = "all") -> JSONResponse:
     })
 
 
+class CompareHistoryRequest(BaseModel):
+    item_ids: list[str]
+    range: str = "7d"
+
+
+@app.post("/api/history/compare")
+async def compare_history(request: CompareHistoryRequest) -> JSONResponse:
+    """批量获取多个物品的历史价格，用于走势对比"""
+    if len(request.item_ids) > 5:
+        raise HTTPException(400, "最多比较5个物品")
+
+    range_map = {"24h": 24, "7d": 168, "30d": 720, "all": 0}
+    hours = range_map.get(request.range, 168)
+
+    results = {}
+    for item_id in request.item_ids:
+        try:
+            if hours > 0:
+                snapshots = price_db.recent_since(item_id, hours=hours)
+            else:
+                snapshots = price_db.recent(item_id, limit=50)
+            display = display_item_name(item_id)
+            results[item_id] = {
+                "display": display,
+                "snapshots": [
+                    {
+                        "timestamp": s.timestamp,
+                        "sell_price": s.sell_price,
+                        "buy_price": s.buy_price,
+                    }
+                    for s in snapshots
+                ]
+            }
+        except Exception:
+            results[item_id] = {"display": item_id, "snapshots": []}
+
+    return JSONResponse({"items": results, "range": request.range})
+
+
+# ===== 价格异常检测 API =====
+
+@app.get("/api/price/anomalies")
+async def detect_price_anomalies(threshold: float = 30.0) -> JSONResponse:
+    """检测价格异常（暴涨暴跌）
+    threshold: 偏离平均价格的百分比阈值，默认30%
+    """
+    memory = AgentMemory.load(MEMORY_PATH)
+    anomalies = []
+
+    # 检查收藏物品
+    items_to_check = set(memory.favorite_items)
+    # 也检查关注列表
+    for watch in memory.watchlist:
+        items_to_check.add(watch.item_id)
+
+    for item_id in items_to_check:
+        try:
+            # 获取历史数据
+            snapshots = price_db.recent(item_id, limit=20)
+            if len(snapshots) < 5:
+                continue
+
+            # 计算历史平均价格
+            sell_prices = [s.sell_price for s in snapshots if s.sell_price is not None]
+            if len(sell_prices) < 3:
+                continue
+
+            avg_price = sum(sell_prices) / len(sell_prices)
+            latest_price = sell_prices[0]  # 最新的价格
+
+            # 计算偏离百分比
+            deviation = ((latest_price - avg_price) / avg_price) * 100
+
+            if abs(deviation) >= threshold:
+                anomaly_type = "spike" if deviation > 0 else "drop"
+                anomalies.append({
+                    "item_id": item_id,
+                    "display": display_item_name(item_id),
+                    "current_price": latest_price,
+                    "avg_price": round(avg_price, 1),
+                    "deviation": round(deviation, 1),
+                    "type": anomaly_type,
+                    "type_display": "暴涨" if anomaly_type == "spike" else "暴跌",
+                    "snapshots_count": len(sell_prices),
+                })
+        except Exception:
+            continue
+
+    # 按偏离程度排序
+    anomalies.sort(key=lambda x: abs(x["deviation"]), reverse=True)
+
+    return JSONResponse({
+        "anomalies": anomalies,
+        "total": len(anomalies),
+        "threshold": threshold,
+    })
+
+
+# ===== 虚空裂隙追踪 API =====
+
+@app.get("/api/fissures")
+async def get_fissures() -> JSONResponse:
+    """获取虚空裂隙数据（优先外部API，失败则用本地掉落数据分析）"""
+    # 尝试外部 API
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get("https://api.warframestat.us/pc/fissures")
+            if resp.status_code == 200:
+                fissures = resp.json()
+                tiers = {"Lith": [], "Meso": [], "Neo": [], "Axi": [], "Requiem": []}
+                for f in fissures:
+                    tier = f.get("tier", "")
+                    if tier in tiers:
+                        tiers[tier].append({
+                            "id": f.get("id"),
+                            "node": f.get("node"),
+                            "missionType": f.get("missionType"),
+                            "enemy": f.get("enemy"),
+                            "tier": tier,
+                            "eta": f.get("eta"),
+                            "expired": f.get("expired", False),
+                        })
+                return JSONResponse({"fissures": tiers, "timestamp": time.time(), "source": "live"})
+    except Exception:
+        pass
+
+    # 外部 API 失败，使用本地掉落数据分析推荐
+    try:
+        relic_path = config.DATA_DIR / "relics_drop_data.json"
+        if not relic_path.exists():
+            return JSONResponse({"fissures": {}, "message": "外部API不可用且无本地遗物数据", "source": "none"})
+
+        with relic_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        # 按纪元分组，只取 Intact 状态，计算稀有掉落
+        tiers = {"Lith": [], "Meso": [], "Neo": [], "Axi": [], "Requiem": []}
+        seen = set()
+        for relic in data.get("relics", []):
+            tier = relic.get("tier", "")
+            relic_name = relic.get("relicName", "")
+            state = relic.get("state", "")
+            if tier not in tiers or state != "Intact":
+                continue
+            key = f"{tier}_{relic_name}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            rewards = relic.get("rewards", [])
+            rare_drops = [r for r in rewards if r.get("rarity") == "Rare"]
+            uncommon_drops = [r for r in rewards if r.get("rarity") == "Uncommon"]
+
+            tiers[tier].append({
+                "id": f"{tier} {relic_name}",
+                "node": f"{tier} {relic_name}",
+                "missionType": "虚空裂隙",
+                "tier": tier,
+                "eta": "随时可用",
+                "expired": False,
+                "rare_drops": [{"name": r.get("itemName", ""), "chance": r.get("chance", 0)} for r in rare_drops],
+                "uncommon_drops": [{"name": r.get("itemName", ""), "chance": r.get("chance", 0)} for r in uncommon_drops[:2]],
+                "rare_count": len(rare_drops),
+            })
+
+        # 每个纪元按稀有掉落数排序，取前20
+        for t in tiers:
+            tiers[t].sort(key=lambda x: x.get("rare_count", 0), reverse=True)
+            tiers[t] = tiers[t][:20]
+
+        return JSONResponse({
+            "fissures": tiers,
+            "timestamp": time.time(),
+            "source": "local",
+            "message": "外部API暂不可用，显示本地遗物掉落数据"
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/fissures/relics")
+async def get_relic_info() -> JSONResponse:
+    """获取遗物信息（从本地数据）"""
+    try:
+        relic_path = config.EXPORT_DIR / "ExportRelicArcane_zh.json"
+        if not relic_path.exists():
+            return JSONResponse({"relics": [], "message": "遗物数据不存在"})
+
+        with relic_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        relics = []
+        for item in data.get("ExportRelicArcane", []):
+            if "Relic" in item.get("name", ""):
+                rewards = item.get("relicRewards", [])
+                relics.append({
+                    "name": item["name"],
+                    "uniqueName": item["uniqueName"],
+                    "rewards": [
+                        {
+                            "name": r.get("rewardName", "").split("/")[-1],
+                            "rarity": r.get("rarity"),
+                        }
+                        for r in rewards
+                    ],
+                })
+
+        return JSONResponse({"relics": relics[:100]})  # 限制返回数量
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/api/favorites_prices")
 async def get_favorites_prices() -> JSONResponse:
     memory = AgentMemory.load(MEMORY_PATH)
@@ -686,7 +913,7 @@ async def get_item_detail(item_id: str) -> JSONResponse:
         if item_id.startswith("arcane_") and ctx.best_sell_price:
             result["max_level_cost"] = ctx.best_sell_price * 21
 
-        # 添加物品类型和等级信息
+        # 物品类型和等级信息
         type_info = get_item_type_info(item_id)
         if type_info:
             result["item_type"] = type_info["type"]
@@ -694,15 +921,47 @@ async def get_item_detail(item_id: str) -> JSONResponse:
             result["max_rank"] = type_info["max_rank"]
             result["rarity"] = type_info.get("rarity", "COMMON")
 
-        # 添加杜卡特信息
+        # 杜卡特信息
         ducat_value = get_ducat_value(item_id)
         if ducat_value is not None:
             result["ducat_value"] = ducat_value
-            # 计算杜卡特效率
             if ctx.best_sell_price:
                 efficiency = calculate_ducat_efficiency(ctx.best_sell_price, ducat_value)
                 if efficiency:
                     result["ducat_efficiency"] = efficiency
+
+        # 供需比（卖家数量 vs 买家数量）
+        sell_orders = [o for o in orders if o.get("order_type") == "sell"]
+        buy_orders = [o for o in orders if o.get("order_type") == "buy"]
+        result["supply_count"] = len(sell_orders)
+        result["demand_count"] = len(buy_orders)
+        if len(buy_orders) > 0:
+            result["supply_demand_ratio"] = round(len(sell_orders) / len(buy_orders), 2)
+        else:
+            result["supply_demand_ratio"] = None
+
+        # 历史价格趋势（从 price_db）
+        snapshots = price_db.recent(item_id, limit=20)
+        if snapshots:
+            sell_prices = [s.sell_price for s in snapshots if s.sell_price is not None]
+            if sell_prices:
+                result["history_high"] = max(sell_prices)
+                result["history_low"] = min(sell_prices)
+                result["history_avg"] = round(sum(sell_prices) / len(sell_prices), 1)
+                # 趋势判断：最近价格 vs 平均
+                latest = sell_prices[0]
+                avg = result["history_avg"]
+                deviation = ((latest - avg) / avg * 100) if avg > 0 else 0
+                if deviation > 5:
+                    result["trend"] = "up"
+                    result["trend_display"] = f"↑ {deviation:.1f}%"
+                elif deviation < -5:
+                    result["trend"] = "down"
+                    result["trend_display"] = f"↓ {abs(deviation):.1f}%"
+                else:
+                    result["trend"] = "stable"
+                    result["trend_display"] = "→ 稳定"
+                result["trend_deviation"] = round(deviation, 1)
 
         return JSONResponse(result)
     except Exception as e:
@@ -984,6 +1243,66 @@ async def scan_arbitrage_from_watchlist() -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+# ===== 利润计算器 API =====
+
+class ProfitCalcRequest(BaseModel):
+    item_id: str
+    material_costs: list[dict]  # [{"item_id": str, "quantity": int, "unit_cost": int}]
+
+
+@app.post("/api/profit/calculate")
+async def calculate_profit(request: ProfitCalcRequest) -> JSONResponse:
+    """计算制成品利润"""
+    try:
+        # 获取成品当前市场价格
+        orders = await fetch_orders_async(request.item_id)
+        sellers = best_sellers(orders, limit=1)
+        buyers = best_buyers(orders, limit=1)
+
+        sell_price = sellers[0].platinum if sellers else None
+        buy_price = buyers[0].platinum if buyers else None
+
+        # 计算材料总成本
+        total_cost = 0
+        materials_detail = []
+        for mat in request.material_costs:
+            qty = mat.get("quantity", 1)
+            unit_cost = mat.get("unit_cost", 0)
+            mat_total = qty * unit_cost
+            total_cost += mat_total
+            materials_detail.append({
+                "item_id": mat["item_id"],
+                "display": display_item_name(mat["item_id"]),
+                "quantity": qty,
+                "unit_cost": unit_cost,
+                "total_cost": mat_total,
+            })
+
+        # 计算利润
+        profit_sell = sell_price - total_cost if sell_price else None
+        profit_buy = buy_price - total_cost if buy_price else None
+        margin_sell = round((profit_sell / total_cost) * 100, 1) if profit_sell is not None and total_cost > 0 else None
+        margin_buy = round((profit_buy / total_cost) * 100, 1) if profit_buy is not None and total_cost > 0 else None
+
+        return JSONResponse({
+            "item_id": request.item_id,
+            "display": display_item_name(request.item_id),
+            "sell_price": sell_price,
+            "buy_price": buy_price,
+            "total_cost": total_cost,
+            "materials": materials_detail,
+            "profit": {
+                "sell_profit": profit_sell,
+                "buy_profit": profit_buy,
+                "sell_margin": margin_sell,
+                "buy_margin": margin_buy,
+            },
+            "recommendation": "盈利" if (profit_sell and profit_sell > 0) else "亏损",
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/api/suggest")
 async def suggest_items(q: str = "") -> JSONResponse:
     if not q or len(q) < 1:
@@ -1212,12 +1531,19 @@ async def websocket_chat(websocket: WebSocket):
             data = await websocket.receive_text()
             message = json.loads(data).get("message", "")
             await websocket.send_json({"status": "processing"})
-            reply = await asyncio.to_thread(chat_agent.answer, message)
-            chunk_size = 3
-            for i in range(0, len(reply), chunk_size):
-                await websocket.send_json({"token": reply[i:i+chunk_size]})
-                await asyncio.sleep(0.015)
-            await websocket.send_json({"done": True, "reply": reply})
+            # 真正的流式输出：逐 token 从 LLM 获取
+            full_reply = []
+            try:
+                async for token in chat_agent.answer_stream(message):
+                    full_reply.append(token)
+                    await websocket.send_json({"token": token})
+            except Exception:
+                # 流式失败，回退到同步调用
+                reply = await asyncio.to_thread(chat_agent.answer, message)
+                full_reply = [reply]
+                await websocket.send_json({"token": reply})
+            reply_text = "".join(full_reply)
+            await websocket.send_json({"done": True, "reply": reply_text})
     except WebSocketDisconnect:
         pass
 
@@ -1271,6 +1597,327 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     monitor.stop()
+
+
+# ── 装备百科 / MOD数据库 / 遗物搜索 ──────────────────────────────────
+
+WARFRAME_ITEMS_DIR = Path(__file__).parent.parent.parent / "githubProduct" / "warframe-items" / "data" / "json"
+RELIC_DROP_DATA_PATH = Path(__file__).parent.parent.parent / "data" / "relics_drop_data.json"
+EXPORT_DIR = Path(__file__).parent.parent.parent / "data" / "export"
+
+_wiki_cache: dict[str, Any] = {}
+_zh_name_cache: dict[str, dict[str, str]] = {}
+
+RELIC_TIER_ZH = {"Lith": "古纪", "Meso": "前纪", "Neo": "中纪", "Axi": "后纪", "Requiem": "安魂"}
+
+
+def _load_wiki_json(filename: str) -> list[dict]:
+    if filename not in _wiki_cache:
+        path = WARFRAME_ITEMS_DIR / filename
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                _wiki_cache[filename] = json.load(f)
+        else:
+            _wiki_cache[filename] = []
+    return _wiki_cache[filename]
+
+
+def _load_zh_names(category: str) -> dict[str, str]:
+    """加载中文名映射 {uniqueName: 中文名}"""
+    if category not in _zh_name_cache:
+        mapping = {}
+        filename = f"Export{category}_zh.json"
+        path = EXPORT_DIR / filename
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            items = data.get(f"Export{category}", data) if isinstance(data, dict) else data
+            if isinstance(items, list):
+                for item in items:
+                    uid = item.get("uniqueName", "")
+                    name = item.get("name", "")
+                    if uid and name:
+                        mapping[uid] = name
+        _zh_name_cache[category] = mapping
+    return _zh_name_cache[category]
+
+
+def _market_url(english_name: str) -> str:
+    """生成 warframe.market 链接（非 Prime 物品）"""
+    url_name = english_name.lower().replace(" ", "_").replace("'", "")
+    return f"https://warframe.market/items/{url_name}"
+
+
+def _market_url_prime_blueprint(item_name: str) -> str:
+    """为 Prime 物品生成蓝图的 market 链接（Prime 物品在 market 只能搜部件）"""
+    # "Mirage Prime" -> "mirage_prime_blueprint"
+    # "Acceltra Prime" -> "acceltra_prime_blueprint"
+    url_name = item_name.lower().replace(" ", "_").replace("'", "")
+    return f"https://warframe.market/items/{url_name}_blueprint"
+
+
+def _extract_components(item: dict) -> list[dict]:
+    """提取可交易的 Prime 部件信息"""
+    components = []
+    for comp in item.get("components", []):
+        # 跳过资源类部件（如 Orokin Cell）
+        if comp.get("type") == "Resource":
+            continue
+        components.append({
+            "name": comp.get("name", ""),
+            "tradable": comp.get("tradable", False),
+            "ducats": comp.get("ducats", 0),
+        })
+    return components
+
+
+@app.get("/api/wiki/warframes")
+async def wiki_warframes(q: str = ""):
+    data = _load_wiki_json("Warframes.json")
+    zh_map = _load_zh_names("Warframes")
+    results = []
+    q_lower = q.lower()
+    for wf in data:
+        name = wf.get("name", "")
+        uid = wf.get("uniqueName", "")
+        name_zh = zh_map.get(uid, "")
+        if q and q_lower not in name.lower() and q not in name_zh:
+            continue
+        is_prime = wf.get("isPrime", False)
+        # Prime 战甲在 market 只能搜部件，默认跳转蓝图
+        market_url = _market_url_prime_blueprint(name) if is_prime else _market_url(name)
+        components = _extract_components(wf) if is_prime else []
+        results.append({
+            "name": name,
+            "nameZh": name_zh,
+            "uniqueName": uid,
+            "health": wf.get("health", 0),
+            "shield": wf.get("shield", 0),
+            "armor": wf.get("armor", 0),
+            "power": wf.get("power", 0),
+            "sprintSpeed": wf.get("sprintSpeed", 0),
+            "masteryReq": wf.get("masteryReq", 0),
+            "description": wf.get("description", ""),
+            "passiveDescription": wf.get("passiveDescription", ""),
+            "marketUrl": market_url,
+            "isPrime": is_prime,
+            "tradable": wf.get("tradable", False),
+            "components": components,
+            "abilities": [
+                {"name": a.get("name", ""), "description": a.get("description", "")}
+                for a in wf.get("abilities", [])
+            ],
+        })
+    results.sort(key=lambda x: x["name"])
+    return {"warframes": results, "total": len(results)}
+
+
+@app.get("/api/wiki/weapons")
+async def wiki_weapons(type: str = "", q: str = ""):
+    file_map = {
+        "primary": "Primary.json",
+        "secondary": "Secondary.json",
+        "melee": "Melee.json",
+        "archgun": "Arch-Gun.json",
+        "archmelee": "Arch-Melee.json",
+    }
+    if type and type in file_map:
+        files = [file_map[type]]
+    else:
+        files = [file_map["primary"], file_map["secondary"], file_map["melee"]]
+
+    zh_map = _load_zh_names("Weapons")
+    results = []
+    q_lower = q.lower()
+    for fname in files:
+        data = _load_wiki_json(fname)
+        category = fname.replace(".json", "").lower()
+        cat_zh = {"primary": "主武器", "secondary": "副武器", "melee": "近战武器",
+                  "archgun": "空战枪械", "archmelee": "空战近战"}.get(category, category)
+        for w in data:
+            name = w.get("name", "")
+            uid = w.get("uniqueName", "")
+            name_zh = zh_map.get(uid, "")
+            if q and q_lower not in name.lower() and q not in name_zh:
+                continue
+            is_prime = w.get("isPrime", False)
+            # Prime 武器在 market 只能搜部件，默认跳转蓝图
+            market_url = _market_url_prime_blueprint(name) if is_prime else _market_url(name)
+            components = _extract_components(w) if is_prime else []
+            results.append({
+                "name": name,
+                "nameZh": name_zh,
+                "uniqueName": uid,
+                "category": category,
+                "categoryZh": cat_zh,
+                "totalDamage": w.get("totalDamage", 0),
+                "criticalChance": w.get("criticalChance", 0),
+                "criticalMultiplier": w.get("criticalMultiplier", 0),
+                "procChance": w.get("procChance", 0),
+                "fireRate": w.get("fireRate", 0),
+                "masteryReq": w.get("masteryReq", 0),
+                "magazineSize": w.get("magazineSize", 0),
+                "reloadTime": w.get("reloadTime", 0),
+                "trigger": w.get("trigger", ""),
+                "noise": w.get("noise", ""),
+                "accuracy": w.get("accuracy", 0),
+                "description": w.get("description", ""),
+                "marketUrl": market_url,
+                "tradable": w.get("tradable", False),
+                "isPrime": is_prime,
+                "components": components,
+            })
+    results.sort(key=lambda x: x["name"])
+    return {"weapons": results, "total": len(results)}
+
+
+@app.get("/api/wiki/mods")
+async def wiki_mods(q: str = "", polarity: str = "", rarity: str = "", category: str = ""):
+    data = _load_wiki_json("Mods.json")
+    zh_map = _load_zh_names("Upgrades")
+    results = []
+    q_lower = q.lower()
+    for m in data:
+        name = m.get("name", "")
+        uid = m.get("uniqueName", "")
+        name_zh = zh_map.get(uid, "")
+        if q and q_lower not in name.lower() and q not in name_zh:
+            continue
+        if polarity and m.get("polarity", "") != polarity:
+            continue
+        if rarity and (m.get("rarity", "") or "").lower() != rarity.lower():
+            continue
+        if category:
+            mod_type = (m.get("type", "") or "").lower()
+            cat_lower = category.lower()
+            if cat_lower not in mod_type:
+                continue
+        results.append({
+            "name": name,
+            "nameZh": name_zh,
+            "uniqueName": uid,
+            "polarity": m.get("polarity", ""),
+            "rarity": m.get("rarity", ""),
+            "baseDrain": m.get("baseDrain", 0),
+            "maxRank": m.get("fusionLimit", 0),
+            "type": m.get("type", ""),
+            "compatName": m.get("compatName", ""),
+            "isAugment": m.get("isAugment", False),
+            "tradable": m.get("tradable", False),
+            "description": m.get("description", ""),
+            "marketUrl": _market_url(name),
+        })
+    results.sort(key=lambda x: x["name"])
+    return {"mods": results[:200], "total": len(results)}
+
+
+RELIC_VAULT_STATUS_PATH = Path(__file__).parent.parent.parent / "data" / "relic_vault_status.json"
+_relic_vault_cache: dict[str, dict] = {}
+
+
+def _load_relic_vault_status() -> dict[str, dict]:
+    if not _relic_vault_cache:
+        if RELIC_VAULT_STATUS_PATH.exists():
+            with open(RELIC_VAULT_STATUS_PATH, "r", encoding="utf-8") as f:
+                _relic_vault_cache.update(json.load(f))
+    return _relic_vault_cache
+
+
+def _get_vault_status(relic_base_name: str) -> str:
+    """返回遗物入库状态：入库 / 非入库"""
+    vault_data = _load_relic_vault_status()
+    info = vault_data.get(relic_base_name, {})
+    if info.get("vaulted"):
+        return "入库"
+    return "非入库"
+
+
+@app.get("/api/riven/auctions")
+async def get_riven_auctions(weapon: str = "") -> JSONResponse:
+    """获取裂罅 Mod 拍卖数据（通过 Playwright 抓取）"""
+    try:
+        from ..scraper import scrape_riven_auctions, scrape_sync
+        rivens = scrape_sync(scrape_riven_auctions(weapon))
+        return JSONResponse({
+            "rivens": [
+                {
+                    "weapon": r.weapon,
+                    "mod_name": r.mod_name,
+                    "attributes": r.attributes,
+                    "price": r.price,
+                    "seller": r.seller,
+                }
+                for r in rivens
+            ],
+            "total": len(rivens),
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e), "rivens": []}, status_code=500)
+
+
+@app.get("/api/market/scrape/{item_url_name}")
+async def scrape_market_orders(item_url_name: str) -> JSONResponse:
+    """通过 Playwright 抓取 warframe.market 订单（绕过 Cloudflare）"""
+    try:
+        from ..scraper import scrape_orders, scrape_sync
+        orders = scrape_sync(scrape_orders(item_url_name))
+        return JSONResponse({
+            "orders": [
+                {
+                    "item_id": o.item_id,
+                    "order_type": o.order_type,
+                    "platinum": o.platinum,
+                    "quantity": o.quantity,
+                    "user_name": o.user_name,
+                    "status": o.status,
+                    "reputation": o.reputation,
+                }
+                for o in orders
+            ],
+            "total": len(orders),
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e), "orders": []}, status_code=500)
+
+
+@app.get("/api/relic/search")
+async def relic_search(q: str = ""):
+    if not q:
+        return {"results": [], "total": 0}
+    if not RELIC_DROP_DATA_PATH.exists():
+        return {"results": [], "total": 0, "error": "遗物数据不可用"}
+
+    with open(RELIC_DROP_DATA_PATH, "r", encoding="utf-8") as f:
+        relic_data = json.load(f)
+
+    q_lower = q.lower()
+    results = []
+    seen = set()
+    for relic in relic_data.get("relics", []):
+        for reward in relic.get("rewards", []):
+            item_name = reward.get("itemName", "")
+            if q_lower in item_name.lower():
+                tier_en = relic.get("tier", "")
+                tier_zh = RELIC_TIER_ZH.get(tier_en, tier_en)
+                relic_id = f"{tier_en} {relic['relicName']}"
+                vault_status = _get_vault_status(relic_id)
+                key = f"{relic_id}_{item_name}"
+                if key in seen:
+                    break
+                seen.add(key)
+                results.append({
+                    "relicName": f"{tier_zh} {relic['relicName']}",
+                    "relicNameEn": relic_id,
+                    "state": relic.get("state", "Intact"),
+                    "itemName": item_name,
+                    "rarity": reward.get("rarity", ""),
+                    "rarityZh": {"Rare": "稀有", "Uncommon": "非常规", "Common": "常规"}.get(reward.get("rarity", ""), reward.get("rarity", "")),
+                    "chance": reward.get("chance", 0),
+                    "vaultStatus": vault_status,
+                })
+                break
+    results.sort(key=lambda x: (-{"Rare": 3, "Uncommon": 2, "Common": 1}.get(x["rarity"], 0), x["relicName"]))
+    return {"results": results[:100], "total": len(results)}
 
 
 static_dir = Path(__file__).parent / "static"

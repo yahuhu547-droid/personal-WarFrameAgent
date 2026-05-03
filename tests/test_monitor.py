@@ -108,6 +108,38 @@ class MonitorScanTests(unittest.TestCase):
             monitor.stop()
             self.assertFalse(monitor._thread.is_alive())
 
+    def test_scan_once_with_price_db_records_data(self):
+        from warframe_agent.price_history import PriceHistoryDB
+
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_path = self._setup_memory(tmp)
+            db = PriceHistoryDB(db_path=Path(tmp) / "prices.db")
+            monitor = PriceMonitor(
+                order_fetcher=lambda item_id: FAKE_ORDERS,
+                memory_path=memory_path,
+                price_db=db,
+            )
+            monitor.scan_once()
+            snapshots = db.recent("arcane_energize")
+
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0].sell_price, 40)
+
+    def test_scan_once_detects_watchlist_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_path = Path(tmp) / "memory.json"
+            memory = AgentMemory.default()
+            memory = memory.with_watch_item("primed_flow", "川流不息 Prime")
+            memory.save(memory_path)
+            monitor = PriceMonitor(
+                order_fetcher=lambda item_id: FAKE_ORDERS,
+                memory_path=memory_path,
+            )
+            result = monitor.scan_once()
+
+        self.assertEqual(len(result.favorite_snapshots), 1)
+        self.assertEqual(result.favorite_snapshots[0].item_id, "primed_flow")
+
 
 class ScanCommandTests(unittest.TestCase):
     def test_scan_command_shows_favorite_prices(self):

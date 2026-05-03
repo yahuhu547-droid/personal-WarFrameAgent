@@ -17,6 +17,24 @@ MARKET_API_BASE = "https://api.warframe.market/v2"
 REQUEST_TIMEOUT_SECONDS = 15
 TOP_ORDER_LIMIT = 5
 
+# 多轮对话
+CONTEXT_WINDOW = 6          # LLM 上下文中包含的最近对话轮数
+MAX_HISTORY_MESSAGES = 20   # session 存储的消息硬上限
+
+# 主动智能
+TREND_THRESHOLD_PERCENT = 15    # 趋势变化百分比阈值
+ANOMALY_THRESHOLD_PERCENT = 30  # 异常变化百分比阈值（触发建议）
+PROACTIVE_SUGGESTION_LIMIT = 5  # 最近建议注入 LLM 的条数
+
+# 语义 RAG
+EMBEDDING_MODEL = "nomic-embed-text"      # Ollama embedding 模型
+EMBEDDING_CACHE_PATH = DATA_DIR / "rag_embeddings.npz"
+EMBEDDING_ENABLED = True                  # 是否启用语义搜索
+
+# 推理规划
+MAX_TOOL_ITERATIONS = 3                   # ReAct 循环最大轮数
+REACT_MODEL = "qwen3:8b"                 # ReAct 推理模型
+
 EXPORT_FILE_PAIRS = [
     ("ExportRelicArcane_zh.json", "ExportRelicArcane_en.json"),
     ("ExportUpgrades_zh.json", "ExportUpgrades_en.json"),

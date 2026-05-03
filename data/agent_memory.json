@@ -12,8 +12,12 @@
       "note": "充沛低于45提醒"
     }
   ],
-  "favorite_items": [],
+  "favorite_items": [
+    "arcane_energize"
+  ],
   "common_questions": [
+    "充沛多少钱",
+    "那现在呢",
     "我有 Lex Prime 蓝图和枪管，还差多少钱做一套",
     "Lex Prime 一套多少钱",
     "现在呢",
@@ -27,5 +31,38 @@
     "伏特p机体多少钱",
     "伏特p一套现在多少钱"
   ],
-  "watchlist": []
+  "watchlist": [
+    {
+      "item_id": "molt_augmented",
+      "item_name": "蜕化·升腾",
+      "frequency": "daily",
+      "time": "09:00",
+      "content": "top3_buyers"
+    }
+  ],
+  "user_profile": {
+    "preferred_trade_type": "neutral",
+    "queried_items": {
+      "Lex": 2,
+      "Prime": 2,
+      "充沛多少钱": 1,
+      "那现在呢": 1,
+      "我有": 1,
+      "蓝图和枪管": 1,
+      "还差多少钱做一套": 1,
+      "一套多少钱": 1,
+      "现在呢": 1,
+      "充沛现在价格怎么样": 1,
+      "那个回蓝的赋能现在行情怎样": 1,
+      "你好啊": 1,
+      "我要买充沛": 1,
+      "我想卖充沛": 1
+    },
+    "favorite_categories": [
+      "prime_set",
+      "prime_part",
+      "arcane"
+    ],
+    "total_queries": 10
+  }
 }

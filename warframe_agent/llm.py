@@ -23,6 +23,17 @@ def resolve_with_ollama(name: str, model: str = config.MODEL_NAME) -> str | None
     return item_id or None
 
 
+def chat_with_ollama(messages: list[dict[str, str]], model: str = config.MODEL_NAME) -> str:
+    """使用 Ollama chat API 进行多轮对话"""
+    try:
+        import ollama
+    except ImportError as exc:
+        raise RuntimeError("Ollama Python package is not installed") from exc
+
+    response = ollama.chat(model=model, messages=messages)
+    return response.get("message", {}).get("content", "")
+
+
 async def stream_ollama_chat(prompt: str, model: str = config.MODEL_NAME):
     try:
         import ollama
@@ -33,3 +44,17 @@ async def stream_ollama_chat(prompt: str, model: str = config.MODEL_NAME):
     async for chunk in await client.generate(model=model, prompt=prompt, stream=True):
         if text := chunk.get("response"):
             yield text
+
+
+async def stream_chat_ollama(messages: list[dict[str, str]], model: str = config.MODEL_NAME):
+    """使用 Ollama chat API 流式输出，逐 token yield"""
+    try:
+        import ollama
+    except ImportError as exc:
+        raise RuntimeError("Ollama Python package is not installed") from exc
+
+    client = ollama.AsyncClient()
+    async for chunk in await client.chat(model=model, messages=messages, stream=True):
+        content = chunk.get("message", {}).get("content", "")
+        if content:
+            yield content

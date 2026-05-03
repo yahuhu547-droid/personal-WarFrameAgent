@@ -102,3 +102,32 @@ class PriceHistoryDB:
         elif diff < 0:
             return f"近期趋势: 下跌 {diff}p (从 {prices[0]}p 到 {prices[-1]}p)"
         return f"近期趋势: 持平 {prices[-1]}p"
+
+    def rolling_average(self, item_id: str, window: int = 5) -> float | None:
+        snapshots = self.recent(item_id, limit=window)
+        prices = [s.sell_price for s in snapshots if s.sell_price is not None]
+        if not prices:
+            return None
+        return sum(prices) / len(prices)
+
+    def detect_anomaly(self, item_id: str, threshold_pct: float = 30.0) -> dict | None:
+        """检测价格异常波动，返回 {direction, deviation_pct, current, average} 或 None"""
+        snapshots = self.recent(item_id, limit=10)
+        if len(snapshots) < 3:
+            return None
+        prices = [s.sell_price for s in reversed(snapshots) if s.sell_price is not None]
+        if len(prices) < 3:
+            return None
+        avg = sum(prices[:-1]) / len(prices[:-1])
+        current = prices[-1]
+        if avg == 0:
+            return None
+        deviation_pct = ((current - avg) / avg) * 100
+        if abs(deviation_pct) < threshold_pct:
+            return None
+        return {
+            "direction": "spike" if deviation_pct > 0 else "drop",
+            "deviation_pct": round(deviation_pct, 1),
+            "current": current,
+            "average": round(avg, 1),
+        }

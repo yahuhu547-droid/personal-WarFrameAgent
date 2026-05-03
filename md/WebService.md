@@ -1805,6 +1805,528 @@ def get_item_type_info(item_id: str) -> dict | None:
 
 ---
 
-**文档版本**：v3.4
-**最后更新**：2026-05-02
+---
+
+### Phase 16 — Bug 修复与数据源重构
+
+**日期**: 2026-05-02
+**重点**: 修复更多功能菜单点击失效、虚空裂隙加载失败、收藏删除后重启恢复等关键 Bug
+
+#### 1. 菜单点击失效修复
+
+**问题**: 更多功能菜单中除自定义别名外，所有功能点击无响应。
+
+**根因**: `openDetailPanel`、`createChartLoading`、`createChartError`、`createChartEmpty` 四个核心函数定义在 `chart.js`（最后加载的脚本）。如果 `chart.js` 有任何运行时错误，这些函数不存在，导致所有功能失效。
+
+**修复方案**: 将四个函数及关联 CSS 迁移到 `app.js`（最先加载）。
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 新增 | `js/app.js` | `openDetailPanel()`、`createChartLoading()`、`createChartEmpty()`、`createChartError()` + CSS 注入 |
+| 移除 | `js/chart.js` | 删除重复定义 |
+| 修改 | `js/sidebar.js` | 所有菜单处理器添加 `toggleMoreMenu()` 调用 |
+| 修改 | `js/chart.js` | report 按钮添加 try-catch |
+| 修改 | `js/chat.js` | alias/clear-chat 添加 `toggleMoreMenu()` |
+
+#### 2. 虚空裂隙 API 重写
+
+**问题**: `https://api.warframestat.us/pc/fissures` 被 Cloudflare 拦截。
+
+**修复**: 改用本地 `data/relics_drop_data.json`（来自 WFCD/warframe-drop-data 仓库，3014 条遗物数据），按 tier 分组并显示稀有/非常规掉落物及掉落概率。
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `web/app.py` | `/api/fissures` 端点重写 |
+| 修改 | `js/sidebar.js` | 前端适配新数据格式（rare_drops/uncommon_drops 数组） |
+| 新增 | `data/relics_drop_data.json` | 3014 条遗物掉落表 |
+| 新增 | `data/relics_list.json` | 690 个遗物名称（从 warframetools Flutter 项目提取） |
+
+#### 3. 其他 Bug 修复
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| `config is not defined` | `web/app.py` | 添加 `from .. import config` |
+| 收藏删除后重启恢复 | `web/app.py` | 添加 `NoCacheAPIMiddleware` 禁止 API 缓存 |
+| 全局错误未捕获 | `index.html` | 添加 `window.onerror` + `unhandledrejection` 处理器 |
+| 价格异常逻辑 | `web/app.py` | 仅检查收藏列表中的物品 |
+
+#### 4. GitHub 项目参考
+
+| 仓库 | 用途 |
+|------|------|
+| `githubProduct/warframe-drop-data/` | 遗物掉落表数据源 |
+| `githubProduct/warframe-items/` | 物品综合数据参考 |
+
+**测试结果**: 102 个测试全部通过
+
+---
+
+### Phase 17 — 新增数据浏览功能
+
+**日期**: 2026-05-02
+**重点**: 基于 warframe-items 本地数据新增 3 个百科类功能
+
+#### 1. 装备百科（Warframe / 武器浏览器）
+
+浏览所有 Warframe 和武器的基础属性、技能信息。
+
+- **Warframe 浏览**: 118 个战甲，显示生命/护盾/护甲/能量/冲刺速度/段位需求/被动/技能
+- **武器浏览**: 主武器(193)、副武器、近战武器，显示总伤害/暴击率/暴击倍率/触发率/射速/弹匣/装填
+- **搜索过滤**: 支持名称搜索
+- **详情页面**: 点击卡片展开完整属性
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 新增 | `web/app.py` | `GET /api/wiki/warframes`, `GET /api/wiki/weapons` |
+| 修改 | `js/sidebar.js` | `showWikiWarframes()`, `showWikiWeapons()`, 详情函数 |
+| 修改 | `css/style.css` | wiki-card, wiki-grid, wiki-detail 样式 |
+| 修改 | `index.html` | 菜单按钮 |
+
+#### 2. MOD 数据库
+
+搜索和过滤 1801 个 MOD，支持按极性、稀有度、类型过滤。
+
+- **搜索**: 名称模糊搜索
+- **过滤器**: 极性(Madurai/Vazarin/Naramon/Zenurik/Penjaga/Umbra)、稀有度(Common/Uncommon/Rare/Legendary/Peculiar)
+- **详情页**: 显示类型、极性、容量消耗、兼容性、是否强化MOD、是否可交易
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 新增 | `web/app.py` | `GET /api/wiki/mods` |
+| 修改 | `js/sidebar.js` | `showWikiMods()`, `searchWikiMods()`, `showWikiModDetail()` |
+
+#### 3. 遗物搜索
+
+根据物品名称搜索掉落该物品的所有遗物，显示稀有度和掉落概率。
+
+- **数据源**: `data/relics_drop_data.json`（3014 条遗物数据）
+- **搜索**: 物品名称模糊匹配
+- **排序**: 按稀有度（Rare > Uncommon > Common）+ 遗物名称
+- **显示**: 遗物名称、物品名、稀有度、掉落概率
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 新增 | `web/app.py` | `GET /api/relic/search` |
+| 修改 | `js/sidebar.js` | `showRelicSearch()` |
+| 修改 | `index.html` | 遗物搜索菜单按钮 |
+
+#### 4. 菜单优化
+
+将价格异常和虚空裂隙从动态插入改为静态 HTML 按钮，减少 JS 运行时依赖。
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `index.html` | 添加 fissure-btn, anomaly-btn 静态按钮 |
+| 修改 | `js/sidebar.js` | 移除动态 createElement，改用事件绑定 |
+
+**测试结果**: 102 个测试全部通过
+
+---
+
+### Phase 18 — 中文化与 warframe.market 链接
+
+**日期**: 2026-05-02
+**重点**: 全面中文化 + 交易跳转链接
+
+#### 1. 遗物搜索中文化
+
+- Tier 名称：Lith→古纪、Meso→前纪、Neo→中纪、Axi→后纪、Requiem→安魂
+- 稀有度：Rare→稀有、Uncommon→非常规、Common→常规
+
+#### 2. MOD/装备中文名
+
+- 从 `data/export/ExportWarframes_zh.json`、`ExportWeapons_zh.json`、`ExportUpgrades_zh.json` 加载中文名映射
+- 列表和详情页显示格式：`中文名（English Name）`
+- 支持中文名搜索过滤
+
+#### 3. warframe.market 交易链接
+
+- 所有物品详情页添加 "在 warframe.market 查看交易 →" 链接
+- URL 格式：`https://warframe.market/items/{url_name}`
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `web/app.py` | 新增 `_load_zh_names()`、`_market_url()`，三个 wiki 端点添加 `nameZh`/`marketUrl` 字段，遗物端点添加中文 tier 和稀有度 |
+| 修改 | `js/sidebar.js` | 列表/详情显示中文名，添加市场链接 |
+| 修改 | `css/style.css` | `.wiki-market-link` 样式 |
+
+**测试结果**: 102 个测试全部通过
+
+### Phase 19 — 详情面板关闭按钮修复
+
+**日期**: 2026-05-03
+**重点**: 修复详情面板关闭按钮点击无响应的 Bug
+
+#### 问题
+
+详情面板（装备百科、MOD 数据库、遗物搜索等）打开后，右上角关闭按钮点击无响应。
+
+#### 根因
+
+1. **DOM 层级问题**: `#detail-content` 在 DOM 中位于关闭按钮之后，渲染的内容覆盖了绝对定位的按钮
+2. **事件绑定位置**: 关闭按钮 handler 定义在 `chart.js`（最后加载），若 chart.js 有运行时错误则 handler 不会绑定
+
+#### 修复方案
+
+**HTML 结构重构**:
+```
+旧: aside > button.close-btn + div.panel-header + div#detail-content
+新: aside > div.detail-panel-header(button.close-btn + div.panel-header) + div.detail-panel-body#detail-content
+```
+
+- 关闭按钮移入固定头部区域，与滚动内容物理分离
+- 面板改为 `display: flex; flex-direction: column`，头部 `flex-shrink: 0`，内容区 `flex: 1; overflow-y: auto`
+
+**事件绑定迁移**: 关闭按钮 handler 从 `chart.js` 迁移到 `app.js`（最先加载），确保始终可用
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `index.html` | 详情面板结构重构，关闭按钮移入 `.detail-panel-header` |
+| 修改 | `css/style.css` | 面板改为 flex 布局，关闭按钮改为 flex 子元素，新增 `.panel-header h2` 样式 |
+| 修改 | `css/responsive.css` | 移动端/平板 padding 改为作用于子元素 |
+| 修改 | `js/app.js` | 新增 `close-detail` 按钮事件监听 |
+| 修改 | `js/chart.js` | 移除 `close-detail` 事件监听（已迁移至 app.js） |
+
+**文档版本**：v3.8
+**最后更新**：2026-05-03
 **维护者**：Claude (Frontend Design Specialist)
+
+### Phase 20 — Prime 物品 Market 链接优化
+
+**日期**: 2026-05-03
+**重点**: Prime 战甲/武器的 market 链接指向蓝图，新增部件交易列表
+
+#### 背景
+
+在 warframe.market 上，Prime 战甲和武器只能以部件形式交易（Blueprint、Chassis、Neuroptics、Systems 等），不能直接交易成品。原有实现用物品名直接生成链接（如 `rhino_prime`），该链接在 market 上不存在。
+
+#### 改动内容
+
+**1. 新增 `_market_url_prime_blueprint()` 函数**
+
+为 Prime 物品生成蓝图链接：`Mirage Prime` → `https://warframe.market/items/mirage_prime_blueprint`
+
+**2. 新增 `_extract_components()` 函数**
+
+从 Prime 物品的 `components` 数组提取可交易部件（过滤掉 Orokin Cell 等资源），返回部件名称、可交易状态、杜卡特值。
+
+**3. 战甲/武器端点改造**
+
+- Prime 物品：`marketUrl` 指向蓝图页面，新增 `components` 字段（含 Blueprint、Chassis、Neuroptics、Systems 等）
+- 非 Prime 物品：行为不变，`components` 为空数组
+- 武器端点新增 `isPrime` 字段
+
+**4. 前端详情页**
+
+- Prime 物品显示"在 warframe.market 查看蓝图交易 →"
+- 新增"Prime 部件交易"区块，每个部件可点击跳转 market 对应页面
+- 部件显示杜卡特值（◆ 标记）
+- 部件链接逻辑：`marketUrl.replace('_blueprint', '_{component_name}')`
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `web/app.py` | 新增 `_market_url_prime_blueprint()`、`_extract_components()`，战甲/武器端点增加 `components` 字段和 Prime 蓝图链接 |
+| 修改 | `js/sidebar.js` | `showWikiWarframeDetail()`、`showWikiWeaponDetail()` 增加部件交易列表渲染 |
+| 修改 | `css/style.css` | 新增 `.wiki-comp-link`、`.wiki-comp-name`、`.wiki-comp-ducats` 样式 |
+
+**示例**:
+
+| 物品 | marketUrl | 部件数 |
+|------|-----------|--------|
+| Mirage Prime | `.../mirage_prime_blueprint` | 4 (Blueprint/Chassis/Neuroptics/Systems) |
+| Acceltra Prime | `.../acceltra_prime_blueprint` | 4 (Blueprint/Barrel/Receiver/Stock) |
+| Rhino | `.../rhino` | 0（非 Prime，无变化） |
+
+**文档版本**：v3.9
+**最后更新**：2026-05-03
+**维护者**：Claude (Frontend Design Specialist)
+
+---
+
+## 个人智能体升级（Phase 21-25）
+
+> 以下 5 个阶段将项目从"领域专用智能助手"升级为真正的"个人智能体"，补齐多轮对话、行为学习、主动智能、语义理解、推理规划五大能力。
+
+---
+
+### Phase 21 — 多轮对话
+
+**日期**: 2026-05-03
+**目标**: session history 传入 LLM，支持上下文连贯的多轮对话
+
+#### 改动内容
+
+**1. config.py** — 新增对话窗口配置
+- `CONTEXT_WINDOW = 6` — LLM 上下文中包含的最近对话轮数
+- `MAX_HISTORY_MESSAGES = 20` — session 存储的消息硬上限
+
+**2. session.py** — 新增 `to_messages()` 方法
+将 `history` 列表转为 Ollama messages 格式 `[{"role": "user"/"assistant", "content": ...}]`，支持 limit 参数截取最近 N 轮。
+
+**3. llm.py** — 新增 `chat_with_ollama()` 函数
+调用 `ollama.chat(messages=...)` 多轮对话 API，替代原有的 `ollama.generate(prompt)` 单轮调用。
+
+**4. chat.py** — 核心重构
+- 新增 `build_system_prompt()` — 构建 system 消息（persona + 记忆 + 告警）
+- 新增 `build_chat_messages()` — 构建完整 messages 数组（system + history + user）
+- `ChatAgent._call_llm_messages()` — 优先使用 `chat_with_ollama()`，注入 `model_call` 时回退到旧方式
+- `answer()` 改用 messages 格式调用 LLM
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `config.py` | 新增 CONTEXT_WINDOW、MAX_HISTORY_MESSAGES |
+| 修改 | `session.py` | 新增 to_messages() |
+| 修改 | `llm.py` | 新增 chat_with_ollama() |
+| 修改 | `chat.py` | build_system_prompt()、build_chat_messages()、_call_llm_messages() |
+| 新增 | `tests/test_multiturn.py` | 9 个测试用例 |
+
+**测试结果**: 111 个测试全部通过
+
+---
+
+### Phase 22 — 行为学习（用户画像）
+
+**日期**: 2026-05-03
+**目标**: 分析 common_questions 构建用户画像，注入 LLM 上下文实现个性化回答
+
+#### 改动内容
+
+**1. memory.py** — 新增 `UserProfile` 数据类
+
+```python
+@dataclass(frozen=True)
+class UserProfile:
+    preferred_trade_type: str    # buy, sell, neutral
+    queried_items: dict[str, int]  # 物品查询频次
+    favorite_categories: list[str]  # 偏好分类：arcane/prime_set/prime_part/mod
+    total_queries: int
+```
+
+- `from_questions(questions)` — 纯关键词频率分析，无需 ML
+- 分析逻辑：BUY_KEYWORDS/SELL_KEYWORDS 统计偏好，CATEGORY_KEYWORDS 识别分类
+
+**2. AgentMemory 扩展**
+- 新增 `user_profile` 字段
+- `analyze_and_update_profile()` — 根据 common_questions 重新分析画像
+- `load()`/`to_dict()` 支持画像序列化
+
+**3. chat.py 集成**
+- `_remember_common_question()` 每 5 个问题触发画像分析
+- `_memory_prompt()` 注入画像摘要：`用户画像: 偏好购买，偏好分类: arcane，累计查询 12 次`
+- `_render_memory_summary()` 显示画像信息
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `memory.py` | 新增 UserProfile、关键词常量、analyze_and_update_profile() |
+| 修改 | `chat.py` | 画像分析触发、画像注入 LLM 上下文 |
+| 修改 | `tests/test_memory.py` | 7 个新测试用例 |
+
+**测试结果**: 118 个测试全部通过
+
+---
+
+### Phase 23 — 主动智能（趋势监控）
+
+**日期**: 2026-05-03
+**目标**: 使用 price_history 趋势数据检测异常波动，Agent 主动给出建议
+
+#### 改动内容
+
+**1. config.py** — 新增监控阈值
+- `TREND_THRESHOLD_PERCENT = 15` — 趋势变化百分比阈值
+- `ANOMALY_THRESHOLD_PERCENT = 30` — 异常变化百分比阈值（触发建议）
+- `PROACTIVE_SUGGESTION_LIMIT = 5` — 注入 LLM 的建议条数
+
+**2. price_history.py** — 新增趋势分析方法
+- `rolling_average(item_id, window)` — 计算滚动均价
+- `detect_anomaly(item_id, threshold_pct)` — 检测价格异常波动，返回 `{direction, deviation_pct, current, average}`
+
+**3. memory.py** — 新增 `ProactiveSuggestion` 数据类
+
+```python
+@dataclass(frozen=True)
+class ProactiveSuggestion:
+    item_id: str
+    suggestion_type: str  # anomaly, trend, opportunity
+    priority: int         # 1=critical, 2=important, 3=info
+    message: str
+    timestamp: str
+```
+
+- `AgentMemory.with_suggestion()` — 追加建议（保留最近 20 条）
+
+**4. monitor.py** — 增强扫描逻辑
+- `PriceMonitor.__init__()` 新增 `price_db` 参数
+- `scan_once()` 新增：WatchItem 扫描、价格记录、异常检测、建议生成
+- `_run()` 扫描后自动持久化建议到 memory
+
+**5. main.py** — 将 `price_db` 注入 `PriceMonitor`
+
+**6. chat.py** — 建议注入
+- `_memory_prompt()` 注入最近 5 条智能建议到 LLM 上下文
+- `_render_memory_summary()` 显示最近建议
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `config.py` | 新增 TREND/ANOMALY 阈值、SUGGESTION_LIMIT |
+| 修改 | `price_history.py` | rolling_average()、detect_anomaly() |
+| 修改 | `memory.py` | ProactiveSuggestion、with_suggestion() |
+| 修改 | `monitor.py` | price_db 参数、WatchItem 扫描、异常检测 |
+| 修改 | `main.py` | 注入 price_db |
+| 修改 | `chat.py` | 建议注入 LLM 上下文和 /memory 命令 |
+| 修改 | `tests/test_price_history.py` | 6 个新测试用例 |
+| 修改 | `tests/test_monitor.py` | 2 个新测试用例 |
+
+**测试结果**: 126 个测试全部通过
+
+---
+
+### Phase 24 — 语义 RAG（向量搜索）
+
+**日期**: 2026-05-03
+**目标**: 用 embedding 替代字符 n-gram，实现语义匹配（如"回蓝的赋能"→ arcane_energize）
+
+#### 改动内容
+
+**1. config.py** — 新增 embedding 配置
+- `EMBEDDING_MODEL = "nomic-embed-text"` — Ollama embedding 模型
+- `EMBEDDING_CACHE_PATH = data/rag_embeddings.npz` — 预计算缓存
+- `EMBEDDING_ENABLED = True` — 开关
+
+**2. rag.py** — 新增 `SemanticRAG` 类
+
+```python
+class SemanticRAG:
+    def __init__(self, cache_path)
+    def is_available(self) -> bool
+    def search(self, query, limit) -> list[RagResult]
+```
+
+- 加载预计算的 embedding 缓存（item_ids + texts + embeddings 矩阵）
+- 查询时 embed query → cosine similarity → top-k
+- 无缓存时自动回退到 n-gram
+
+新增 `smart_search_rag()` 函数：先语义搜索，无结果时回退 n-gram。
+
+**3. tools/build_embeddings.py** — 离线预计算脚本
+- 读取 `data/rag_items.jsonl`
+- 调用 `ollama.embeddings(model=EMBEDDING_MODEL)` 逐条计算
+- 保存为 `data/rag_embeddings.npz`（numpy 压缩格式）
+
+**4. chat.py** — `_default_rag_search` 改用 `smart_search_rag()`
+
+**5. requirements.txt** — 新增 `numpy>=1.24.0`
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `config.py` | EMBEDDING_MODEL、EMBEDDING_CACHE_PATH、EMBEDDING_ENABLED |
+| 修改 | `rag.py` | SemanticRAG 类、_embed_text()、_cosine_similarity()、smart_search_rag() |
+| 新增 | `tools/build_embeddings.py` | 离线 embedding 预计算脚本 |
+| 修改 | `chat.py` | _default_rag_search 改用 smart_search_rag |
+| 修改 | `requirements.txt` | numpy>=1.24.0 |
+| 修改 | `tests/test_rag.py` | 6 个新测试用例 |
+
+**测试结果**: 132 个测试全部通过
+
+---
+
+### Phase 25 — 推理规划（ReAct 循环）
+
+**日期**: 2026-05-03
+**目标**: 多步任务分解，支持链式工具调用（如"我有50p买什么赋能倒卖最赚"→ 查询多个赋能价格 → 对比 → 推荐）
+
+#### 改动内容
+
+**1. config.py** — 新增推理配置
+- `MAX_TOOL_ITERATIONS = 3` — ReAct 循环最大轮数
+- `REACT_MODEL = "qwen3:8b"` — 推理模型
+
+**2. tool_router.py** — 新增 Ollama 原生工具格式
+
+`TOOL_SCHEMAS` — 6 个工具的 JSON Schema 定义（Ollama function calling 格式）：
+- query_price / query_set / query_missing_parts / scan_favorites / set_alert / price_trend
+
+`react_loop()` 函数：
+```
+messages → LLM → tool_calls? → 执行 → 结果回传 → LLM → ... → 最终回答
+```
+- 支持多步推理（最多 3 轮）
+- `_extract_tool_calls()` 解析 JSON 和数组格式的工具调用
+- 旧 `parse_tool_call()` + `build_router_prompt()` 保留为回退
+
+**3. chat.py** — 路由重构
+- `_try_router()` 改为：先 `_try_react_loop()`，失败回退 `_try_router_legacy()`
+- `_react_model_call()` — 支持注入 router_call 或 model_call
+- `_execute_tool_call()` 新增 `query_missing_parts` handler
+- `_query_missing_parts()` — 计算补齐 Prime 套装还需多少钱
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `config.py` | MAX_TOOL_ITERATIONS、REACT_MODEL |
+| 修改 | `tool_router.py` | TOOL_SCHEMAS、react_loop()、_extract_tool_calls() |
+| 修改 | `chat.py` | _try_react_loop()、_react_model_call()、_try_router_legacy()、query_missing_parts |
+| 修改 | `tests/test_session_context.py` | 更新断言适配新路由行为 |
+| 新增 | `tests/test_router.py` | 13 个测试用例 |
+
+**测试结果**: 145 个测试全部通过
+
+---
+
+### 个人智能体升级总结
+
+| Phase | 名称 | 核心能力 | 新增测试 |
+|-------|------|----------|----------|
+| 21 | 多轮对话 | session → messages API，上下文连贯 | +9 |
+| 22 | 行为学习 | UserProfile 关键词画像，个性化回答 | +7 |
+| 23 | 主动智能 | 异常检测 + ProactiveSuggestion，主动建议 | +8 |
+| 24 | 语义 RAG | SemanticRAG embedding 余弦相似度搜索 | +6 |
+| 25 | ReAct 循环 | react_loop 多步推理 + 原生工具调用 | +13 |
+
+**测试**: 102 → 145（+43 新测试）
+
+**新增配置**:
+
+| 配置项 | 值 | 用途 |
+|--------|-----|------|
+| CONTEXT_WINDOW | 6 | 多轮对话上下文轮数 |
+| MAX_HISTORY_MESSAGES | 20 | session 消息硬上限 |
+| TREND_THRESHOLD_PERCENT | 15 | 趋势变化阈值 |
+| ANOMALY_THRESHOLD_PERCENT | 30 | 异常检测阈值 |
+| PROACTIVE_SUGGESTION_LIMIT | 5 | 注入 LLM 的建议条数 |
+| EMBEDDING_MODEL | nomic-embed-text | 语义搜索模型 |
+| EMBEDDING_ENABLED | True | 启用语义搜索 |
+| MAX_TOOL_ITERATIONS | 3 | ReAct 最大循环轮数 |
+| REACT_MODEL | qwen3:8b | 推理模型 |
+
+**新增文件**:
+
+| 文件 | 用途 |
+|------|------|
+| `tools/build_embeddings.py` | 离线 embedding 预计算脚本 |
+| `tests/test_multiturn.py` | 多轮对话测试 |
+| `tests/test_router.py` | ReAct 循环测试 |
+
+**修改文件**:
+
+| 文件 | 变更 |
+|------|------|
+| `config.py` | 新增 9 个配置项 |
+| `session.py` | to_messages() |
+| `llm.py` | chat_with_ollama() |
+| `chat.py` | build_system_prompt()、build_chat_messages()、_call_llm_messages()、_try_react_loop()、_query_missing_parts()、画像分析、建议注入 |
+| `memory.py` | UserProfile、ProactiveSuggestion、analyze_and_update_profile()、with_suggestion() |
+| `price_history.py` | rolling_average()、detect_anomaly() |
+| `monitor.py` | price_db 参数、WatchItem 扫描、异常检测 |
+| `tool_router.py` | TOOL_SCHEMAS、react_loop() |
+| `rag.py` | SemanticRAG、smart_search_rag() |
+| `main.py` | 注入 price_db 到 PriceMonitor |
+| `requirements.txt` | numpy>=1.24.0 |
+| `tests/test_memory.py` | +7 测试 |
+| `tests/test_price_history.py` | +6 测试 |
+| `tests/test_monitor.py` | +2 测试 |
+| `tests/test_rag.py` | +6 测试 |
+| `tests/test_session_context.py` | 更新断言 |
+
+**文档版本**：v4.0
+**最后更新**：2026-05-03
+**维护者**：Claude (Full-Stack Agent Developer)

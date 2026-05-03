@@ -66,6 +66,62 @@ class PriceHistoryTests(unittest.TestCase):
 
         self.assertIn("持平", trend)
 
+    def test_rolling_average_returns_average(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = PriceHistoryDB(db_path=Path(tmp) / "test.db")
+            db.record("arcane_energize", 40, 30)
+            db.record("arcane_energize", 50, 40)
+            db.record("arcane_energize", 60, 50)
+            avg = db.rolling_average("arcane_energize")
+
+        self.assertEqual(avg, 50.0)
+
+    def test_rolling_average_returns_none_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = PriceHistoryDB(db_path=Path(tmp) / "test.db")
+            avg = db.rolling_average("arcane_energize")
+        self.assertIsNone(avg)
+
+    def test_detect_anomaly_spike(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = PriceHistoryDB(db_path=Path(tmp) / "test.db")
+            for _ in range(5):
+                db.record("arcane_energize", 40, 30)
+            db.record("arcane_energize", 60, 50)  # 50% spike
+            anomaly = db.detect_anomaly("arcane_energize", threshold_pct=30)
+
+        self.assertIsNotNone(anomaly)
+        self.assertEqual(anomaly["direction"], "spike")
+        self.assertGreater(anomaly["deviation_pct"], 30)
+
+    def test_detect_anomaly_drop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = PriceHistoryDB(db_path=Path(tmp) / "test.db")
+            for _ in range(5):
+                db.record("arcane_energize", 50, 40)
+            db.record("arcane_energize", 30, 20)  # 40% drop
+            anomaly = db.detect_anomaly("arcane_energize", threshold_pct=30)
+
+        self.assertIsNotNone(anomaly)
+        self.assertEqual(anomaly["direction"], "drop")
+
+    def test_detect_anomaly_none_for_stable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = PriceHistoryDB(db_path=Path(tmp) / "test.db")
+            for _ in range(5):
+                db.record("arcane_energize", 40, 30)
+            anomaly = db.detect_anomaly("arcane_energize", threshold_pct=30)
+
+        self.assertIsNone(anomaly)
+
+    def test_detect_anomaly_none_for_insufficient_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = PriceHistoryDB(db_path=Path(tmp) / "test.db")
+            db.record("arcane_energize", 40, 30)
+            anomaly = db.detect_anomaly("arcane_energize", threshold_pct=30)
+
+        self.assertIsNone(anomaly)
+
 
 if __name__ == "__main__":
     unittest.main()

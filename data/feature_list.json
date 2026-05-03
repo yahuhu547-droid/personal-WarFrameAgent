@@ -1,0 +1,209 @@
+[
+  {
+    "id": "F01",
+    "name": "流式对话输出（WebSocket 逐 token）",
+    "phase": "P0-核心体验",
+    "priority": "P0",
+    "passes": true,
+    "files": ["warframe_agent/web/app.py", "warframe_agent/web/static/js/chat.js"],
+    "description": "WebSocket 逐 token 流式输出 Agent 回复，替代一次性返回"
+  },
+  {
+    "id": "F02",
+    "name": "物品未找到引导（候选建议）",
+    "phase": "P0-核心体验",
+    "priority": "P0",
+    "passes": true,
+    "files": ["warframe_agent/web/static/js/chat.js", "warframe_agent/chat.py"],
+    "description": "物品未找到时，根据模糊匹配推荐候选物品名称"
+  },
+  {
+    "id": "F03",
+    "name": "对话历史持久化（localStorage）",
+    "phase": "P0-核心体验",
+    "priority": "P0",
+    "passes": true,
+    "files": ["warframe_agent/web/static/js/chat.js"],
+    "description": "对话历史保存到 localStorage，刷新页面不丢失"
+  },
+  {
+    "id": "F04",
+    "name": "Agent 回复 Markdown 渲染",
+    "phase": "P0-核心体验",
+    "priority": "P0",
+    "passes": true,
+    "files": ["warframe_agent/web/static/js/chat.js", "warframe_agent/web/static/index.html"],
+    "description": "Agent 回复支持 Markdown 格式渲染（表格、代码块、列表等）"
+  },
+  {
+    "id": "F05",
+    "name": "物品详情卡片增强",
+    "phase": "P1-数据展示",
+    "priority": "P1",
+    "passes": true,
+    "files": ["warframe_agent/web/static/js/chart.js", "warframe_agent/web/static/css/style.css"],
+    "description": "物品详情卡片展示更多信息（供需比、历史高低、趋势箭头）"
+  },
+  {
+    "id": "F06",
+    "name": "图表时间范围切换（24h/7d/30d）",
+    "phase": "P1-数据展示",
+    "priority": "P1",
+    "passes": true,
+    "files": ["warframe_agent/web/static/js/chart.js", "warframe_agent/web/app.py"],
+    "description": "价格图表支持 24小时/7天/30天 时间范围切换"
+  },
+  {
+    "id": "F07",
+    "name": "价格变动高亮动画",
+    "phase": "P1-数据展示",
+    "priority": "P1",
+    "passes": true,
+    "files": ["warframe_agent/web/static/js/sidebar.js", "warframe_agent/web/static/css/style.css"],
+    "description": "价格变动时数字闪烁高亮（涨红跌绿）"
+  },
+  {
+    "id": "F08",
+    "name": "每日价格报告 Web 展示",
+    "phase": "P1-数据展示",
+    "priority": "P1",
+    "passes": true,
+    "files": ["warframe_agent/web/static/js/sidebar.js", "warframe_agent/web/app.py"],
+    "description": "Web 端展示每日价格报告，包含涨跌幅排行"
+  },
+  {
+    "id": "F09",
+    "name": "消息操作菜单（复制/重试）",
+    "phase": "P2-交互优化",
+    "priority": "P2",
+    "passes": true,
+    "files": ["warframe_agent/web/static/js/chat.js", "warframe_agent/web/static/css/style.css"],
+    "description": "消息悬浮显示操作菜单：复制文本、重新生成、删除"
+  },
+  {
+    "id": "F10",
+    "name": "游戏内私聊命令增强",
+    "phase": "P2-交互优化",
+    "priority": "P2",
+    "passes": true,
+    "files": ["warframe_agent/web/static/js/chat.js"],
+    "description": "支持 /whisper、/trade 等快捷命令生成游戏内私聊文本"
+  },
+  {
+    "id": "F11",
+    "name": "主题切换（亮/暗色）",
+    "phase": "P2-交互优化",
+    "priority": "P2",
+    "passes": true,
+    "files": ["warframe_agent/web/static/js/app.js", "warframe_agent/web/static/css/variables.css"],
+    "description": "支持亮色/暗色主题切换，记住用户偏好"
+  },
+  {
+    "id": "F12",
+    "name": "WebSocket 连接优化（指数退避）",
+    "phase": "P2-交互优化",
+    "priority": "P2",
+    "passes": true,
+    "files": ["warframe_agent/web/static/js/app.js"],
+    "description": "WebSocket 断线重连使用指数退避策略，避免频繁重连"
+  },
+  {
+    "id": "F13",
+    "name": "命令面板（Ctrl+P）",
+    "phase": "P3-效率工具",
+    "priority": "P3",
+    "passes": true,
+    "files": ["warframe_agent/web/static/js/app.js", "warframe_agent/web/static/index.html"],
+    "description": "Ctrl+P 打开命令面板，快速搜索物品、执行操作"
+  },
+  {
+    "id": "F14",
+    "name": "通知设置面板",
+    "phase": "P3-效率工具",
+    "priority": "P3",
+    "passes": true,
+    "files": ["warframe_agent/web/static/js/sidebar.js"],
+    "description": "通知设置面板，配置提醒方式和频率"
+  },
+  {
+    "id": "F15",
+    "name": "自定义快捷操作",
+    "phase": "P3-效率工具",
+    "priority": "P3",
+    "passes": true,
+    "files": ["warframe_agent/web/static/js/sidebar.js"],
+    "description": "用户自定义快捷操作按钮（如一键查某物品价格）"
+  },
+  {
+    "id": "F16",
+    "name": "批量操作（多选删除）",
+    "phase": "P3-效率工具",
+    "priority": "P3",
+    "passes": true,
+    "files": ["warframe_agent/web/static/js/sidebar.js"],
+    "description": "关注列表支持多选批量删除操作"
+  },
+  {
+    "id": "F17",
+    "name": "引入 Playwright + warframe.market 数据增强",
+    "phase": "数据增强",
+    "priority": "P1",
+    "passes": true,
+    "files": ["requirements.txt", "warframe_agent/market.py", "warframe_agent/scraper.py"],
+    "description": "使用 Playwright 绕过 Cloudflare 从 warframe.market 获取实时数据"
+  },
+  {
+    "id": "F18",
+    "name": "裂罅 Mod 价格抓取",
+    "phase": "数据增强",
+    "priority": "P1",
+    "passes": true,
+    "files": ["warframe_agent/scraper.py", "warframe_agent/web/app.py"],
+    "description": "抓取裂罅 Mod 价格数据，支持按武器类型查询"
+  },
+  {
+    "id": "F19",
+    "name": "Wiki 数据自动更新",
+    "phase": "数据增强",
+    "priority": "P2",
+    "passes": true,
+    "files": ["warframe_agent/scraper.py"],
+    "description": "定期从 Warframe Wiki 抓取更新数据（物品信息、掉落表等）"
+  },
+  {
+    "id": "F20",
+    "name": "套利机会自动发现（抓取+分析）",
+    "phase": "数据增强",
+    "priority": "P2",
+    "passes": true,
+    "files": ["warframe_agent/scraper.py", "warframe_agent/monitor.py"],
+    "description": "结合抓取数据和价格分析，自动发现套利机会"
+  },
+  {
+    "id": "F21",
+    "name": "GitHub 项目搜索与功能借鉴",
+    "phase": "UI灵感",
+    "priority": "P2",
+    "passes": true,
+    "files": ["warframe_agent/scraper.py"],
+    "description": "从 GitHub 搜索 warframe 相关项目，借鉴优秀功能设计"
+  },
+  {
+    "id": "F22",
+    "name": "优秀 UI 动画/CSS 效果收集",
+    "phase": "UI灵感",
+    "priority": "P3",
+    "passes": true,
+    "files": ["warframe_agent/web/static/css/style.css", "warframe_agent/web/static/css/animations.css"],
+    "description": "从优秀网页收集动画效果和 CSS 设计模式，应用到项目中"
+  },
+  {
+    "id": "F23",
+    "name": "外部资源整合（图标/配色/组件）",
+    "phase": "UI灵感",
+    "priority": "P3",
+    "passes": true,
+    "files": ["warframe_agent/web/static/css/variables.css", "warframe_agent/web/static/"],
+    "description": "整合外部优质资源（图标库、配色方案、UI 组件）"
+  }
+]

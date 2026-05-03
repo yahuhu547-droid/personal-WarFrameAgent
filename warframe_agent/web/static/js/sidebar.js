@@ -395,10 +395,8 @@ document.addEventListener('DOMContentLoaded', () => {
 // ===== 交易历史功能 =====
 
 async function loadTradeHistory() {
-    const content = document.getElementById('detail-content');
-    const panel = document.getElementById('detail-panel');
-    panel.classList.add('active');
-    content.innerHTML = createChartLoading();
+    const content = openDetailPanel('加载交易历史...');
+    if (!content) return;
 
     try {
         const [tradesRes, statsRes] = await Promise.all([
@@ -554,15 +552,16 @@ async function deleteTradeRecord(tradeId) {
 }
 
 // 交易历史按钮事件
-document.getElementById('trade-history-btn')?.addEventListener('click', loadTradeHistory);
+document.getElementById('trade-history-btn')?.addEventListener('click', () => {
+    toggleMoreMenu();
+    loadTradeHistory();
+});
 
 // ===== 套利检测功能 =====
 
 async function loadArbitrageOpportunities() {
-    const content = document.getElementById('detail-content');
-    const panel = document.getElementById('detail-panel');
-    panel.classList.add('active');
-    content.innerHTML = createChartLoading();
+    const content = openDetailPanel('检测套利机会...');
+    if (!content) return;
 
     try {
         const res = await fetch('/api/arbitrage?min_profit=3');
@@ -664,15 +663,16 @@ async function loadArbitrageOpportunities() {
 }
 
 // 套利检测按钮事件
-document.getElementById('arbitrage-btn')?.addEventListener('click', loadArbitrageOpportunities);
+document.getElementById('arbitrage-btn')?.addEventListener('click', () => {
+    toggleMoreMenu();
+    loadArbitrageOpportunities();
+});
 
 // ===== 收藏夹仪表盘 =====
 
 async function loadFavoritesDashboard() {
-    const content = document.getElementById('detail-content');
-    const panel = document.getElementById('detail-panel');
-    panel.classList.add('active');
-    content.innerHTML = createChartLoading();
+    const content = openDetailPanel('加载收藏仪表盘...');
+    if (!content) return;
 
     try {
         const [memoryRes, pricesRes] = await Promise.all([
@@ -839,7 +839,10 @@ function exportDashboardData() {
 }
 
 // 收藏仪表盘按钮事件
-document.getElementById('dashboard-btn')?.addEventListener('click', loadFavoritesDashboard);
+document.getElementById('dashboard-btn')?.addEventListener('click', () => {
+    toggleMoreMenu();
+    loadFavoritesDashboard();
+});
 
 // ===== 样式注入 =====
 
@@ -1722,5 +1725,1074 @@ sidebarStyles.textContent = `
         display: flex;
         gap: 8px;
     }
+
+    /* 利润计算器样式 */
+    .profit-calc-container {
+        padding: 16px;
+    }
+
+    .profit-calc-title {
+        font-family: var(--font-display);
+        font-size: 16px;
+        color: var(--gold-primary);
+        letter-spacing: 0.05em;
+        margin-bottom: 16px;
+    }
+
+    .profit-form-group {
+        margin-bottom: 12px;
+    }
+
+    .profit-form-label {
+        display: block;
+        font-size: 11px;
+        color: var(--text-tertiary);
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        margin-bottom: 6px;
+    }
+
+    .profit-material-row {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 8px;
+        align-items: center;
+    }
+
+    .profit-material-input {
+        flex: 1;
+        padding: 6px 10px;
+        background: rgba(0, 0, 0, 0.2);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 6px;
+        color: var(--text-primary);
+        font-size: 12px;
+    }
+
+    .profit-material-input:focus {
+        outline: none;
+        border-color: rgba(212, 167, 55, 0.3);
+    }
+
+    .profit-material-input.short {
+        width: 60px;
+        flex: none;
+    }
+
+    .profit-result {
+        margin-top: 16px;
+        padding: 12px;
+        background: rgba(0, 0, 0, 0.2);
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .profit-result-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 4px 0;
+        font-size: 13px;
+    }
+
+    .profit-result-label {
+        color: var(--text-secondary);
+    }
+
+    .profit-result-value {
+        font-family: var(--font-mono);
+        font-weight: 600;
+    }
+
+    .profit-result-value.positive {
+        color: var(--green-success);
+    }
+
+    .profit-result-value.negative {
+        color: var(--red-error);
+    }
+
+    .profit-recommendation {
+        margin-top: 12px;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 12px;
+        text-align: center;
+    }
+
+    .profit-recommendation.good {
+        background: rgba(74, 222, 128, 0.1);
+        border: 1px solid rgba(74, 222, 128, 0.2);
+        color: var(--green-success);
+    }
+
+    .profit-recommendation.bad {
+        background: rgba(239, 68, 68, 0.1);
+        border: 1px solid rgba(239, 68, 68, 0.2);
+        color: var(--red-error);
+    }
+
+    /* 通知设置面板样式 */
+    .notify-settings-container { padding: 16px; }
+    .notify-settings-header { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid rgba(212, 167, 55, 0.2); }
+    .notify-settings-title { font-family: var(--font-display); font-size: 16px; color: var(--gold-primary); letter-spacing: 0.05em; margin-bottom: 4px; }
+    .notify-settings-subtitle { font-size: 12px; color: var(--text-tertiary); }
+    .notify-section { margin-bottom: 16px; }
+    .notify-section-title { font-size: 11px; color: var(--text-tertiary); letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 10px; }
+    .notify-option { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: rgba(0,0,0,0.2); border-radius: 4px; margin-bottom: 6px; }
+    .notify-option-info { display: flex; flex-direction: column; gap: 2px; }
+    .notify-option-label { font-size: 13px; color: var(--text-primary); font-weight: 600; }
+    .notify-option-desc { font-size: 11px; color: var(--text-tertiary); }
+    .notify-toggle { position: relative; display: inline-block; width: 40px; height: 22px; cursor: pointer; }
+    .notify-toggle input { opacity: 0; width: 0; height: 0; }
+    .notify-toggle-slider { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(255,255,255,0.1); border-radius: 11px; transition: 0.3s; }
+    .notify-toggle-slider::before { content: ''; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px; background: var(--text-tertiary); border-radius: 50%; transition: 0.3s; }
+    .notify-toggle input:checked + .notify-toggle-slider { background: rgba(74, 222, 128, 0.3); }
+    .notify-toggle input:checked + .notify-toggle-slider::before { transform: translateX(18px); background: var(--green-success); }
+    .notify-frequency-options { display: flex; gap: 6px; }
+    .notify-freq-btn { flex: 1; padding: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; color: var(--text-tertiary); font-size: 12px; cursor: pointer; transition: all 0.2s; }
+    .notify-freq-btn:hover { background: rgba(212, 167, 55, 0.1); border-color: rgba(212, 167, 55, 0.3); color: var(--gold-primary); }
+    .notify-freq-btn.active { background: rgba(212, 167, 55, 0.15); border-color: var(--gold-primary); color: var(--gold-primary); }
+    .notify-threshold-row { display: flex; align-items: center; gap: 12px; }
+    .notify-range { flex: 1; accent-color: var(--gold-primary); height: 4px; }
+    .notify-threshold-val { font-family: var(--font-mono); font-size: 14px; font-weight: 600; color: var(--gold-primary); min-width: 40px; }
+    .notify-threshold-desc { font-size: 11px; color: var(--text-tertiary); margin-top: 6px; }
+    .notify-actions { display: flex; gap: 8px; margin-top: 16px; }
 `;
 document.head.appendChild(sidebarStyles);
+
+// ===== 利润计算器 =====
+
+function showProfitCalculator() {
+    const content = openDetailPanel('加载利润计算器...');
+    if (!content) return;
+
+    content.innerHTML = `
+        <div class="profit-calc-container">
+            <div class="profit-calc-title">利润计算器</div>
+            <div class="profit-form-group">
+                <label class="profit-form-label">成品物品</label>
+                <input type="text" class="profit-material-input" id="profit-item-input" placeholder="输入成品名称..." style="width:100%">
+                <div id="profit-item-suggestions" style="display:none; position:absolute; z-index:10;"></div>
+            </div>
+            <div class="profit-form-group">
+                <label class="profit-form-label">材料列表</label>
+                <div id="profit-materials">
+                    <div class="profit-material-row">
+                        <input type="text" class="profit-material-input" placeholder="材料名称" data-type="name">
+                        <input type="number" class="profit-material-input short" placeholder="数量" data-type="qty" value="1" min="1">
+                        <input type="number" class="profit-material-input short" placeholder="单价" data-type="cost" min="0">
+                        <button class="compare-remove-btn" onclick="this.parentElement.remove()">×</button>
+                    </div>
+                </div>
+                <button class="compare-add-btn" onclick="addProfitMaterial()" style="margin-top:8px;">+ 添加材料</button>
+            </div>
+            <button class="form-btn primary" onclick="runProfitCalc()" style="width:100%; margin-top:12px;">计算利润</button>
+            <div id="profit-result"></div>
+        </div>
+    `;
+
+    // 绑定成品输入建议
+    const itemInput = document.getElementById('profit-item-input');
+    let debounce;
+    itemInput.addEventListener('input', () => {
+        clearTimeout(debounce);
+        debounce = setTimeout(() => showProfitItemSuggestions(itemInput), 300);
+    });
+}
+
+async function showProfitItemSuggestions(input) {
+    const query = input.value.trim();
+    const sugDiv = document.getElementById('profit-item-suggestions');
+    if (!sugDiv || query.length < 1) {
+        if (sugDiv) sugDiv.style.display = 'none';
+        return;
+    }
+
+    try {
+        const res = await fetch(`/api/suggest?q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        if (!data.suggestions || data.suggestions.length === 0) {
+            sugDiv.style.display = 'none';
+            return;
+        }
+
+        sugDiv.innerHTML = data.suggestions.map(s =>
+            `<div class="suggestion-item" onclick="selectProfitItem('${s}')">${s}</div>`
+        ).join('');
+        sugDiv.style.display = 'block';
+        sugDiv.style.cssText = 'display:block; position:absolute; background:var(--glass-bg); border:var(--glass-border); border-radius:8px; max-height:150px; overflow-y:auto; z-index:10; width:100%;';
+    } catch (e) {
+        sugDiv.style.display = 'none';
+    }
+}
+
+function selectProfitItem(itemId) {
+    document.getElementById('profit-item-input').value = itemId;
+    document.getElementById('profit-item-suggestions').style.display = 'none';
+}
+
+function addProfitMaterial() {
+    const container = document.getElementById('profit-materials');
+    const row = document.createElement('div');
+    row.className = 'profit-material-row';
+    row.innerHTML = `
+        <input type="text" class="profit-material-input" placeholder="材料名称" data-type="name">
+        <input type="number" class="profit-material-input short" placeholder="数量" data-type="qty" value="1" min="1">
+        <input type="number" class="profit-material-input short" placeholder="单价" data-type="cost" min="0">
+        <button class="compare-remove-btn" onclick="this.parentElement.remove()">×</button>
+    `;
+    container.appendChild(row);
+}
+
+async function runProfitCalc() {
+    const itemId = document.getElementById('profit-item-input').value.trim();
+    if (!itemId) {
+        showToast('请输入成品物品', 'warning');
+        return;
+    }
+
+    const rows = document.querySelectorAll('#profit-materials .profit-material-row');
+    const materials = [];
+    rows.forEach(row => {
+        const name = row.querySelector('[data-type="name"]').value.trim();
+        const qty = parseInt(row.querySelector('[data-type="qty"]').value) || 1;
+        const cost = parseInt(row.querySelector('[data-type="cost"]').value) || 0;
+        if (name) {
+            materials.push({ item_id: name, quantity: qty, unit_cost: cost });
+        }
+    });
+
+    if (materials.length === 0) {
+        showToast('请至少添加一种材料', 'warning');
+        return;
+    }
+
+    const resultDiv = document.getElementById('profit-result');
+    resultDiv.innerHTML = '<div class="loading"><div class="loading-dot"></div><div class="loading-dot"></div><div class="loading-dot"></div></div>';
+
+    try {
+        // 先解析物品ID
+        const resolveRes = await fetch(`/api/resolve/${encodeURIComponent(itemId)}`);
+        const resolveData = await resolveRes.json();
+        const resolvedId = resolveData.found ? resolveData.item_id : itemId;
+
+        // 解析材料ID
+        const resolvedMaterials = [];
+        for (const mat of materials) {
+            const matRes = await fetch(`/api/resolve/${encodeURIComponent(mat.item_id)}`);
+            const matData = await matRes.json();
+            resolvedMaterials.push({
+                item_id: matData.found ? matData.item_id : mat.item_id,
+                quantity: mat.quantity,
+                unit_cost: mat.unit_cost,
+            });
+        }
+
+        const res = await fetch('/api/profit/calculate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_id: resolvedId, material_costs: resolvedMaterials })
+        });
+        const data = await res.json();
+
+        if (data.error) {
+            resultDiv.innerHTML = `<div class="profit-recommendation bad">计算失败: ${data.error}</div>`;
+            return;
+        }
+
+        renderProfitResult(data, resultDiv);
+    } catch (err) {
+        resultDiv.innerHTML = `<div class="profit-recommendation bad">请求失败</div>`;
+    }
+}
+
+function renderProfitResult(data, container) {
+    const p = data.profit;
+    const sellClass = p.sell_profit > 0 ? 'positive' : (p.sell_profit < 0 ? 'negative' : '');
+    const buyClass = p.buy_profit > 0 ? 'positive' : (p.buy_profit < 0 ? 'negative' : '');
+
+    let html = `
+        <div class="profit-result">
+            <div class="profit-result-row">
+                <span class="profit-result-label">成品 (${data.display})</span>
+                <span class="profit-result-value">卖 ${data.sell_price || '-'}p / 收 ${data.buy_price || '-'}p</span>
+            </div>
+            <div class="profit-result-row">
+                <span class="profit-result-label">材料总成本</span>
+                <span class="profit-result-value">${data.total_cost}p</span>
+            </div>
+            <div class="profit-result-row">
+                <span class="profit-result-label">按卖价利润</span>
+                <span class="profit-result-value ${sellClass}">${p.sell_profit !== null ? p.sell_profit + 'p (' + p.sell_margin + '%)' : '-'}</span>
+            </div>
+            <div class="profit-result-row">
+                <span class="profit-result-label">按收价利润</span>
+                <span class="profit-result-value ${buyClass}">${p.buy_profit !== null ? p.buy_profit + 'p (' + p.buy_margin + '%)' : '-'}</span>
+            </div>
+        </div>
+    `;
+
+    // 材料明细
+    if (data.materials && data.materials.length > 0) {
+        html += `<div style="margin-top:12px; font-size:11px; color:var(--text-tertiary);">材料明细:</div>`;
+        data.materials.forEach(mat => {
+            html += `<div class="profit-result-row" style="font-size:12px;">
+                <span style="color:var(--text-secondary)">${mat.display} x${mat.quantity}</span>
+                <span style="font-family:var(--font-mono)">${mat.total_cost}p</span>
+            </div>`;
+        });
+    }
+
+    // 推荐
+    const isGood = p.sell_profit && p.sell_profit > 0;
+    html += `<div class="profit-recommendation ${isGood ? 'good' : 'bad'}">
+        ${isGood ? '✓ 制造盈利，建议制作' : '✗ 制造亏损，不建议制作'}
+    </div>`;
+
+    container.innerHTML = html;
+}
+
+// 绑定利润计算器按钮
+document.getElementById('profit-calc-btn')?.addEventListener('click', () => {
+    toggleMoreMenu();
+    showProfitCalculator();
+});
+
+// ===== 价格异常检测 =====
+
+async function showPriceAnomalies() {
+    const content = openDetailPanel('检测价格异常...');
+    if (!content) return;
+
+    try {
+        const res = await fetch('/api/price/anomalies?threshold=30');
+        const data = await res.json();
+
+        if (!data.anomalies || data.anomalies.length === 0) {
+            content.innerHTML = `
+                <div class="profit-calc-container">
+                    <div class="profit-calc-title">价格异常提醒</div>
+                    <div class="empty-state" style="padding:32px 0;">
+                        <div class="empty-state-icon">📊</div>
+                        <div class="empty-state-text">暂无价格异常</div>
+                        <div class="empty-state-sub">当物品价格偏离均值超过30%时会在此显示</div>
+                    </div>
+                </div>
+            `;
+            return;
+        }
+
+        let html = `
+            <div class="profit-calc-container">
+                <div class="profit-calc-title">价格异常提醒</div>
+                <div style="font-size:12px; color:var(--text-tertiary); margin-bottom:16px;">
+                    检测到 ${data.total} 个价格异常（偏离阈值 ${data.threshold}%）
+                </div>
+        `;
+
+        data.anomalies.forEach(item => {
+            const isSpike = item.type === 'spike';
+            const icon = isSpike ? '📈' : '📉';
+            const colorClass = isSpike ? 'positive' : 'negative';
+            const deviationSign = item.deviation > 0 ? '+' : '';
+
+            html += `
+                <div class="list-item" style="margin-bottom:8px; cursor:pointer;"
+                    onclick="showPriceChart('${item.item_id}')">
+                    <div class="item-header">
+                        <span class="item-name">${icon} ${item.display}</span>
+                        <span class="item-price">${item.current_price}p</span>
+                    </div>
+                    <div class="item-sub" style="display:flex; justify-content:space-between;">
+                        <span>均值 ${item.avg_price}p</span>
+                        <span class="${colorClass}" style="font-weight:600;">${deviationSign}${item.deviation}%</span>
+                    </div>
+                    <div class="item-sub">${item.type_display} | 基于 ${item.snapshots_count} 条历史数据</div>
+                </div>
+            `;
+        });
+
+        html += `</div>`;
+        content.innerHTML = html;
+    } catch (err) {
+        content.innerHTML = createChartError('检测价格异常失败');
+    }
+}
+
+// 绑定价格异常按钮
+document.getElementById('anomaly-btn')?.addEventListener('click', () => {
+    toggleMoreMenu();
+    showPriceAnomalies();
+});
+
+// ===== 通知设置面板 =====
+
+const NOTIFY_SETTINGS_KEY = 'warframe_notify_settings';
+
+function loadNotifySettings() {
+    try {
+        const saved = localStorage.getItem(NOTIFY_SETTINGS_KEY);
+        if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return { browserNotify: true, soundAlert: true, alertFrequency: 'realtime', priceChangeThreshold: 5 };
+}
+
+function saveNotifySettings(settings) {
+    try {
+        localStorage.setItem(NOTIFY_SETTINGS_KEY, JSON.stringify(settings));
+    } catch (e) {}
+}
+
+function showNotificationSettings() {
+    const content = openDetailPanel('通知设置');
+    if (!content) return;
+
+    const settings = loadNotifySettings();
+
+    content.innerHTML = `
+        <div class="notify-settings-container">
+            <div class="notify-settings-header">
+                <h3 class="notify-settings-title">通知设置</h3>
+                <div class="notify-settings-subtitle">配置价格提醒和通知方式</div>
+            </div>
+
+            <div class="notify-section">
+                <div class="notify-section-title">通知方式</div>
+                <div class="notify-option">
+                    <div class="notify-option-info">
+                        <span class="notify-option-label">浏览器通知</span>
+                        <span class="notify-option-desc">价格触发时弹出浏览器通知</span>
+                    </div>
+                    <label class="notify-toggle">
+                        <input type="checkbox" id="notify-browser" ${settings.browserNotify ? 'checked' : ''}>
+                        <span class="notify-toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="notify-option">
+                    <div class="notify-option-info">
+                        <span class="notify-option-label">声音提醒</span>
+                        <span class="notify-option-desc">价格触发时播放提示音</span>
+                    </div>
+                    <label class="notify-toggle">
+                        <input type="checkbox" id="notify-sound" ${settings.soundAlert ? 'checked' : ''}>
+                        <span class="notify-toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="notify-section">
+                <div class="notify-section-title">检查频率</div>
+                <div class="notify-frequency-options">
+                    <button class="notify-freq-btn ${settings.alertFrequency === 'realtime' ? 'active' : ''}" data-freq="realtime">实时</button>
+                    <button class="notify-freq-btn ${settings.alertFrequency === '5min' ? 'active' : ''}" data-freq="5min">5分钟</button>
+                    <button class="notify-freq-btn ${settings.alertFrequency === '15min' ? 'active' : ''}" data-freq="15min">15分钟</button>
+                    <button class="notify-freq-btn ${settings.alertFrequency === '30min' ? 'active' : ''}" data-freq="30min">30分钟</button>
+                </div>
+            </div>
+
+            <div class="notify-section">
+                <div class="notify-section-title">价格变动阈值</div>
+                <div class="notify-threshold-row">
+                    <input type="range" id="notify-threshold" min="1" max="50" value="${settings.priceChangeThreshold}" class="notify-range">
+                    <span id="notify-threshold-value" class="notify-threshold-val">${settings.priceChangeThreshold}%</span>
+                </div>
+                <div class="notify-threshold-desc">价格变动超过此百分比时触发通知</div>
+            </div>
+
+            <div class="notify-actions">
+                <button class="detail-action-btn" onclick="testNotification()">测试通知</button>
+                <button class="detail-action-btn" onclick="saveNotifySettingsFromUI()">保存设置</button>
+            </div>
+        </div>
+    `;
+
+    // 绑定滑块事件
+    const slider = document.getElementById('notify-threshold');
+    const valSpan = document.getElementById('notify-threshold-value');
+    if (slider && valSpan) {
+        slider.addEventListener('input', () => {
+            valSpan.textContent = slider.value + '%';
+        });
+    }
+
+    // 绑定频率按钮
+    document.querySelectorAll('.notify-freq-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.notify-freq-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+        });
+    });
+}
+
+function saveNotifySettingsFromUI() {
+    const settings = {
+        browserNotify: document.getElementById('notify-browser')?.checked ?? true,
+        soundAlert: document.getElementById('notify-sound')?.checked ?? true,
+        alertFrequency: document.querySelector('.notify-freq-btn.active')?.dataset.freq || 'realtime',
+        priceChangeThreshold: parseInt(document.getElementById('notify-threshold')?.value) || 5,
+    };
+    saveNotifySettings(settings);
+    showToast('通知设置已保存', 'success');
+}
+
+function testNotification() {
+    if (Notification.permission === 'granted') {
+        new Notification('Warframe 交易助手', { body: '测试通知成功！价格提醒将以此方式通知您。', icon: '/static/favicon.ico' });
+        showToast('测试通知已发送', 'success');
+    } else if (Notification.permission !== 'denied') {
+        Notification.requestPermission().then(perm => {
+            if (perm === 'granted') {
+                new Notification('Warframe 交易助手', { body: '通知权限已开启！' });
+                showToast('通知权限已开启', 'success');
+            } else {
+                showToast('通知权限被拒绝', 'warning');
+            }
+        });
+    } else {
+        showToast('通知权限已被禁止，请在浏览器设置中开启', 'error');
+    }
+}
+
+// 绑定通知设置按钮
+document.getElementById('notify-settings-btn')?.addEventListener('click', () => {
+    toggleMoreMenu();
+    showNotificationSettings();
+});
+
+// ===== 虚空裂隙追踪 =====
+
+async function showFissureTracker() {
+    const content = openDetailPanel('加载虚空裂隙...');
+    if (!content) return;
+
+    try {
+        const res = await fetch('/api/fissures');
+        const data = await res.json();
+
+        if (data.error) {
+            content.innerHTML = createChartError(data.error);
+            return;
+        }
+
+        const tierIcons = {
+            'Lith': '🔹',
+            'Meso': '🔸',
+            'Neo': '🔶',
+            'Axi': '🔷',
+            'Requiem': '💀'
+        };
+
+        const tierNames = {
+            'Lith': '古纪 (Lith)',
+            'Meso': '中纪 (Meso)',
+            'Neo': '前纪 (Neo)',
+            'Axi': '后纪 (Axi)',
+            'Requiem': '安魂 (Requiem)'
+        };
+
+        const isLive = data.source === 'live';
+        let html = `
+            <div class="profit-calc-container">
+                <div class="profit-calc-title">虚空裂隙追踪</div>
+                <div style="font-size:12px; color:var(--text-tertiary); margin-bottom:16px;">
+                    ${isLive ? '当前活跃的虚空裂隙任务' : (data.message || '遗物掉落数据')}
+                </div>
+        `;
+
+        let hasFissures = false;
+
+        Object.entries(data.fissures).forEach(([tier, fissures]) => {
+            if (fissures.length === 0) return;
+            hasFissures = true;
+
+            html += `
+                <div style="margin-bottom:16px;">
+                    <div style="font-size:13px; color:var(--gold-primary); margin-bottom:8px; font-weight:600;">
+                        ${tierIcons[tier] || '◆'} ${tierNames[tier] || tier} (${fissures.length})
+                    </div>
+            `;
+
+            fissures.forEach(f => {
+                const rareDrops = (f.rare_drops || []).map(r =>
+                    `<span style="color:var(--gold-primary);">${r.name} (${r.chance}%)</span>`
+                ).join(', ');
+                const uncommonDrops = (f.uncommon_drops || []).map(r =>
+                    `<span style="color:var(--text-secondary);">${r.name} (${r.chance}%)</span>`
+                ).join(', ');
+
+                html += `
+                    <div class="list-item" style="margin-bottom:6px; padding:8px 12px; cursor:pointer;"
+                        onclick="showPriceChart('${f.id}')">
+                        <div class="item-header">
+                            <span class="item-name" style="font-size:12px;">${f.node}</span>
+                            ${f.missionType ? `<span class="item-badge" style="font-size:10px;">${f.missionType}</span>` : ''}
+                        </div>
+                        ${f.enemy ? `<div class="item-sub" style="font-size:11px;">${f.enemy}</div>` : ''}
+                        ${rareDrops ? `<div style="font-size:11px; margin-top:4px;">稀有: ${rareDrops}</div>` : ''}
+                        ${uncommonDrops ? `<div style="font-size:10px; color:var(--text-tertiary);">银: ${uncommonDrops}</div>` : ''}
+                    </div>
+                `;
+            });
+
+            html += `</div>`;
+        });
+
+        if (!hasFissures) {
+            html += `
+                <div class="empty-state" style="padding:32px 0;">
+                    <div class="empty-state-icon">🔔</div>
+                    <div class="empty-state-text">暂无裂隙数据</div>
+                    <div class="empty-state-sub">请稍后再试</div>
+                </div>
+            `;
+        }
+
+        html += `</div>`;
+        content.innerHTML = html;
+    } catch (err) {
+        content.innerHTML = createChartError('获取裂隙数据失败');
+    }
+}
+
+// 绑定虚空裂隙按钮
+document.getElementById('fissure-btn')?.addEventListener('click', () => {
+    toggleMoreMenu();
+    showFissureTracker();
+});
+
+// ===== 装备百科 =====
+
+// 全局数据存储，避免 onclick 内嵌 JSON 被 HTML 解析破坏
+const _wikiStore = { warframes: [], weapons: [], mods: [] };
+
+async function showWikiWarframes(q) {
+    const content = openDetailPanel('加载装备百科...');
+    if (!content) return;
+
+    try {
+        const url = q ? `/api/wiki/warframes?q=${encodeURIComponent(q)}` : '/api/wiki/warframes';
+        const res = await fetch(url);
+        const data = await res.json();
+
+        let html = `<div class="profit-calc-container">
+            <div class="profit-calc-title">🛡️ 装备百科</div>
+            <div class="wiki-search-row">
+                <input type="text" id="wiki-warframe-search" class="wiki-search-input"
+                    placeholder="搜索 Warframe..." value="${q || ''}" autocomplete="off">
+                <button class="wiki-search-btn" onclick="showWikiWarframes(document.getElementById('wiki-warframe-search').value)">搜索</button>
+            </div>
+            <div class="wiki-tabs">
+                <button class="wiki-tab active" onclick="showWikiWarframes(document.getElementById('wiki-warframe-search').value)">Warframe</button>
+                <button class="wiki-tab" onclick="showWikiWeapons('primary','')">主武器</button>
+                <button class="wiki-tab" onclick="showWikiWeapons('secondary','')">副武器</button>
+                <button class="wiki-tab" onclick="showWikiWeapons('melee','')">近战武器</button>
+            </div>
+            <div class="wiki-count">共 ${data.total} 个结果</div>
+            <div class="wiki-grid">`;
+
+        _wikiStore.warframes = data.warframes;
+        data.warframes.forEach((wf, i) => {
+            const displayName = wf.nameZh ? `${wf.nameZh}（${wf.name}）` : wf.name;
+            html += `<div class="wiki-card" onclick="showWikiWarframeDetail(${i})">
+                <div class="wiki-card-name">${displayName}</div>
+                <div class="wiki-card-stats">
+                    <span class="wiki-stat">❤️ ${wf.health}</span>
+                    <span class="wiki-stat">🛡️ ${wf.shield}</span>
+                    <span class="wiki-stat">⚔️ ${wf.armor}</span>
+                    <span class="wiki-stat">⚡ ${wf.power}</span>
+                </div>
+                <div class="wiki-card-sub">速度 ${wf.sprintSpeed} · 段位 ${wf.masteryReq}</div>
+            </div>`;
+        });
+
+        html += `</div></div>`;
+        content.innerHTML = html;
+
+        const searchInput = document.getElementById('wiki-warframe-search');
+        if (searchInput) {
+            searchInput.addEventListener('keydown', e => {
+                if (e.key === 'Enter') showWikiWarframes(searchInput.value);
+            });
+        }
+    } catch (err) {
+        content.innerHTML = createChartError('加载装备百科失败: ' + err.message);
+    }
+}
+
+function showWikiWarframeDetail(idx) {
+    const wf = _wikiStore.warframes[idx];
+    if (!wf) return;
+    const content = document.getElementById('detail-content');
+    if (!content) return;
+
+    const displayName = wf.nameZh ? `${wf.nameZh}（${wf.name}）` : wf.name;
+
+    let html = `<div class="profit-calc-container">
+        <div class="wiki-detail-back" onclick="showWikiWarframes('')">← 返回列表</div>
+        <div class="profit-calc-title">${displayName}</div>
+        <div class="wiki-detail-desc">${wf.description || ''}</div>
+        ${wf.marketUrl ? `<a class="wiki-market-link" href="${wf.marketUrl}" target="_blank" rel="noopener">${wf.isPrime ? '在 warframe.market 查看蓝图交易 →' : '在 warframe.market 查看交易 →'}</a>` : ''}
+        ${wf.components && wf.components.length > 0 ? `
+        <div class="wiki-detail-section">
+            <div class="wiki-detail-label">Prime 部件交易</div>
+            <div class="wiki-detail-grid">
+                ${wf.components.map(comp => {
+                    const compUrl = wf.marketUrl ? wf.marketUrl.replace('_blueprint', '_' + comp.name.toLowerCase().replace(/\s+/g, '_')) : '';
+                    return `<a class="wiki-comp-link" href="${compUrl}" target="_blank" rel="noopener">
+                        <span class="wiki-comp-name">${comp.name}</span>
+                        ${comp.ducats ? `<span class="wiki-comp-ducats">◆ ${comp.ducats}</span>` : ''}
+                    </a>`;
+                }).join('')}
+            </div>
+        </div>` : ''}
+
+        <div class="wiki-detail-section">
+            <div class="wiki-detail-label">基础属性</div>
+            <div class="wiki-detail-grid">
+                <div class="wiki-detail-stat"><span class="stat-label">生命</span><span class="stat-value">${wf.health}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">护盾</span><span class="stat-value">${wf.shield}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">护甲</span><span class="stat-value">${wf.armor}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">能量</span><span class="stat-value">${wf.power}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">冲刺速度</span><span class="stat-value">${wf.sprintSpeed}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">段位需求</span><span class="stat-value">${wf.masteryReq}</span></div>
+            </div>
+        </div>`;
+
+    if (wf.passiveDescription) {
+        html += `<div class="wiki-detail-section">
+            <div class="wiki-detail-label">被动技能</div>
+            <div class="wiki-detail-desc">${wf.passiveDescription}</div>
+        </div>`;
+    }
+
+    if (wf.abilities && wf.abilities.length > 0) {
+        html += `<div class="wiki-detail-section">
+            <div class="wiki-detail-label">技能</div>`;
+        wf.abilities.forEach((a, i) => {
+            html += `<div class="wiki-ability">
+                <div class="wiki-ability-name">${i + 1}. ${a.name}</div>
+                <div class="wiki-ability-desc">${a.description || ''}</div>
+            </div>`;
+        });
+        html += `</div>`;
+    }
+
+    html += `</div>`;
+    content.innerHTML = html;
+}
+
+// ===== 武器百科 =====
+
+async function showWikiWeapons(type, q) {
+    const content = openDetailPanel('加载武器数据...');
+    if (!content) return;
+
+    try {
+        let url = `/api/wiki/weapons?type=${type}`;
+        if (q) url += `&q=${encodeURIComponent(q)}`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        const typeNames = { primary: '主武器', secondary: '副武器', melee: '近战武器' };
+        const typeName = typeNames[type] || type;
+
+        let html = `<div class="profit-calc-container">
+            <div class="profit-calc-title">🔫 ${typeName}</div>
+            <div class="wiki-search-row">
+                <input type="text" id="wiki-weapon-search" class="wiki-search-input"
+                    placeholder="搜索武器..." value="${q || ''}" autocomplete="off">
+                <button class="wiki-search-btn" onclick="showWikiWeapons('${type}',document.getElementById('wiki-weapon-search').value)">搜索</button>
+            </div>
+            <div class="wiki-tabs">
+                <button class="wiki-tab ${type==='primary'?'active':''}" onclick="showWikiWeapons('primary','')">主武器</button>
+                <button class="wiki-tab ${type==='secondary'?'active':''}" onclick="showWikiWeapons('secondary','')">副武器</button>
+                <button class="wiki-tab ${type==='melee'?'active':''}" onclick="showWikiWeapons('melee','')">近战武器</button>
+                <button class="wiki-tab" onclick="showWikiWarframes('')">Warframe</button>
+            </div>
+            <div class="wiki-count">共 ${data.total} 个结果</div>
+            <div class="wiki-grid">`;
+
+        _wikiStore.weapons = data.weapons;
+        data.weapons.forEach((w, i) => {
+            const critPct = w.criticalChance ? (w.criticalChance * 100).toFixed(0) + '%' : '-';
+            const statusPct = w.procChance ? (w.procChance * 100).toFixed(0) + '%' : '-';
+            const displayName = w.nameZh ? `${w.nameZh}（${w.name}）` : w.name;
+            html += `<div class="wiki-card" onclick="showWikiWeaponDetail(${i})">
+                <div class="wiki-card-name">${displayName}</div>
+                <div class="wiki-card-stats">
+                    <span class="wiki-stat">💥 ${w.totalDamage}</span>
+                    <span class="wiki-stat">🎯 ${critPct}</span>
+                    <span class="wiki-stat">⚡ ${statusPct}</span>
+                </div>
+                <div class="wiki-card-sub">射速 ${w.fireRate} · 段位 ${w.masteryReq}</div>
+            </div>`;
+        });
+
+        html += `</div></div>`;
+        content.innerHTML = html;
+
+        const searchInput = document.getElementById('wiki-weapon-search');
+        if (searchInput) {
+            searchInput.addEventListener('keydown', e => {
+                if (e.key === 'Enter') showWikiWeapons(type, searchInput.value);
+            });
+        }
+    } catch (err) {
+        content.innerHTML = createChartError('加载武器数据失败: ' + err.message);
+    }
+}
+
+function showWikiWeaponDetail(idx) {
+    const w = _wikiStore.weapons[idx];
+    if (!w) return;
+    const content = document.getElementById('detail-content');
+    if (!content) return;
+
+    const critPct = w.criticalChance ? (w.criticalChance * 100).toFixed(1) + '%' : '-';
+    const critMul = w.criticalMultiplier ? w.criticalMultiplier + 'x' : '-';
+    const statusPct = w.procChance ? (w.procChance * 100).toFixed(1) + '%' : '-';
+    const displayName = w.nameZh ? `${w.nameZh}（${w.name}）` : w.name;
+
+    let html = `<div class="profit-calc-container">
+        <div class="wiki-detail-back" onclick="showWikiWeapons('${w.category}','')">← 返回列表</div>
+        <div class="profit-calc-title">${displayName}</div>
+        ${w.marketUrl ? `<a class="wiki-market-link" href="${w.marketUrl}" target="_blank" rel="noopener">${w.isPrime ? '在 warframe.market 查看蓝图交易 →' : '在 warframe.market 查看交易 →'}</a>` : ''}
+        ${w.components && w.components.length > 0 ? `
+        <div class="wiki-detail-section">
+            <div class="wiki-detail-label">Prime 部件交易</div>
+            <div class="wiki-detail-grid">
+                ${w.components.map(comp => {
+                    const compUrl = w.marketUrl ? w.marketUrl.replace('_blueprint', '_' + comp.name.toLowerCase().replace(/\s+/g, '_')) : '';
+                    return `<a class="wiki-comp-link" href="${compUrl}" target="_blank" rel="noopener">
+                        <span class="wiki-comp-name">${comp.name}</span>
+                        ${comp.ducats ? `<span class="wiki-comp-ducats">◆ ${comp.ducats}</span>` : ''}
+                    </a>`;
+                }).join('')}
+            </div>
+        </div>` : ''}
+        <div class="wiki-detail-desc">${w.description || ''}</div>
+
+        <div class="wiki-detail-section">
+            <div class="wiki-detail-label">战斗属性</div>
+            <div class="wiki-detail-grid">
+                <div class="wiki-detail-stat"><span class="stat-label">总伤害</span><span class="stat-value">${w.totalDamage}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">暴击率</span><span class="stat-value">${critPct}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">暴击倍率</span><span class="stat-value">${critMul}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">触发率</span><span class="stat-value">${statusPct}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">射速</span><span class="stat-value">${w.fireRate}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">弹匣</span><span class="stat-value">${w.magazineSize}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">装填</span><span class="stat-value">${w.reloadTime}s</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">精准</span><span class="stat-value">${w.accuracy || '-'}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">噪音</span><span class="stat-value">${w.noise || '-'}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">扳机</span><span class="stat-value">${w.trigger || '-'}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">段位需求</span><span class="stat-value">${w.masteryReq}</span></div>
+            </div>
+        </div>
+    </div>`;
+    content.innerHTML = html;
+}
+
+// ===== MOD 数据库 =====
+
+async function showWikiMods(q, polarity, rarity) {
+    const content = openDetailPanel('加载 MOD 数据...');
+    if (!content) return;
+
+    try {
+        let url = '/api/wiki/mods?';
+        if (q) url += `q=${encodeURIComponent(q)}&`;
+        if (polarity) url += `polarity=${encodeURIComponent(polarity)}&`;
+        if (rarity) url += `rarity=${encodeURIComponent(rarity)}&`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        let html = `<div class="profit-calc-container">
+            <div class="profit-calc-title">📖 MOD 数据库</div>
+            <div class="wiki-search-row">
+                <input type="text" id="wiki-mod-search" class="wiki-search-input"
+                    placeholder="搜索 MOD..." value="${q || ''}" autocomplete="off">
+                <button class="wiki-search-btn" onclick="searchWikiMods()">搜索</button>
+            </div>
+            <div class="wiki-filters">
+                <select id="wiki-mod-polarity" onchange="searchWikiMods()">
+                    <option value="">全部极性</option>
+                    <option value="madurai" ${polarity==='madurai'?'selected':''}>Madurai (V)</option>
+                    <option value="vazarin" ${polarity==='vazarin'?'selected':''}>Vazarin (D)</option>
+                    <option value="naramon" ${polarity==='naramon'?'selected':''}>Naramon (横线)</option>
+                    <option value="zenurik" ${polarity==='zenurik'?'selected':''}>Zenurik (—)</option>
+                    <option value="penjaga" ${polarity==='penjaga'?'selected':''}>Penjaga (Y)</option>
+                    <option value="umbra" ${polarity==='umbra'?'selected':''}>Umbra</option>
+                </select>
+                <select id="wiki-mod-rarity" onchange="searchWikiMods()">
+                    <option value="">全部稀有度</option>
+                    <option value="common" ${rarity==='common'?'selected':''}>Common</option>
+                    <option value="uncommon" ${rarity==='uncommon'?'selected':''}>Uncommon</option>
+                    <option value="rare" ${rarity==='rare'?'selected':''}>Rare</option>
+                    <option value="legendary" ${rarity==='legendary'?'selected':''}>Legendary</option>
+                    <option value="peculiar" ${rarity==='peculiar'?'selected':''}>Peculiar</option>
+                </select>
+            </div>
+            <div class="wiki-count">共 ${data.total} 个结果（显示前 200）</div>
+            <div class="wiki-grid">`;
+
+        _wikiStore.mods = data.mods;
+        data.mods.forEach((m, i) => {
+            const polarityIcons = { madurai: 'V', vazarin: 'D', naramon: '—', zenurik: '—', penjaga: 'Y', umbra: '◆' };
+            const rarityColors = { common: '#a0a0a0', uncommon: '#c9a227', rare: '#3f8ae0', legendary: '#e04040', peculiar: '#b060d0' };
+            const polIcon = polarityIcons[m.polarity] || '?';
+            const rarColor = rarityColors[(m.rarity || '').toLowerCase()] || '#888';
+            const displayName = m.nameZh ? `${m.nameZh}（${m.name}）` : m.name;
+
+            html += `<div class="wiki-card wiki-mod-card" onclick="showWikiModDetail(${i})">
+                <div class="wiki-card-name">${displayName}</div>
+                <div class="wiki-card-stats">
+                    <span class="wiki-stat" style="color:${rarColor}">◆ ${m.rarity || '-'}</span>
+                    <span class="wiki-stat">⊘ ${polIcon}</span>
+                    <span class="wiki-stat">⚡ ${m.baseDrain}/${m.maxRank}</span>
+                </div>
+                <div class="wiki-card-sub">${m.type || ''}</div>
+            </div>`;
+        });
+
+        html += `</div></div>`;
+        content.innerHTML = html;
+
+        const searchInput = document.getElementById('wiki-mod-search');
+        if (searchInput) {
+            searchInput.addEventListener('keydown', e => {
+                if (e.key === 'Enter') searchWikiMods();
+            });
+        }
+    } catch (err) {
+        content.innerHTML = createChartError('加载 MOD 数据失败: ' + err.message);
+    }
+}
+
+function searchWikiMods() {
+    const q = document.getElementById('wiki-mod-search')?.value || '';
+    const polarity = document.getElementById('wiki-mod-polarity')?.value || '';
+    const rarity = document.getElementById('wiki-mod-rarity')?.value || '';
+    showWikiMods(q, polarity, rarity);
+}
+
+function showWikiModDetail(idx) {
+    const m = _wikiStore.mods[idx];
+    if (!m) return;
+    const content = document.getElementById('detail-content');
+    if (!content) return;
+
+    const rarityColors = { common: '#a0a0a0', uncommon: '#c9a227', rare: '#3f8ae0', legendary: '#e04040', peculiar: '#b060d0' };
+    const rarColor = rarityColors[(m.rarity || '').toLowerCase()] || '#888';
+    const displayName = m.nameZh ? `${m.nameZh}（${m.name}）` : m.name;
+
+    let html = `<div class="profit-calc-container">
+        <div class="wiki-detail-back" onclick="searchWikiMods()">← 返回列表</div>
+        <div class="profit-calc-title">${displayName}</div>
+        <div class="wiki-detail-desc">${m.description || ''}</div>
+        ${m.marketUrl ? `<a class="wiki-market-link" href="${m.marketUrl}" target="_blank" rel="noopener">在 warframe.market 查看交易 →</a>` : ''}
+
+        <div class="wiki-detail-section">
+            <div class="wiki-detail-label">MOD 信息</div>
+            <div class="wiki-detail-grid">
+                <div class="wiki-detail-stat"><span class="stat-label">类型</span><span class="stat-value">${m.type || '-'}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">稀有度</span><span class="stat-value" style="color:${rarColor}">${m.rarity || '-'}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">极性</span><span class="stat-value">${m.polarity || '-'}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">容量消耗</span><span class="stat-value">${m.baseDrain}/${m.maxRank}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">兼容</span><span class="stat-value">${m.compatName || '通用'}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">强化 MOD</span><span class="stat-value">${m.isAugment ? '是' : '否'}</span></div>
+                <div class="wiki-detail-stat"><span class="stat-label">可交易</span><span class="stat-value">${m.tradable ? '是' : '否'}</span></div>
+            </div>
+        </div>
+    </div>`;
+    content.innerHTML = html;
+}
+
+// ===== 遗物搜索 =====
+
+async function showRelicSearch(q) {
+    const content = openDetailPanel('搜索遗物...');
+    if (!content) return;
+
+    try {
+        const url = q ? `/api/relic/search?q=${encodeURIComponent(q)}` : '/api/relic/search';
+        const res = await fetch(url);
+        const data = await res.json();
+
+        let html = `<div class="profit-calc-container">
+            <div class="profit-calc-title">🔮 遗物搜索</div>
+            <div class="wiki-search-row">
+                <input type="text" id="relic-search-input" class="wiki-search-input"
+                    placeholder="输入物品名称（如：Nova Prime, Volt Prime Blueprint）..." value="${q || ''}" autocomplete="off">
+                <button class="wiki-search-btn" onclick="showRelicSearch(document.getElementById('relic-search-input').value)">搜索</button>
+            </div>`;
+
+        if (!q) {
+            html += `<div class="empty-state" style="padding:32px 0;">
+                <div class="empty-state-icon">🔮</div>
+                <div class="empty-state-text">输入物品名称搜索掉落遗物</div>
+                <div class="empty-state-sub">例如：Nova Prime, Saryn Prime Blueprint, Akbolto Prime Barrel</div>
+            </div>`;
+        } else if (data.results.length === 0) {
+            html += `<div class="empty-state" style="padding:32px 0;">
+                <div class="empty-state-icon">❌</div>
+                <div class="empty-state-text">未找到 "${q}" 相关的遗物</div>
+                <div class="empty-state-sub">请尝试使用英文名称搜索</div>
+            </div>`;
+        } else {
+            html += `<div class="wiki-count">找到 ${data.total} 个遗物掉落</div>`;
+
+            const rarityColors = { Rare: '#e04040', Uncommon: '#c9a227', Common: '#a0a0a0' };
+            const rarityIcons = { Rare: '🔴', Uncommon: '🟡', Common: '⚪' };
+
+            data.results.forEach(r => {
+                const color = rarityColors[r.rarity] || '#888';
+                const icon = rarityIcons[r.rarity] || '⚪';
+                const rarityDisplay = r.rarityZh || r.rarity;
+                const vaultStatus = r.vaultStatus || '';
+                const vaultClass = vaultStatus === '入库' ? 'vaulted' : 'active';
+                const vaultLabel = vaultStatus === '入库' ? '🔒 入库' : '✅ 非入库';
+                html += `<div class="relic-result-card">
+                    <div class="relic-result-header">
+                        <span class="relic-name">${r.relicName}</span>
+                        <span class="relic-vault-badge ${vaultClass}">${vaultLabel}</span>
+                        <span class="relic-state">${r.state}</span>
+                    </div>
+                    <div class="relic-result-body">
+                        <span class="relic-item">${r.itemName}</span>
+                        <span class="relic-rarity" style="color:${color}">${icon} ${rarityDisplay}</span>
+                        <span class="relic-chance">${r.chance}%</span>
+                    </div>
+                </div>`;
+            });
+        }
+
+        html += `</div>`;
+        content.innerHTML = html;
+
+        const searchInput = document.getElementById('relic-search-input');
+        if (searchInput) {
+            searchInput.addEventListener('keydown', e => {
+                if (e.key === 'Enter') showRelicSearch(searchInput.value);
+            });
+            searchInput.focus();
+        }
+    } catch (err) {
+        content.innerHTML = createChartError('搜索遗物失败: ' + err.message);
+    }
+}
+
+// 绑定新功能菜单按钮
+document.getElementById('wiki-warframes-btn')?.addEventListener('click', () => {
+    toggleMoreMenu();
+    showWikiWarframes('');
+});
+
+document.getElementById('wiki-mods-btn')?.addEventListener('click', () => {
+    toggleMoreMenu();
+    showWikiMods('', '', '');
+});
+
+document.getElementById('relic-search-btn')?.addEventListener('click', () => {
+    toggleMoreMenu();
+    showRelicSearch('');
+});

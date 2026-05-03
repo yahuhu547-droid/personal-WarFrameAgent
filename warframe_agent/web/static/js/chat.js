@@ -14,6 +14,8 @@ let debounceTimer;
 let isTyping = false;
 let chatWs = null;
 let currentStreamMsg = null;
+let wsReconnectDelay = 1000;
+let wsReconnectTimer = null;
 
 // ===== Markdown 配置 =====
 if (typeof marked !== 'undefined') {
@@ -266,6 +268,7 @@ function ensureChatWs() {
 
     chatWs.onopen = () => {
         console.log('Chat WebSocket 已连接');
+        wsReconnectDelay = 1000;
     };
 
     chatWs.onmessage = (event) => {
@@ -329,8 +332,10 @@ function ensureChatWs() {
     };
 
     chatWs.onclose = () => {
-        console.log('Chat WebSocket 已断开');
-        setTimeout(ensureChatWs, 3000);
+        console.log('Chat WebSocket 已断开，' + wsReconnectDelay + 'ms 后重连');
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = setTimeout(ensureChatWs, wsReconnectDelay);
+        wsReconnectDelay = Math.min(wsReconnectDelay * 2, 30000);
     };
 
     chatWs.onerror = (err) => {
@@ -771,7 +776,10 @@ document.querySelectorAll('.quick-btn').forEach(btn => {
 });
 
 // 清空对话按钮
-document.getElementById('clear-chat-btn')?.addEventListener('click', clearChatHistory);
+document.getElementById('clear-chat-btn')?.addEventListener('click', () => {
+    toggleMoreMenu();
+    clearChatHistory();
+});
 
 // ===== 自定义快捷操作 =====
 
@@ -985,6 +993,7 @@ async function removeAlias(name) {
 
 // 初始化别名面板
 document.getElementById('alias-btn')?.addEventListener('click', () => {
+    toggleMoreMenu();
     document.getElementById('alias-modal').classList.add('active');
     loadAliases();
 });

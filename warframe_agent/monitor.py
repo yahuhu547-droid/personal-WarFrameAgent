@@ -6,7 +6,7 @@ from typing import Callable
 
 from . import config
 from .market import best_sellers, fetch_orders
-from .memory import AgentMemory, PriceAlert, MEMORY_PATH
+from .memory import AgentMemory, PriceAlert, ProactiveSuggestion, MEMORY_PATH
 from .names import display_item_name
 
 
@@ -29,6 +29,7 @@ class FavoriteSnapshot:
 class ScanResult:
     triggered_alerts: list[AlertNotification] = field(default_factory=list)
     favorite_snapshots: list[FavoriteSnapshot] = field(default_factory=list)
+    suggestions: list[ProactiveSuggestion] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
@@ -39,11 +40,13 @@ class PriceMonitor:
         interval_seconds: int = 300,
         memory_path=None,
         on_alert: Callable[[AlertNotification], None] | None = None,
+        price_db=None,
     ):
         self.order_fetcher = order_fetcher
         self.interval_seconds = interval_seconds
         self.memory_path = memory_path or MEMORY_PATH
         self.on_alert = on_alert
+        self.price_db = price_db
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._notifications: list[AlertNotification] = []
@@ -97,8 +100,50 @@ class PriceMonitor:
                     sell_price=sellers[0].platinum if sellers else None,
                     buy_price=buyers[0].platinum if buyers else None,
                 ))
+                scanned_items.add(item_id)
+                if self.price_db and sellers:
+                    self.price_db.record(item_id, sellers[0].platinum, buyers[0].platinum if buyers else None)
             except Exception as exc:
                 result.errors.append(f"{item_id}: {exc}")
+        for watch_item in memory.watchlist:
+            if watch_item.item_id in scanned_items:
+                continue
+            try:
+                orders = self.order_fetcher(watch_item.item_id)
+                sellers = best_sellers(orders, limit=1)
+                buyers = best_buyers(orders, limit=1)
+                result.favorite_snapshots.append(FavoriteSnapshot(
+                    item_id=watch_item.item_id,
+                    item_display=watch_item.item_name,
+                    sell_price=sellers[0].platinum if sellers else None,
+                    buy_price=buyers[0].platinum if buyers else None,
+                ))
+                if self.price_db and sellers:
+                    self.price_db.record(watch_item.item_id, sellers[0].platinum, buyers[0].platinum if buyers else None)
+            except Exception as exc:
+                result.errors.append(f"{watch_item.item_id}: {exc}")
+        if self.price_db:
+            all_items = scanned_items | {w.item_id for w in memory.watchlist}
+            for item_id in all_items:
+                try:
+                    anomaly = self.price_db.detect_anomaly(item_id, config.ANOMALY_THRESHOLD_PERCENT)
+                    if anomaly:
+                        direction_text = "暴涨" if anomaly["direction"] == "spike" else "暴跌"
+                        msg = (
+                            f"{display_item_name(item_id)} 价格{direction_text}！"
+                            f"当前 {anomaly['current']}p，均值 {anomaly['average']}p，"
+                            f"偏差 {anomaly['deviation_pct']}%"
+                        )
+                        priority = 1 if abs(anomaly["deviation_pct"]) >= config.ANOMALY_THRESHOLD_PERCENT else 2
+                        suggestion = ProactiveSuggestion(
+                            item_id=item_id,
+                            suggestion_type="anomaly",
+                            priority=priority,
+                            message=msg,
+                        )
+                        result.suggestions.append(suggestion)
+                except Exception as exc:
+                    result.errors.append(f"anomaly check {item_id}: {exc}")
         return result
 
     def _run(self) -> None:
@@ -111,6 +156,11 @@ class PriceMonitor:
                     if self.on_alert:
                         for n in scan.triggered_alerts:
                             self.on_alert(n)
+                if scan.suggestions:
+                    memory = AgentMemory.load(self.memory_path)
+                    for suggestion in scan.suggestions:
+                        memory = memory.with_suggestion(suggestion)
+                    memory.save(self.memory_path)
             except Exception:
                 pass
             self._stop_event.wait(self.interval_seconds)

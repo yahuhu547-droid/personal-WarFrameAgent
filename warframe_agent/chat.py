@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from typing import Callable, Iterable
+from dataclasses import dataclass, replace
+from typing import AsyncIterator, Callable, Iterable
 
 import requests
 
@@ -13,7 +13,7 @@ from .market import MarketOrder, best_buyers, best_sellers, fetch_orders
 from .memory import AgentMemory
 from .names import display_item_name
 from .price_history import PriceHistoryDB
-from .rag import search_rag_items
+from .rag import smart_search_rag
 from .session import SessionContext, is_followup
 from .tool_router import build_router_prompt, parse_tool_call
 from .trade_intent import detect_trade_intent
@@ -104,7 +104,31 @@ class ChatAgent:
         self.session = SessionContext()
         self.router_call = router_call
 
+    def _call_llm_messages(self, messages: list[dict[str, str]]) -> str:
+        """使用 messages 格式调用 LLM，失败时回退到旧 model_call"""
+        # 如果 model_call 是注入的（非默认），直接用旧方式
+        if self.model_call is not call_ollama_chat:
+            parts = []
+            for msg in messages:
+                if msg["role"] == "system":
+                    parts.insert(0, msg["content"])
+                else:
+                    parts.append(msg["content"])
+            return self.model_call("\n\n".join(parts))
+        try:
+            from .llm import chat_with_ollama
+            return chat_with_ollama(messages)
+        except Exception:
+            parts = []
+            for msg in messages:
+                if msg["role"] == "system":
+                    parts.insert(0, msg["content"])
+                else:
+                    parts.append(msg["content"])
+            return self.model_call("\n\n".join(parts))
+
     def answer(self, message: str) -> str:
+        self._reload_memory()
         stripped = message.strip()
         if stripped.startswith("/"):
             return self._handle_agent_command(stripped)
@@ -130,9 +154,9 @@ class ChatAgent:
         if deterministic_answer:
             self.session.add_exchange(message, deterministic_answer)
             return deterministic_answer
-        prompt = build_chat_prompt(message, contexts, self.memory)
+        prompt_messages = build_chat_messages(message, contexts, self.memory, self.session.to_messages())
         try:
-            answer = self.model_call(prompt).strip()
+            answer = self._call_llm_messages(prompt_messages).strip()
             if answer:
                 self.session.add_exchange(message, answer)
                 return answer
@@ -143,6 +167,61 @@ class ChatAgent:
         result = fallback_answer(message, contexts)
         self.session.add_exchange(message, result)
         return result
+
+    async def answer_stream(self, message: str) -> AsyncIterator[str]:
+        """流式版本的 answer，逐 token yield。对于不需要 LLM 的路径，一次性 yield 全文。"""
+        self._reload_memory()
+        stripped = message.strip()
+        if stripped.startswith("/"):
+            yield self._handle_agent_command(stripped)
+            return
+        if is_watchlist_command(message):
+            yield self.scan_watchlist()
+            return
+        self._remember_common_question(message)
+        warframe_answer = price_warframe_query(message, self.warframe_items, self.order_fetcher)
+        if warframe_answer:
+            self.session.add_exchange(message, warframe_answer)
+            yield warframe_answer
+            return
+        if is_followup(message) and self.session.has_context():
+            contexts = self._contexts_for_items(self.session.last_item_ids)
+        else:
+            contexts = self._contexts_for_message(message)
+        if not contexts:
+            routed = self._try_router(message)
+            if routed:
+                self.session.add_exchange(message, routed)
+                yield routed
+                return
+            yield "没有找到匹配的物品，请输入 warframe.market 的 item_id，例如：充沛 / arcane_energize"
+            return
+        self.session.update([ctx.item_id for ctx in contexts])
+        deterministic_answer = _deterministic_trade_intent_answer(message, contexts)
+        if deterministic_answer:
+            self.session.add_exchange(message, deterministic_answer)
+            yield deterministic_answer
+            return
+        prompt_messages = build_chat_messages(message, contexts, self.memory, self.session.to_messages())
+        # 流式调用 LLM
+        full_reply = []
+        try:
+            from .llm import stream_chat_ollama
+            async for token in stream_chat_ollama(prompt_messages):
+                full_reply.append(token)
+                yield token
+        except Exception:
+            result = fallback_answer(message, contexts, llm_failed=True)
+            self.session.add_exchange(message, result)
+            yield result
+            return
+        reply_text = "".join(full_reply).strip()
+        if reply_text:
+            self.session.add_exchange(message, reply_text)
+        else:
+            result = fallback_answer(message, contexts)
+            self.session.add_exchange(message, result)
+            yield result
 
     def scan_watchlist(self) -> str:
         watchlist = self.watchlist if self.watchlist is not None else _load_watchlist()
@@ -195,13 +274,24 @@ class ChatAgent:
             for alert in self.memory.price_alerts[:5]
         ) or "无"
         questions = "、".join(self.memory.common_questions[-5:]) or "无"
-        return "\n".join([
+        lines = [
             "记忆摘要：",
             f"偏好: platform={self.memory.preferences.platform}, crossplay={self.memory.preferences.crossplay}, max_results={self.memory.preferences.max_results}",
             f"关注物品: {favorites}",
             f"价格提醒: {alerts}",
             f"常见问题: {questions}",
-        ])
+        ]
+        if self.memory.user_profile:
+            profile = self.memory.user_profile
+            trade_text = {"buy": "偏好购买", "sell": "偏好出售"}.get(profile.preferred_trade_type, "买卖均衡")
+            cats = "、".join(profile.favorite_categories) if profile.favorite_categories else "无"
+            top_items = "、".join(list(profile.queried_items.keys())[:5]) or "无"
+            lines.append(f"用户画像: {trade_text}，偏好分类: {cats}，常查物品: {top_items}")
+        if self.memory.recent_suggestions:
+            lines.append("最近智能建议：")
+            for s in self.memory.recent_suggestions[-5:]:
+                lines.append(f"  {s.message}")
+        return "\n".join(lines)
 
     def _handle_favorite_command(self, args: list[str]) -> str:
         if len(args) < 2 or args[0].lower() not in {"add", "remove"}:
@@ -322,6 +412,33 @@ class ChatAgent:
             return matches[0] if matches else None
 
     def _try_router(self, message: str) -> str | None:
+        result = self._try_react_loop(message)
+        if result:
+            return result
+        return self._try_router_legacy(message)
+
+    def _try_react_loop(self, message: str) -> str | None:
+        from .tool_router import react_loop
+        try:
+            return react_loop(
+                message=message,
+                tool_executor=self._execute_tool_call,
+                model_call=self._react_model_call,
+            )
+        except Exception:
+            return None
+
+    def _react_model_call(self, messages: list[dict]) -> str:
+        if self.router_call:
+            parts = [m.get("content", "") for m in messages if m.get("role") != "system"]
+            return self.router_call("\n".join(parts))
+        if self.model_call is not call_ollama_chat:
+            parts = [m.get("content", "") for m in messages if m.get("role") != "system"]
+            return self.model_call("\n".join(parts))
+        from .llm import chat_with_ollama
+        return chat_with_ollama(messages, model=config.REACT_MODEL)
+
+    def _try_router_legacy(self, message: str) -> str | None:
         caller = self.router_call or self.model_call
         try:
             router_prompt = build_router_prompt(message)
@@ -379,16 +496,58 @@ class ChatAgent:
             if trend:
                 return f"{display_item_name(item_id)}\n{trend}"
             return f"{display_item_name(item_id)}\n暂无历史价格数据"
+        if tool_call.name == "query_missing_parts":
+            warframe_name = args.get("warframe_name", message)
+            owned_raw = args.get("owned_parts", "")
+            owned_parts = [p.strip() for p in owned_raw.replace("、", ",").replace("，", ",").split(",") if p.strip()]
+            return self._query_missing_parts(warframe_name, owned_parts)
         if tool_call.name == "general_chat":
             return None
         return None
 
+    def _query_missing_parts(self, warframe_name: str, owned_parts: list[str]) -> str | None:
+        from .warframes import find_warframe, build_set_price_info
+        if not self.warframe_items:
+            return None
+        wf = find_warframe(warframe_name, self.warframe_items)
+        if not wf:
+            return None
+        info = build_set_price_info(wf, self.order_fetcher)
+        if not info:
+            return None
+        owned_lower = {p.lower() for p in owned_parts}
+        missing = []
+        total_missing = 0
+        for comp in info.get("components", []):
+            comp_name = comp.get("name", "")
+            if comp_name.lower() not in owned_lower:
+                price = comp.get("sell_price")
+                if price:
+                    missing.append(f"{comp_name}: {price}p")
+                    total_missing += price
+                else:
+                    missing.append(f"{comp_name}: 暂无价格")
+        if not missing:
+            return f"你已经拥有 {warframe_name} 的所有部件！"
+        return f"补齐 {warframe_name} 还需要:\n" + "\n".join(missing) + f"\n总计约: {total_missing}p"
+
     def _remember_common_question(self, message: str) -> None:
         self.memory = self.memory.with_common_question(message)
+        if len(self.memory.common_questions) % 5 == 0:
+            self.memory = self.memory.analyze_and_update_profile()
         self._persist_memory()
 
     def _persist_memory(self) -> None:
         self.memory.save(self.memory_path)
+
+    def _reload_memory(self) -> None:
+        disk = AgentMemory.load(self.memory_path)
+        self.memory = replace(
+            disk,
+            common_questions=self.memory.common_questions,
+            user_profile=self.memory.user_profile,
+            recent_suggestions=self.memory.recent_suggestions,
+        )
 
     def _contexts_for_items(self, item_ids: list[str]) -> list[ItemContext]:
         contexts = []
@@ -449,7 +608,7 @@ class ChatAgent:
         return contexts
 
     def _default_rag_search(self, message: str) -> list[str]:
-        return [result.item_id for result in search_rag_items(message, limit=3)]
+        return [result.item_id for result in smart_search_rag(message, limit=3)]
 
     def _item_ids_from_alias_substrings(self, message: str) -> list[str]:
         normalized_message = normalize_lookup_key(message)
@@ -474,6 +633,36 @@ def build_chat_prompt(message: str, contexts: list[ItemContext], memory: AgentMe
         f"玩家问题: {message}\n"
         "请给出简洁中文建议，并保留可复制的私聊命令。"
     )
+
+
+def build_system_prompt(memory: AgentMemory, contexts: list[ItemContext] | None = None) -> str:
+    """构建 system 消息（persona + 记忆 + 告警）"""
+    memory_text = _memory_prompt(contexts or [], memory)
+    return (
+        "你是资深星际战甲玩家和中文交易助手。请用老玩家视角回答，重点说明能不能买、能不能卖、价差和注意事项。"
+        "所有识别出的商品名必须尽量使用 `中文名 / English Name / market_id` 格式。"
+        "所有价格单位都是 Warframe 白金 platinum，绝不是美元、人民币或其他现实货币。"
+        "不要编造没有提供的实时价格。\n\n"
+        f"长期记忆与偏好:\n{memory_text}"
+    )
+
+
+def build_chat_messages(
+    message: str,
+    contexts: list[ItemContext],
+    memory: AgentMemory,
+    history: list[dict[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    """构建 Ollama chat messages 数组（支持多轮对话）"""
+    messages = [{"role": "system", "content": build_system_prompt(memory, contexts)}]
+    if history:
+        messages.extend(history)
+    if contexts:
+        context_text = "\n\n".join(context.text for context in contexts)
+        messages.append({"role": "user", "content": f"实时市场上下文:\n{context_text}\n\n玩家问题: {message}\n请给出简洁中文建议，并保留可复制的私聊命令。"})
+    else:
+        messages.append({"role": "user", "content": f"玩家问题: {message}\n请给出简洁中文建议。"})
+    return messages
 
 
 def _deterministic_trade_intent_answer(message: str, contexts: list[ItemContext]) -> str | None:
@@ -544,11 +733,19 @@ def _memory_prompt(contexts: list[ItemContext], memory: AgentMemory) -> str:
     ]
     if memory.favorite_items:
         lines.append(f"常看物品: {', '.join(memory.favorite_items)}")
+    if memory.user_profile:
+        profile = memory.user_profile
+        trade_text = {"buy": "偏好购买", "sell": "偏好出售"}.get(profile.preferred_trade_type, "买卖均衡")
+        cats = "、".join(profile.favorite_categories) if profile.favorite_categories else "无"
+        lines.append(f"用户画像: {trade_text}，偏好分类: {cats}，累计查询 {profile.total_queries} 次")
     for context in contexts:
         if context.best_sell_price is None:
             continue
         for alert in memory.alerts_for(context.item_id, context.best_sell_price):
             lines.append(f"记忆提醒: {alert.note or context.item_id}")
+    if memory.recent_suggestions:
+        for s in memory.recent_suggestions[-config.PROACTIVE_SUGGESTION_LIMIT:]:
+            lines.append(f"智能建议: {s.message}")
     return "\n".join(lines)
 
 

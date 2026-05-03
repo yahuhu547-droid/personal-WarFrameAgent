@@ -5,6 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Warframe 交易助手 - Tenno 科技终端</title>
 
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700&family=Rajdhani:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
     <!-- CSS 文件 -->
     <link rel="stylesheet" href="/static/css/variables.css">
     <link rel="stylesheet" href="/static/css/animations.css">
@@ -22,6 +27,20 @@
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
 </head>
 <body>
+    <!-- 全局错误捕获 -->
+    <script>
+    window.onerror = function(msg, url, line, col, error) {
+        console.error('[Global Error]', msg, url + ':' + line, error);
+        return false;
+    };
+    window.addEventListener('unhandledrejection', function(e) {
+        console.error('[Unhandled Promise]', e.reason);
+    });
+    </script>
+
+    <!-- 粒子背景 -->
+    <canvas id="particle-bg"></canvas>
+
     <div class="container">
         <!-- 左侧边栏 - 收藏和提醒 -->
         <aside class="sidebar" id="sidebar">
@@ -89,9 +108,38 @@
                         <span class="menu-icon">📈</span>
                         <span class="menu-text">收藏仪表盘</span>
                     </button>
+                    <button class="more-menu-item" id="profit-calc-btn">
+                        <span class="menu-icon">🧮</span>
+                        <span class="menu-text">利润计算器</span>
+                    </button>
                     <button class="more-menu-item" id="alias-btn">
                         <span class="menu-icon">🏷️</span>
                         <span class="menu-text">自定义别名</span>
+                    </button>
+                    <div class="more-menu-divider"></div>
+                    <button class="more-menu-item" id="fissure-btn">
+                        <span class="menu-icon">🔔</span>
+                        <span class="menu-text">虚空裂隙</span>
+                    </button>
+                    <button class="more-menu-item" id="anomaly-btn">
+                        <span class="menu-icon">📊</span>
+                        <span class="menu-text">价格异常</span>
+                    </button>
+                    <button class="more-menu-item" id="notify-settings-btn">
+                        <span class="menu-icon">🔔</span>
+                        <span class="menu-text">通知设置</span>
+                    </button>
+                    <button class="more-menu-item" id="wiki-warframes-btn">
+                        <span class="menu-icon">🛡️</span>
+                        <span class="menu-text">装备百科</span>
+                    </button>
+                    <button class="more-menu-item" id="wiki-mods-btn">
+                        <span class="menu-icon">📖</span>
+                        <span class="menu-text">MOD 数据库</span>
+                    </button>
+                    <button class="more-menu-item" id="relic-search-btn">
+                        <span class="menu-icon">🔮</span>
+                        <span class="menu-text">遗物搜索</span>
                     </button>
                     <div class="more-menu-divider"></div>
                     <button class="more-menu-item" id="clear-chat-btn">
@@ -162,14 +210,14 @@
 
         <!-- 右侧详情面板 -->
         <aside class="detail-panel" id="detail-panel">
-            <button class="close-btn" id="close-detail">
-                <span>&times;</span>
-            </button>
-            <div class="panel-header">
-                <h2>物品详情</h2>
-                <div class="panel-decoration"></div>
+            <div class="detail-panel-header">
+                <div class="panel-header">
+                    <h2>物品详情</h2>
+                    <div class="panel-decoration"></div>
+                </div>
+                <div class="close-btn" id="close-detail" onclick="closeDetailPanel(event)" role="button" tabindex="0">&times;</div>
             </div>
-            <div id="detail-content"></div>
+            <div class="detail-panel-body" id="detail-content"></div>
         </aside>
     </div>
 

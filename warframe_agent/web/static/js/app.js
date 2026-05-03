@@ -233,10 +233,86 @@ function showWelcomeModal() {
     });
 }
 
+// ===== 粒子背景系统 =====
+
+function initParticleBg() {
+    const canvas = document.getElementById('particle-bg');
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    let particles = [];
+    let animationId;
+    let lastTime = 0;
+    const fps = 30;
+    const interval = 1000 / fps;
+
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+
+    function createParticle() {
+        return {
+            x: Math.random() * canvas.width,
+            y: Math.random() * canvas.height,
+            size: Math.random() * 1.5 + 0.5,
+            speedX: (Math.random() - 0.5) * 0.3,
+            speedY: (Math.random() - 0.5) * 0.3,
+            opacity: Math.random() * 0.5 + 0.1,
+            pulse: Math.random() * Math.PI * 2
+        };
+    }
+
+    function init() {
+        resize();
+        particles = [];
+        const count = Math.min(60, Math.floor((canvas.width * canvas.height) / 15000));
+        for (let i = 0; i < count; i++) {
+            particles.push(createParticle());
+        }
+    }
+
+    function animate(currentTime) {
+        animationId = requestAnimationFrame(animate);
+
+        const delta = currentTime - lastTime;
+        if (delta < interval) return;
+        lastTime = currentTime - (delta % interval);
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        particles.forEach(p => {
+            p.x += p.speedX;
+            p.y += p.speedY;
+            p.pulse += 0.02;
+
+            if (p.x < 0) p.x = canvas.width;
+            if (p.x > canvas.width) p.x = 0;
+            if (p.y < 0) p.y = canvas.height;
+            if (p.y > canvas.height) p.y = 0;
+
+            const currentOpacity = p.opacity * (0.7 + 0.3 * Math.sin(p.pulse));
+
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(212, 167, 55, ${currentOpacity})`;
+            ctx.fill();
+        });
+    }
+
+    window.addEventListener('resize', () => {
+        resize();
+    });
+
+    init();
+    animate(0);
+}
+
 // ===== 初始化 =====
 
 document.addEventListener('DOMContentLoaded', () => {
     initTheme();
+    initParticleBg();
     loadSidebar();
     setupWebSocket();
     checkFirstVisit();
@@ -1157,11 +1233,111 @@ if (Notification.permission === 'default') {
     Notification.requestPermission();
 }
 
+// ===== 公共面板操作 =====
+
+function openDetailPanel(loadingText) {
+    const panel = document.getElementById('detail-panel');
+    const content = document.getElementById('detail-content');
+    if (!panel || !content) {
+        console.error('[openDetailPanel] panel or content not found');
+        return null;
+    }
+    panel.style.display = '';  // Clear any inline display override
+    panel.scrollTop = 0;
+    panel.classList.add('active');
+    content.innerHTML = createChartLoading(loadingText || '加载中...');
+    return content;
+}
+
+function createChartLoading(text) {
+    return `
+        <div class="chart-loading">
+            <div class="loading"><div class="loading-dot"></div><div class="loading-dot"></div><div class="loading-dot"></div></div>
+            <div class="loading-text">${text || '加载价格数据...'}</div>
+        </div>
+    `;
+}
+
+// ===== 关闭面板按钮 =====
+function closeDetailPanel(e) {
+    console.log('[ClosePanel] called', e && e.type);
+    var panel = document.getElementById('detail-panel');
+    console.log('[ClosePanel] panel:', panel, 'classes:', panel ? panel.className : 'N/A');
+    if (panel) {
+        panel.classList.remove('active');
+        // Force hide as fallback
+        panel.style.display = 'none';
+        console.log('[ClosePanel] hidden, display:', panel.style.display);
+    }
+    if (typeof priceChart !== 'undefined' && priceChart) {
+        priceChart.destroy();
+        priceChart = null;
+    }
+}
+
+// Document-level fallback: catch close button clicks via event delegation
+document.addEventListener('click', function(e) {
+    const btn = e.target.closest('#close-detail');
+    if (btn) {
+        console.log('[ClosePanel] delegated click');
+        closeDetailPanel(e);
+    }
+});
+
+function createChartEmpty(itemId) {
+    return `
+        <div class="chart-empty">
+            <div class="empty-icon">📊</div>
+            <div class="empty-title">暂无价格数据</div>
+            <div class="empty-subtitle">查询 "${itemId}" 后将显示价格历史</div>
+            <button class="empty-btn" onclick="queryItemPrice('${itemId}')"><span>立即查询</span></button>
+        </div>
+    `;
+}
+
+function createChartError(message) {
+    return `
+        <div class="chart-error">
+            <div class="error-icon">⚠️</div>
+            <div class="error-title">加载失败</div>
+            <div class="error-message">${message}</div>
+        </div>
+    `;
+}
+
+// 公共状态样式
+(function() {
+    const s = document.createElement('style');
+    s.textContent = `
+        .chart-loading, .chart-empty, .chart-error {
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            padding: 40px 20px; text-align: center;
+        }
+        .loading-text { margin-top: 12px; font-size: 12px; color: var(--text-tertiary); }
+        .empty-icon, .error-icon { font-size: 40px; margin-bottom: 12px; }
+        .empty-title, .error-title { font-family: var(--font-display); font-size: 14px; color: var(--text-primary); margin-bottom: 6px; }
+        .empty-subtitle, .error-message { font-size: 12px; color: var(--text-tertiary); margin-bottom: 12px; }
+        .empty-btn {
+            padding: 6px 14px; background: var(--gradient-gold); color: var(--bg-primary);
+            border: none; border-radius: 3px; cursor: pointer;
+            font-family: var(--font-display); font-size: 10px; font-weight: 600;
+            letter-spacing: 0.05em; text-transform: uppercase; transition: all 0.3s ease-out;
+        }
+        .empty-btn:hover { transform: translateY(-2px); box-shadow: 0 0 15px rgba(212, 167, 55, 0.3); }
+    `;
+    document.head.appendChild(s);
+})();
+
 // ===== 更多功能菜单 =====
 
 function toggleMoreMenu() {
     const menu = document.getElementById('more-menu');
     menu.classList.toggle('active');
+}
+
+function closeMoreMenu() {
+    const menu = document.getElementById('more-menu');
+    if (menu) menu.classList.remove('active');
 }
 
 // 点击其他地方关闭菜单
