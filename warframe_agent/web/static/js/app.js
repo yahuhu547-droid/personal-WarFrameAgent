@@ -574,6 +574,33 @@ function initResizeHandles() {
 
     startResize(sidebarHandle, sidebar, 'right');
     startResize(detailHandle, detailPanel, 'left');
+
+    // 可折叠侧边栏 (借鉴 warframe-toolkit)
+    const SIDEBAR_COLLAPSE_KEY = 'warframe_sidebar_collapsed';
+    const sidebarHeader = sidebar.querySelector('.sidebar-header');
+    if (sidebarHeader) {
+        const collapseBtn = document.createElement('button');
+        collapseBtn.className = 'sidebar-collapse-btn';
+        collapseBtn.title = '折叠侧边栏';
+        collapseBtn.textContent = '‹';
+        sidebarHeader.appendChild(collapseBtn);
+
+        // 恢复折叠状态
+        try {
+            if (localStorage.getItem(SIDEBAR_COLLAPSE_KEY) === 'true') {
+                sidebar.classList.add('collapsed');
+                collapseBtn.textContent = '›';
+            }
+        } catch (e) {}
+
+        collapseBtn.addEventListener('click', () => {
+            const isCollapsed = sidebar.classList.toggle('collapsed');
+            collapseBtn.textContent = isCollapsed ? '›' : '‹';
+            try {
+                localStorage.setItem(SIDEBAR_COLLAPSE_KEY, isCollapsed);
+            } catch (e) {}
+        });
+    }
 }
 
 // ===== 工具函数 =====

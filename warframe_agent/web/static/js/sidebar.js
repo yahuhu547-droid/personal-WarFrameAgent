@@ -2796,3 +2796,122 @@ document.getElementById('relic-search-btn')?.addEventListener('click', () => {
     toggleMoreMenu();
     showRelicSearch('');
 });
+
+// ===== 复制私聊消息 (借鉴 WarStonks) =====
+function copyWhisperMessage(sellerName, itemName, platinum) {
+    const msg = `/w ${sellerName} Hi! I want to buy: ${itemName} for ${platinum} platinum. (warframe.market)`;
+    navigator.clipboard.writeText(msg).then(() => {
+        showToast('已复制私聊消息', 'success');
+    }).catch(() => {
+        // Fallback
+        const ta = document.createElement('textarea');
+        ta.value = msg;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        showToast('已复制私聊消息', 'success');
+    });
+    return msg;
+}
+
+// ===== 虚空裂隙面板 (借鉴 WarStonks) =====
+async function showFissures() {
+    toggleMoreMenu();
+    const content = document.getElementById('detail-content');
+    if (!content) return;
+    content.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>加载裂隙数据...</p></div>';
+    document.getElementById('detail-panel')?.classList.add('active');
+
+    try {
+        const resp = await fetch('https://api.warframestat.us/pc/fissures');
+        if (!resp.ok) throw new Error('API 请求失败');
+        const fissures = await resp.json();
+
+        // Group by tier
+        const tiers = { Lith: [], Meso: [], Neo: [], Axi: [], Requiem: [] };
+        fissures.filter(f => !f.expired).forEach(f => {
+            const tier = f.tier || 'Unknown';
+            if (!tiers[tier]) tiers[tier] = [];
+            tiers[tier].push(f);
+        });
+
+        let html = `<div class="panel-title-row">
+            <span class="panel-title-eyebrow">虚空裂隙</span>
+            <span class="badge badge-blue">${fissures.filter(f => !f.expired).length} 活跃</span>
+        </div>`;
+
+        html += '<div class="fissures-container">';
+        for (const [tier, items] of Object.entries(tiers)) {
+            if (items.length === 0) continue;
+            html += `<div class="fissure-tier-group">
+                <div class="fissure-tier-label">${tier}</div>`;
+            items.forEach(f => {
+                const eta = f.eta || '';
+                const isExpiring = eta.includes('m') && !eta.includes('h');
+                html += `<div class="fissure-item">
+                    <div>
+                        <div class="fissure-node">${f.node || 'Unknown'}</div>
+                        <div class="fissure-mission">${f.missionType || ''} ${f.enemy || ''}</div>
+                    </div>
+                    <span class="fissure-countdown ${isExpiring ? 'expiring' : ''}">${eta}</span>
+                </div>`;
+            });
+            html += '</div>';
+        }
+        html += '</div>';
+        content.innerHTML = html;
+    } catch (err) {
+        content.innerHTML = `<div class="panel-title-row"><span class="panel-title-eyebrow">虚空裂隙</span></div>
+            <div class="empty-state"><div class="empty-icon">🔔</div>
+            <span class="empty-primary">无法加载裂隙数据</span>
+            <span class="empty-sub">${err.message}</span></div>`;
+    }
+}
+
+document.getElementById('fissure-btn')?.addEventListener('click', () => showFissures());
+
+// ===== 价格异常检测 (借鉴 WarStonks 套利扫描) =====
+async function showPriceAnomalies() {
+    toggleMoreMenu();
+    const content = document.getElementById('detail-content');
+    if (!content) return;
+    content.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>扫描价格异常...</p></div>';
+    document.getElementById('detail-panel')?.classList.add('active');
+
+    try {
+        const resp = await fetch('/api/arbitrage');
+        const data = await resp.json();
+        const items = data.opportunities || [];
+
+        let html = `<div class="panel-title-row">
+            <span class="panel-title-eyebrow">价格异常</span>
+            <span class="badge ${items.length > 0 ? 'badge-gold' : 'badge-muted'}">${items.length} 机会</span>
+        </div>`;
+
+        if (items.length === 0) {
+            html += `<div class="empty-state"><div class="empty-icon">📊</div>
+                <span class="empty-primary">暂无异常</span>
+                <span class="empty-sub">当前市场未发现明显价格异常</span></div>`;
+        } else {
+            html += '<div class="card"><div class="card-body">';
+            items.slice(0, 20).forEach(item => {
+                const profitColor = item.profit > 0 ? 'var(--green-success)' : 'var(--red-error)';
+                html += `<div class="fissure-item">
+                    <div>
+                        <div class="fissure-node">${item.item || 'Unknown'}</div>
+                        <div class="fissure-mission">买 ${item.buy || 0}p → 卖 ${item.sell || 0}p</div>
+                    </div>
+                    <span style="color:${profitColor};font-weight:600;font-family:var(--font-mono)">+${item.profit || 0}p</span>
+                </div>`;
+            });
+            html += '</div></div>';
+        }
+        content.innerHTML = html;
+    } catch (err) {
+        content.innerHTML = `<div class="empty-state"><div class="empty-icon">📊</div>
+            <span class="empty-primary">扫描失败</span><span class="empty-sub">${err.message}</span></div>`;
+    }
+}
+
+document.getElementById('anomaly-btn')?.addEventListener('click', () => showPriceAnomalies());

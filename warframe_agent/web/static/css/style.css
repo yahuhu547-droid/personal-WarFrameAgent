@@ -96,6 +96,41 @@ body {
   position: relative;
 }
 
+/* 侧边栏折叠状态 (借鉴 warframe-toolkit) */
+.sidebar.collapsed {
+  width: 56px;
+  min-width: 56px;
+  padding: var(--space-lg) var(--space-sm);
+  align-items: center;
+}
+
+.sidebar.collapsed h2,
+.sidebar.collapsed .list,
+.sidebar.collapsed .sidebar-header-actions,
+.sidebar.collapsed .sidebar-footer .status-indicator,
+.sidebar.collapsed .sidebar-footer .sidebar-actions .sidebar-btn:not(#theme-toggle):not(#more-menu-btn):not(#settings-btn) {
+  display: none;
+}
+
+.sidebar.collapsed .sidebar-header {
+  justify-content: center;
+  padding: 0;
+}
+
+.sidebar.collapsed .sidebar-collapse-btn {
+  margin: 0;
+}
+
+.sidebar.collapsed .sidebar-footer {
+  padding: var(--space-sm);
+  align-items: center;
+}
+
+.sidebar.collapsed .sidebar-actions {
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
 /* ===== 列表 ===== */
 .list {
   display: flex;
@@ -1490,4 +1525,535 @@ body {
   font-size: 11px;
   color: var(--orange-warning);
   font-family: var(--font-mono);
+}
+
+/* ===== 卡片系统 (借鉴 WarStonks) ===== */
+.card {
+  background: var(--glass-bg);
+  border: var(--glass-border);
+  border-radius: var(--radius-lg);
+  backdrop-filter: blur(var(--glass-blur));
+  overflow: hidden;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.card:hover {
+  border-color: rgba(212, 167, 55, 0.2);
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: var(--border-subtle);
+}
+
+.card-label {
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wider);
+}
+
+.card-body {
+  padding: var(--space-lg);
+}
+
+.card-footer {
+  padding: var(--space-md) var(--space-lg);
+  border-top: var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+}
+
+/* ===== 徽章系统 (借鉴 WarStonks) ===== */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  font-weight: var(--font-semibold);
+  letter-spacing: var(--tracking-wide);
+}
+
+.badge-gold {
+  background: rgba(212, 167, 55, 0.15);
+  color: var(--gold-primary);
+  border: 1px solid rgba(212, 167, 55, 0.25);
+}
+
+.badge-blue {
+  background: rgba(74, 158, 255, 0.15);
+  color: var(--blue-primary);
+  border: 1px solid rgba(74, 158, 255, 0.25);
+}
+
+.badge-green {
+  background: rgba(74, 222, 128, 0.15);
+  color: var(--green-success);
+  border: 1px solid rgba(74, 222, 128, 0.25);
+}
+
+.badge-red {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--red-error);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+}
+
+.badge-muted {
+  background: rgba(107, 114, 128, 0.15);
+  color: var(--text-tertiary);
+  border: 1px solid rgba(107, 114, 128, 0.25);
+}
+
+/* ===== 空状态设计 (借鉴 WarStonks) ===== */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-3xl) var(--space-xl);
+  text-align: center;
+  gap: var(--space-sm);
+}
+
+.empty-primary {
+  font-size: var(--text-lg);
+  font-weight: var(--font-semibold);
+  color: var(--text-secondary);
+}
+
+.empty-sub {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+  max-width: 320px;
+  line-height: var(--leading-relaxed);
+}
+
+.empty-icon {
+  font-size: 32px;
+  margin-bottom: var(--space-sm);
+  opacity: 0.5;
+}
+
+/* ===== 面板标题行 (借鉴 WarStonks) ===== */
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+}
+
+.panel-title-eyebrow {
+  font-size: var(--text-xs);
+  font-weight: var(--font-semibold);
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-widest);
+}
+
+/* ===== 可折叠侧边栏 (借鉴 warframe-toolkit) ===== */
+.sidebar-collapse-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+
+.sidebar-collapse-btn:hover {
+  background: rgba(212, 167, 55, 0.1);
+  color: var(--gold-primary);
+  border-color: rgba(212, 167, 55, 0.3);
+}
+
+/* ===== 渐变按钮 (借鉴 warframe-toolkit) ===== */
+.btn-gradient {
+  background: linear-gradient(135deg, var(--gold-primary), var(--gold-secondary));
+  color: #000;
+  border: none;
+  padding: var(--space-sm) var(--space-lg);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-gradient:hover {
+  background: linear-gradient(135deg, var(--gold-light), var(--gold-primary));
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(212, 167, 55, 0.3);
+}
+
+.btn-gradient:active {
+  transform: translateY(0);
+}
+
+.btn-gradient-cyan {
+  background: linear-gradient(135deg, #00bcd4, #0097a7);
+  color: #fff;
+}
+
+.btn-gradient-cyan:hover {
+  background: linear-gradient(135deg, #26c6da, #00bcd4);
+  box-shadow: 0 4px 12px rgba(0, 188, 212, 0.3);
+}
+
+/* ===== 复制私聊消息按钮 (借鉴 WarStonks) ===== */
+.copy-whisper-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(74, 158, 255, 0.1);
+  border: 1px solid rgba(74, 158, 255, 0.2);
+  color: var(--blue-primary);
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.copy-whisper-btn:hover {
+  background: rgba(74, 158, 255, 0.2);
+  border-color: rgba(74, 158, 255, 0.4);
+}
+
+.copy-whisper-btn.copied {
+  background: rgba(74, 222, 128, 0.15);
+  border-color: rgba(74, 222, 128, 0.3);
+  color: var(--green-success);
+}
+
+/* ===== 虚空裂隙面板 (借鉴 WarStonks) ===== */
+.fissures-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.fissure-tier-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.fissure-tier-label {
+  font-size: var(--text-xs);
+  font-weight: var(--font-bold);
+  color: var(--gold-primary);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-widest);
+  padding-bottom: var(--space-xs);
+  border-bottom: 1px solid rgba(212, 167, 55, 0.15);
+}
+
+.fissure-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-sm) var(--space-md);
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: var(--radius-sm);
+  transition: background 0.15s;
+}
+
+.fissure-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.fissure-node {
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+  color: var(--text-primary);
+}
+
+.fissure-mission {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.fissure-countdown {
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  color: var(--blue-primary);
+  padding: 2px 6px;
+  background: rgba(74, 158, 255, 0.1);
+  border-radius: var(--radius-sm);
+}
+
+.fissure-countdown.expiring {
+  color: var(--red-error);
+  background: rgba(239, 68, 68, 0.1);
+  animation: blink 1s ease-in-out infinite;
+}
+
+/* ===== 扫描状态指示 (借鉴 WarStonks) ===== */
+.scan-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.scan-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green-success);
+  animation: breathe 2s ease-in-out infinite;
+}
+
+.scan-dot.stale {
+  background: var(--orange-warning);
+}
+
+.scan-dot.error {
+  background: var(--red-error);
+}
+
+/* ===== 面板模式切换 (借鉴 WarStonks Fissures) ===== */
+.mode-toggle {
+  display: flex;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: var(--radius-md);
+  padding: 2px;
+  gap: 2px;
+}
+
+.mode-toggle-btn {
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.mode-toggle-btn.active {
+  background: rgba(212, 167, 55, 0.15);
+  color: var(--gold-primary);
+}
+
+.mode-toggle-btn:hover:not(.active) {
+  color: var(--text-secondary);
+}
+
+/* ===== 类型筛选芯片 (借鉴 warframe-toolkit) ===== */
+.type-chips {
+  display: flex;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.type-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  cursor: pointer;
+  user-select: none;
+}
+
+.type-chip input[type="checkbox"] {
+  display: none;
+}
+
+.type-chip .chip {
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  font-weight: var(--font-semibold);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: all 0.2s;
+  color: var(--text-tertiary);
+}
+
+.type-chip input:checked + .chip {
+  border-color: transparent;
+}
+
+.type-chip input:not:checked + .chip {
+  color: var(--text-disabled);
+}
+
+.type-chip.rare input:checked + .chip {
+  background: rgba(212, 167, 55, 0.2);
+  color: var(--gold-primary);
+  border-color: rgba(212, 167, 55, 0.4);
+}
+
+.type-chip.uncommon input:checked + .chip {
+  background: rgba(148, 163, 184, 0.2);
+  color: #94a3b8;
+  border-color: rgba(148, 163, 184, 0.4);
+}
+
+.type-chip.common input:checked + .chip {
+  background: rgba(180, 83, 9, 0.2);
+  color: #b45309;
+  border-color: rgba(180, 83, 9, 0.4);
+}
+
+.type-chip.prime input:checked + .chip {
+  background: rgba(212, 167, 55, 0.15);
+  color: var(--gold-light);
+  border-color: rgba(212, 167, 55, 0.3);
+}
+
+.type-chip.arcane input:checked + .chip {
+  background: rgba(0, 188, 212, 0.15);
+  color: var(--void-cyan);
+  border-color: rgba(0, 188, 212, 0.3);
+}
+
+/* ===== 可排序表格 (借鉴 warframe-toolkit) ===== */
+.sortable-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.sortable-table thead th {
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--text-tertiary);
+  font-weight: var(--font-bold);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wider);
+  padding: var(--space-sm) var(--space-md);
+  text-align: left;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  border-bottom: 2px solid rgba(255, 255, 255, 0.08);
+  transition: color 0.2s;
+}
+
+.sortable-table thead th:hover {
+  color: var(--gold-primary);
+}
+
+.sortable-table thead th.sorted-asc::after {
+  content: ' ▲';
+  color: var(--gold-primary);
+}
+
+.sortable-table thead th.sorted-desc::after {
+  content: ' ▼';
+  color: var(--gold-primary);
+}
+
+.sortable-table thead th.no-sort {
+  cursor: default;
+}
+
+.sortable-table thead th.no-sort:hover {
+  color: var(--text-tertiary);
+}
+
+.sortable-table tbody tr {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  transition: background 0.15s;
+}
+
+.sortable-table tbody tr:hover {
+  background: rgba(212, 167, 55, 0.05);
+}
+
+.sortable-table td {
+  padding: var(--space-sm) var(--space-md);
+  color: var(--text-primary);
+}
+
+/* ===== 进度条 (借鉴 warframe-toolkit) ===== */
+.progress-container {
+  background: rgba(0, 0, 0, 0.2);
+  padding: 0;
+  height: 0;
+  overflow: hidden;
+  transition: height 0.3s, padding 0.3s;
+}
+
+.progress-container.active {
+  height: auto;
+  padding: var(--space-md) var(--space-lg);
+}
+
+.progress-bar-bg {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: var(--radius-sm);
+  height: 6px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  background: linear-gradient(90deg, var(--blue-primary), var(--gold-primary));
+  height: 100%;
+  width: 0%;
+  transition: width 0.3s;
+  border-radius: var(--radius-sm);
+}
+
+.progress-text {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-top: var(--space-xs);
+}
+
+/* ===== 稀有度指示器 (借鉴 platinum) ===== */
+.rarity-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--text-xs);
+  font-weight: var(--font-semibold);
+}
+
+.rarity-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.rarity-dot.rare {
+  background: var(--gold-primary);
+  box-shadow: 0 0 4px var(--gold-glow);
+}
+
+.rarity-dot.uncommon {
+  background: #94a3b8;
+}
+
+.rarity-dot.common {
+  background: #b45309;
+}
+
+.rarity-dot.legendary {
+  background: #e6e2d3;
+  box-shadow: 0 0 4px rgba(230, 226, 211, 0.3);
 }

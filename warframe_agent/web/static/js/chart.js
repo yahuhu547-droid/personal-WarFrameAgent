@@ -134,7 +134,9 @@ function renderItemDetailCard(data) {
                 <div class="price-block sell">
                     <div class="price-label">最低卖价</div>
                     <div class="price-value">${data.sell_price !== null ? data.sell_price + 'p' : '暂无'}</div>
-                    ${data.seller ? `<div class="price-player">${data.seller.name} (信誉 ${data.seller.reputation})</div>` : ''}
+                    ${data.seller ? `<div class="price-player">${data.seller.name} (信誉 ${data.seller.reputation})
+                        <button class="copy-whisper-btn" onclick="copyWhisperMessage('${data.seller.name}', '${data.display || data.item_id}', ${data.sell_price})" title="复制私聊消息">📋 复制私聊</button>
+                    </div>` : ''}
                 </div>
                 <div class="price-block spread ${spreadClass}">
                     <div class="price-label">价差</div>
