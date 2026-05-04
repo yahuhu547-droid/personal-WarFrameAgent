@@ -122,7 +122,7 @@ def scan_investments(
     candidates = []
     for item in items:
         tags = item.get("tags", [])
-        url_name = item.get("url_name", "")
+        url_name = item.get("url_name") or item.get("item_id", "")
         if not url_name:
             continue
         # 赋能、Mod、Prime 部件
@@ -131,7 +131,7 @@ def scan_investments(
                 candidates.append(url_name)
 
     results = []
-    for item_id in candidates[:80]:  # 限制扫描数量
+    for item_id in candidates[:30]:  # 限制扫描数量
         try:
             orders = order_fetcher(item_id)
             result = analyze_investment(item_id, orders, filters)

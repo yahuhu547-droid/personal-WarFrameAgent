@@ -69,9 +69,12 @@ def get_tradeable_mods(items: list[dict]) -> list[dict]:
         max_rank = item.get("modMaxRank") or item.get("fusionLimit", 0)
         if max_rank < 5:
             continue
+        url_name = item.get("url_name") or item.get("item_id", "")
+        if not url_name:
+            continue
         mods.append({
-            "url_name": item.get("url_name", ""),
-            "item_name": item.get("item_name", ""),
+            "url_name": url_name,
+            "item_name": item.get("en_name") or item.get("item_name") or url_name,
             "max_rank": max_rank,
             "rarity": item.get("rarity", "RARE"),
         })
@@ -162,7 +165,7 @@ def scan_all_mod_flips(
     """扫描所有可交易 Mod，找出翻转机会，按每千内融利润排序。"""
     mods = get_tradeable_mods(items)
     results = []
-    for mod in mods[:100]:  # 限制扫描数量避免 API 限流
+    for mod in mods[:30]:  # 限制扫描数量避免 API 限流
         url_name = mod["url_name"]
         if not url_name:
             continue

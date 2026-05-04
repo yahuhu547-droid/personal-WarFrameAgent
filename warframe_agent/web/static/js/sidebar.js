@@ -2191,13 +2191,16 @@ function saveNotifySettingsFromUI() {
 }
 
 function testNotification() {
+    // 先播放测试声音
+    playNotificationSound();
+
     if (Notification.permission === 'granted') {
         new Notification('Warframe 交易助手', { body: '测试通知成功！价格提醒将以此方式通知您。', icon: '/static/favicon.ico' });
-        showToast('测试通知已发送', 'success');
+        showToast('测试通知已发送（含声音）', 'success');
     } else if (Notification.permission !== 'denied') {
         Notification.requestPermission().then(perm => {
             if (perm === 'granted') {
-                new Notification('Warframe 交易助手', { body: '通知权限已开启！' });
+                new Notification('Warframe 交易助手', { body: '通知权限已开启！', icon: '/static/favicon.ico' });
                 showToast('通知权限已开启', 'success');
             } else {
                 showToast('通知权限被拒绝', 'warning');
@@ -3078,7 +3081,7 @@ document.getElementById('anomaly-btn')?.addEventListener('click', () => showPric
 // ===== Mod 翻转分析 =====
 async function loadModFlipper(minProfit = 3) {
     toggleMoreMenu();
-    const content = openDetailPanel('扫描 Mod 翻转机会...');
+    const content = openDetailPanel('扫描 Mod 翻转机会...<br><small style="color:var(--text-muted)">首次扫描可能需要 1-2 分钟</small>');
     if (!content) return;
 
     try {
@@ -3131,7 +3134,7 @@ document.getElementById('mod-flip-btn')?.addEventListener('click', () => loadMod
 // ===== 套装利润分析 =====
 async function loadSetProfit(minProfit = 3) {
     toggleMoreMenu();
-    const content = openDetailPanel('扫描套装利润...');
+    const content = openDetailPanel('扫描套装利润...<br><small style="color:var(--text-muted)">首次扫描可能需要 2-3 分钟</small>');
     if (!content) return;
 
     try {
@@ -3179,7 +3182,7 @@ document.getElementById('set-profit-btn')?.addEventListener('click', () => loadS
 // ===== 投资顾问 =====
 async function loadInvestmentAdvisor(budget = 1000, minRoi = 10) {
     toggleMoreMenu();
-    const content = openDetailPanel('扫描投资机会...');
+    const content = openDetailPanel('扫描投资机会...<br><small style="color:var(--text-muted)">首次扫描可能需要 1-2 分钟</small>');
     if (!content) return;
 
     try {

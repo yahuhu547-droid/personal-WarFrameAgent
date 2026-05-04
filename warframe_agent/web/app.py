@@ -17,7 +17,7 @@ from pathlib import Path
 from .. import config
 from ..chat import ChatAgent, build_item_context_result
 from ..dictionary import normalize_lookup_key, normalize_market_id
-from ..market import fetch_orders_async, best_sellers, best_buyers, get_max_rank_from_orders
+from ..market import fetch_orders, fetch_orders_async, best_sellers, best_buyers, get_max_rank_from_orders
 from ..memory import AgentMemory, PriceAlert, MEMORY_PATH
 from ..monitor import PriceMonitor, AlertNotification, WatchNotification, EnrichedNotification
 from ..names import display_item_name
@@ -1253,13 +1253,68 @@ async def get_trades_by_item(item_id: str, limit: int = 10) -> JSONResponse:
 
 # ===== Mod 翻转 / 套装利润 / 投资顾问 API =====
 
+_items_full_cache: list[dict] | None = None
+
 def _load_items_full() -> list[dict]:
-    """加载 items_full.json（缓存）。"""
+    """加载 items_full.json 并从 warframe-items 合并 tradable/fusionLimit 字段。"""
+    global _items_full_cache
+    if _items_full_cache is not None:
+        return _items_full_cache
+
     path = config.DATA_DIR / "items_full.json"
     if not path.exists():
         return []
     with path.open("r", encoding="utf-8-sig") as f:
-        return json.load(f)
+        items = json.load(f)
+
+    # 从 warframe-items Mods.json 加载 tradable 和 fusionLimit
+    mods_path = Path(__file__).resolve().parent.parent.parent / "githubProduct" / "warframe-items" / "data" / "json" / "Mods.json"
+    mods_lookup: dict[str, dict] = {}
+    if mods_path.exists():
+        try:
+            with mods_path.open("r", encoding="utf-8") as f:
+                for mod in json.load(f):
+                    # name → url_name 映射
+                    key = mod.get("name", "").lower().replace(" ", "_").replace("'", "")
+                    mods_lookup[key] = mod
+        except Exception:
+            pass
+
+    # 合并字段
+    for item in items:
+        item_id = item.get("item_id", "")
+        if "mod" in item.get("tags", []):
+            mod_data = mods_lookup.get(item_id, {})
+            if not mod_data:
+                # 尝试用 en_name 匹配
+                en_key = item.get("en_name", "").lower().replace(" ", "_").replace("'", "")
+                mod_data = mods_lookup.get(en_key, {})
+            if mod_data:
+                item.setdefault("tradable", mod_data.get("tradable", False))
+                item.setdefault("modMaxRank", mod_data.get("fusionLimit", 0))
+                item.setdefault("rarity", mod_data.get("rarity", "RARE"))
+        else:
+            item.setdefault("tradable", True)
+
+    _items_full_cache = items
+    return items
+
+
+# 扫描结果缓存（避免每次请求都重新扫描）
+_scan_cache: dict[str, tuple[list, float]] = {}
+_SCAN_CACHE_TTL = 300  # 5 分钟缓存
+
+
+def _get_scan_cache(key: str) -> list | None:
+    if key in _scan_cache:
+        data, ts = _scan_cache[key]
+        if time.time() - ts < _SCAN_CACHE_TTL:
+            return data
+    return None
+
+
+def _set_scan_cache(key: str, data: list) -> None:
+    _scan_cache[key] = (data, time.time())
 
 
 @app.get("/api/mod_flipper")
@@ -1267,30 +1322,33 @@ async def mod_flipper_endpoint(min_profit: int = 5, limit: int = 20) -> JSONResp
     """扫描 Mod 翻转利润。"""
     from ..mod_flipper import scan_all_mod_flips
     try:
+        cache_key = f"mod_flipper_{min_profit}_{limit}"
+        cached = _get_scan_cache(cache_key)
+        if cached is not None:
+            return JSONResponse({"results": cached, "total": len(cached), "min_profit": min_profit, "cached": True})
+
         items = await asyncio.to_thread(_load_items_full)
         results = await asyncio.to_thread(
             scan_all_mod_flips, items, fetch_orders, min_profit=min_profit, limit=limit
         )
-        return JSONResponse({
-            "results": [
-                {
-                    "item_id": r.item_id,
-                    "display_name": r.display_name,
-                    "r0_buy_price": r.r0_buy_price,
-                    "r10_sell_price": r.r10_sell_price,
-                    "flip_profit": r.flip_profit,
-                    "endo_cost": r.endo_cost,
-                    "plat_per_1k_endo": round(r.plat_per_1k_endo, 2),
-                    "value_score": round(r.value_score, 2),
-                    "volume_48h": r.volume_48h,
-                    "max_rank": r.max_rank,
-                    "rarity": r.rarity,
-                }
-                for r in results
-            ],
-            "total": len(results),
-            "min_profit": min_profit,
-        })
+        formatted = [
+            {
+                "item_id": r.item_id,
+                "display_name": r.display_name,
+                "r0_buy_price": r.r0_buy_price,
+                "r10_sell_price": r.r10_sell_price,
+                "flip_profit": r.flip_profit,
+                "endo_cost": r.endo_cost,
+                "plat_per_1k_endo": round(r.plat_per_1k_endo, 2),
+                "value_score": round(r.value_score, 2),
+                "volume_48h": r.volume_48h,
+                "max_rank": r.max_rank,
+                "rarity": r.rarity,
+            }
+            for r in results
+        ]
+        _set_scan_cache(cache_key, formatted)
+        return JSONResponse({"results": formatted, "total": len(formatted), "min_profit": min_profit})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -1300,30 +1358,34 @@ async def set_profit_endpoint(min_profit: int = 5, limit: int = 20) -> JSONRespo
     """分析 Prime 套装利润。"""
     from ..set_profit import scan_all_set_profits
     try:
+        cache_key = f"set_profit_{min_profit}_{limit}"
+        cached = _get_scan_cache(cache_key)
+        if cached is not None:
+            return JSONResponse({"results": cached, "total": len(cached), "cached": True})
+
         items = await asyncio.to_thread(_load_items_full)
         results = await asyncio.to_thread(
             scan_all_set_profits, items, fetch_orders, min_profit=min_profit, limit=limit
         )
-        return JSONResponse({
-            "results": [
-                {
-                    "base_id": r.base_id,
-                    "display_name": r.display_name,
-                    "set_buy_price": r.set_buy_price,
-                    "parts_sell_total": r.parts_sell_total,
-                    "set_sell_price": r.set_sell_price,
-                    "parts_buy_total": r.parts_buy_total,
-                    "profit_buy_parts_sell_set": r.profit_buy_parts_sell_set,
-                    "profit_buy_set_sell_parts": r.profit_buy_set_sell_parts,
-                    "best_strategy": r.best_strategy,
-                    "best_profit": r.best_profit,
-                    "volume_48h": r.volume_48h,
-                    "part_count": r.part_count,
-                }
-                for r in results
-            ],
-            "total": len(results),
-        })
+        formatted = [
+            {
+                "base_id": r.base_id,
+                "display_name": r.display_name,
+                "set_buy_price": r.set_buy_price,
+                "parts_sell_total": r.parts_sell_total,
+                "set_sell_price": r.set_sell_price,
+                "parts_buy_total": r.parts_buy_total,
+                "profit_buy_parts_sell_set": r.profit_buy_parts_sell_set,
+                "profit_buy_set_sell_parts": r.profit_buy_set_sell_parts,
+                "best_strategy": r.best_strategy,
+                "best_profit": r.best_profit,
+                "volume_48h": r.volume_48h,
+                "part_count": r.part_count,
+            }
+            for r in results
+        ]
+        _set_scan_cache(cache_key, formatted)
+        return JSONResponse({"results": formatted, "total": len(formatted)})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -1338,30 +1400,33 @@ async def investment_endpoint(
     from ..investment import scan_investments, InvestmentFilter
     filters = InvestmentFilter(budget=budget, min_roi_pct=min_roi, limit=limit)
     try:
+        cache_key = f"investment_{budget}_{min_roi}_{limit}"
+        cached = _get_scan_cache(cache_key)
+        if cached is not None:
+            return JSONResponse({"results": cached, "total": len(cached), "filters": {"budget": budget, "min_roi": min_roi}, "cached": True})
+
         items = await asyncio.to_thread(_load_items_full)
         results = await asyncio.to_thread(
             scan_investments, items, fetch_orders, filters=filters
         )
-        return JSONResponse({
-            "results": [
-                {
-                    "item_id": r.item_id,
-                    "display_name": r.display_name,
-                    "buy_price": r.buy_price,
-                    "sell_price": r.sell_price,
-                    "profit": r.profit,
-                    "roi_pct": round(r.roi_pct, 2),
-                    "volume_48h": r.volume_48h,
-                    "daily_volume": round(r.daily_volume, 1) if r.daily_volume else None,
-                    "supply_count": r.supply_count,
-                    "demand_count": r.demand_count,
-                    "risk_level": r.risk_level,
-                }
-                for r in results
-            ],
-            "total": len(results),
-            "filters": {"budget": budget, "min_roi": min_roi},
-        })
+        formatted = [
+            {
+                "item_id": r.item_id,
+                "display_name": r.display_name,
+                "buy_price": r.buy_price,
+                "sell_price": r.sell_price,
+                "profit": r.profit,
+                "roi_pct": round(r.roi_pct, 2),
+                "volume_48h": r.volume_48h,
+                "daily_volume": round(r.daily_volume, 1) if r.daily_volume else None,
+                "supply_count": r.supply_count,
+                "demand_count": r.demand_count,
+                "risk_level": r.risk_level,
+            }
+            for r in results
+        ]
+        _set_scan_cache(cache_key, formatted)
+        return JSONResponse({"results": formatted, "total": len(formatted), "filters": {"budget": budget, "min_roi": min_roi}})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

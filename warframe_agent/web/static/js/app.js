@@ -68,13 +68,35 @@ async function compareItems(items) {
 
 // ===== 通知系统 =====
 
+function playNotificationSound() {
+    try {
+        const settings = JSON.parse(localStorage.getItem('warframe_notify_settings') || '{}');
+        if (settings.soundAlert === false) return;
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880, ctx.currentTime);
+        osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.1);
+        osc.frequency.setValueAtTime(880, ctx.currentTime + 0.2);
+        gain.gain.setValueAtTime(0.3, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.4);
+    } catch (e) { /* Audio not supported */ }
+}
+
 function showNotification(message, type = 'info') {
-    if (Notification.permission === 'granted') {
+    const settings = JSON.parse(localStorage.getItem('warframe_notify_settings') || '{}');
+    if (settings.browserNotify !== false && Notification.permission === 'granted') {
         new Notification('Warframe 交易提醒', {
             body: message,
-            icon: '/static/images/icon.png'
+            icon: '/static/favicon.ico'
         });
     }
+    playNotificationSound();
     showToast(message, type);
 }
 

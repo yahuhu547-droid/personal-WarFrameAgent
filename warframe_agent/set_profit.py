@@ -130,7 +130,7 @@ def scan_all_set_profits(
     """扫描所有 Prime 套装，找出利润机会。"""
     groups = build_prime_groups(items)
     results = []
-    for group in list(groups.values())[:80]:  # 限制扫描数量
+    for group in list(groups.values())[:15]:  # 限制扫描数量
         try:
             result = analyze_set_profit(group, order_fetcher)
             if result and result.best_profit >= min_profit:
