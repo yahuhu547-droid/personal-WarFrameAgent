@@ -1251,6 +1251,121 @@ async def get_trades_by_item(item_id: str, limit: int = 10) -> JSONResponse:
 # ===== 套利检测 API =====
 
 
+# ===== Mod 翻转 / 套装利润 / 投资顾问 API =====
+
+def _load_items_full() -> list[dict]:
+    """加载 items_full.json（缓存）。"""
+    path = config.DATA_DIR / "items_full.json"
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8-sig") as f:
+        return json.load(f)
+
+
+@app.get("/api/mod_flipper")
+async def mod_flipper_endpoint(min_profit: int = 5, limit: int = 20) -> JSONResponse:
+    """扫描 Mod 翻转利润。"""
+    from ..mod_flipper import scan_all_mod_flips
+    try:
+        items = await asyncio.to_thread(_load_items_full)
+        results = await asyncio.to_thread(
+            scan_all_mod_flips, items, fetch_orders, min_profit=min_profit, limit=limit
+        )
+        return JSONResponse({
+            "results": [
+                {
+                    "item_id": r.item_id,
+                    "display_name": r.display_name,
+                    "r0_buy_price": r.r0_buy_price,
+                    "r10_sell_price": r.r10_sell_price,
+                    "flip_profit": r.flip_profit,
+                    "endo_cost": r.endo_cost,
+                    "plat_per_1k_endo": round(r.plat_per_1k_endo, 2),
+                    "value_score": round(r.value_score, 2),
+                    "volume_48h": r.volume_48h,
+                    "max_rank": r.max_rank,
+                    "rarity": r.rarity,
+                }
+                for r in results
+            ],
+            "total": len(results),
+            "min_profit": min_profit,
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/set_profit")
+async def set_profit_endpoint(min_profit: int = 5, limit: int = 20) -> JSONResponse:
+    """分析 Prime 套装利润。"""
+    from ..set_profit import scan_all_set_profits
+    try:
+        items = await asyncio.to_thread(_load_items_full)
+        results = await asyncio.to_thread(
+            scan_all_set_profits, items, fetch_orders, min_profit=min_profit, limit=limit
+        )
+        return JSONResponse({
+            "results": [
+                {
+                    "base_id": r.base_id,
+                    "display_name": r.display_name,
+                    "set_buy_price": r.set_buy_price,
+                    "parts_sell_total": r.parts_sell_total,
+                    "set_sell_price": r.set_sell_price,
+                    "parts_buy_total": r.parts_buy_total,
+                    "profit_buy_parts_sell_set": r.profit_buy_parts_sell_set,
+                    "profit_buy_set_sell_parts": r.profit_buy_set_sell_parts,
+                    "best_strategy": r.best_strategy,
+                    "best_profit": r.best_profit,
+                    "volume_48h": r.volume_48h,
+                    "part_count": r.part_count,
+                }
+                for r in results
+            ],
+            "total": len(results),
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/investment")
+async def investment_endpoint(
+    budget: int = 1000,
+    min_roi: float = 10.0,
+    limit: int = 15,
+) -> JSONResponse:
+    """投资顾问 API。"""
+    from ..investment import scan_investments, InvestmentFilter
+    filters = InvestmentFilter(budget=budget, min_roi_pct=min_roi, limit=limit)
+    try:
+        items = await asyncio.to_thread(_load_items_full)
+        results = await asyncio.to_thread(
+            scan_investments, items, fetch_orders, filters=filters
+        )
+        return JSONResponse({
+            "results": [
+                {
+                    "item_id": r.item_id,
+                    "display_name": r.display_name,
+                    "buy_price": r.buy_price,
+                    "sell_price": r.sell_price,
+                    "profit": r.profit,
+                    "roi_pct": round(r.roi_pct, 2),
+                    "volume_48h": r.volume_48h,
+                    "daily_volume": round(r.daily_volume, 1) if r.daily_volume else None,
+                    "supply_count": r.supply_count,
+                    "demand_count": r.demand_count,
+                    "risk_level": r.risk_level,
+                }
+                for r in results
+            ],
+            "total": len(results),
+            "filters": {"budget": budget, "min_roi": min_roi},
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ===== 利润计算器 API =====
 
 class ProfitCalcRequest(BaseModel):

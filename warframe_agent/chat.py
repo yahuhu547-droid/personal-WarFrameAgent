@@ -553,6 +553,65 @@ class ChatAgent:
             return self._query_missing_parts(warframe_name, owned_parts)
         if tool_call.name == "general_chat":
             return None
+        if tool_call.name == "mod_flipper":
+            from .mod_flipper import scan_all_mod_flips
+            min_profit = int(args.get("min_profit", 5))
+            limit = int(args.get("limit", 20))
+            results = scan_all_mod_flips(
+                self.warframe_items or [],
+                self.order_fetcher,
+                min_profit=min_profit,
+                limit=limit,
+            )
+            if not results:
+                return "没有找到符合条件的 Mod 翻转机会"
+            lines = ["## Mod 翻转排行榜\n"]
+            for i, r in enumerate(results, 1):
+                lines.append(f"{i}. **{r.display_name}** (R0→R{r.max_rank})")
+                lines.append(f"   买 R0: {r.r0_buy_price}p → 卖 R{r.max_rank}: {r.r10_sell_price}p")
+                lines.append(f"   利润: {r.flip_profit}p | 每千内融: {r.plat_per_1k_endo:.1f}p | 48h成交: {r.volume_48h or '未知'}笔")
+            return "\n".join(lines)
+        if tool_call.name == "set_profit":
+            from .set_profit import scan_all_set_profits
+            min_profit = int(args.get("min_profit", 5))
+            limit = int(args.get("limit", 20))
+            results = scan_all_set_profits(
+                self.warframe_items or [],
+                self.order_fetcher,
+                min_profit=min_profit,
+                limit=limit,
+            )
+            if not results:
+                return "没有找到符合条件的套装利润机会"
+            lines = ["## Prime 套装利润排行榜\n"]
+            for i, r in enumerate(results, 1):
+                lines.append(f"{i}. **{r.display_name}**")
+                lines.append(f"   最佳策略: {r.best_strategy} | 利润: +{r.best_profit}p")
+                lines.append(f"   整套买: {r.set_buy_price or '无'}p | 拆件卖合计: {r.parts_sell_total}p")
+                if r.volume_48h:
+                    lines.append(f"   48h成交: {r.volume_48h}笔")
+            return "\n".join(lines)
+        if tool_call.name == "investment_advisor":
+            from .investment import scan_investments, InvestmentFilter
+            filters = InvestmentFilter(
+                budget=int(args.get("budget", 1000)),
+                min_roi_pct=float(args.get("min_roi", 10)),
+                limit=int(args.get("limit", 15)),
+            )
+            results = scan_investments(
+                self.warframe_items or [],
+                self.order_fetcher,
+                filters=filters,
+            )
+            if not results:
+                return "没有找到符合条件的投资机会"
+            lines = [f"## 投资顾问 (预算 {filters.budget}p, ROI >= {filters.min_roi_pct}%)\n"]
+            for i, r in enumerate(results, 1):
+                risk_icon = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(r.risk_level, "⚪")
+                lines.append(f"{i}. **{r.display_name}** {risk_icon}")
+                lines.append(f"   买入: {r.buy_price}p → 卖出: {r.sell_price}p | 利润: +{r.profit}p")
+                lines.append(f"   ROI: {r.roi_pct:.1f}% | 日均成交: {r.daily_volume or '未知'}笔 | 风险: {r.risk_level}")
+            return "\n".join(lines)
         return None
 
     def _query_missing_parts(self, warframe_name: str, owned_parts: list[str]) -> str | None:

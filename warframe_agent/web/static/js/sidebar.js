@@ -3074,3 +3074,157 @@ async function showPriceAnomalies() {
 }
 
 document.getElementById('anomaly-btn')?.addEventListener('click', () => showPriceAnomalies());
+
+// ===== Mod 翻转分析 =====
+async function loadModFlipper(minProfit = 3) {
+    toggleMoreMenu();
+    const content = openDetailPanel('扫描 Mod 翻转机会...');
+    if (!content) return;
+
+    try {
+        const resp = await fetch(`/api/mod_flipper?min_profit=${minProfit}&limit=20`);
+        const data = await resp.json();
+        const items = data.results || [];
+
+        let html = `<div class="panel-title-row">
+            <span class="panel-title-eyebrow">Mod 翻转</span>
+            <span class="badge ${items.length > 0 ? 'badge-gold' : 'badge-muted'}">${items.length} 机会</span>
+        </div>`;
+
+        if (items.length === 0) {
+            html += `<div class="empty-state"><div class="empty-icon">🔄</div>
+                <span class="empty-primary">暂无翻转机会</span>
+                <span class="empty-sub">当前市场未发现符合条件的 Mod</span></div>`;
+        } else {
+            html += '<div class="card"><div class="card-body">';
+            items.forEach((item, idx) => {
+                const riskColor = item.risk_level === 'low' ? 'var(--green-success)' :
+                    item.risk_level === 'medium' ? 'var(--orange-warning)' : 'var(--red-error)';
+                const riskIcon = item.risk_level === 'low' ? '🟢' :
+                    item.risk_level === 'medium' ? '🟡' : '🔴';
+                html += `<div class="fissure-item" style="flex-direction:column;align-items:flex-start;gap:4px;">
+                    <div style="display:flex;justify-content:space-between;width:100%;align-items:center;">
+                        <div class="fissure-node">${idx + 1}. ${item.display_name || item.item_id}</div>
+                        <span style="color:var(--green-success);font-weight:700;font-family:var(--font-mono);font-size:1.1em;">+${item.profit}p</span>
+                    </div>
+                    <div style="display:flex;gap:12px;font-size:0.8em;color:var(--text-secondary);flex-wrap:wrap;">
+                        <span>买 R0: ${item.buy_price}p</span>
+                        <span>卖满级: ${item.sell_price}p</span>
+                        <span>内融: ${(item.endo_cost / 1000).toFixed(1)}k</span>
+                        <span>每千内融: ${item.plat_per_1k_endo}p</span>
+                        <span>48h量: ${item.volume_48h ?? '?'}</span>
+                        <span style="color:${riskColor}">${riskIcon} ${item.risk_level}</span>
+                    </div>
+                </div>`;
+            });
+            html += '</div></div>';
+        }
+        content.innerHTML = html;
+    } catch (err) {
+        content.innerHTML = `<div class="empty-state"><div class="empty-icon">🔄</div>
+            <span class="empty-primary">加载失败</span><span class="empty-sub">${err.message}</span></div>`;
+    }
+}
+
+document.getElementById('mod-flip-btn')?.addEventListener('click', () => loadModFlipper());
+
+// ===== 套装利润分析 =====
+async function loadSetProfit(minProfit = 3) {
+    toggleMoreMenu();
+    const content = openDetailPanel('扫描套装利润...');
+    if (!content) return;
+
+    try {
+        const resp = await fetch(`/api/set_profit?min_profit=${minProfit}&limit=20`);
+        const data = await resp.json();
+        const items = data.results || [];
+
+        let html = `<div class="panel-title-row">
+            <span class="panel-title-eyebrow">套装利润</span>
+            <span class="badge ${items.length > 0 ? 'badge-gold' : 'badge-muted'}">${items.length} 套装</span>
+        </div>`;
+
+        if (items.length === 0) {
+            html += `<div class="empty-state"><div class="empty-icon">📦</div>
+                <span class="empty-primary">暂无利润机会</span>
+                <span class="empty-sub">当前市场未发现符合条件的套装</span></div>`;
+        } else {
+            html += '<div class="card"><div class="card-body">';
+            items.forEach((item, idx) => {
+                const profitColor = item.best_profit > 0 ? 'var(--green-success)' : 'var(--red-error)';
+                html += `<div class="fissure-item" style="flex-direction:column;align-items:flex-start;gap:4px;">
+                    <div style="display:flex;justify-content:space-between;width:100%;align-items:center;">
+                        <div class="fissure-node">${idx + 1}. ${item.display_name || item.base_id}</div>
+                        <span style="color:${profitColor};font-weight:700;font-family:var(--font-mono);font-size:1.1em;">+${item.best_profit}p</span>
+                    </div>
+                    <div style="display:flex;gap:12px;font-size:0.8em;color:var(--text-secondary);flex-wrap:wrap;">
+                        <span>策略: ${item.best_strategy}</span>
+                        <span>套装价: ${item.set_sell_price ?? '-'}p</span>
+                        <span>部件总和: ${item.parts_sell_total}p</span>
+                        <span>48h量: ${item.volume_48h ?? '?'}</span>
+                    </div>
+                </div>`;
+            });
+            html += '</div></div>';
+        }
+        content.innerHTML = html;
+    } catch (err) {
+        content.innerHTML = `<div class="empty-state"><div class="empty-icon">📦</div>
+            <span class="empty-primary">加载失败</span><span class="empty-sub">${err.message}</span></div>`;
+    }
+}
+
+document.getElementById('set-profit-btn')?.addEventListener('click', () => loadSetProfit());
+
+// ===== 投资顾问 =====
+async function loadInvestmentAdvisor(budget = 1000, minRoi = 10) {
+    toggleMoreMenu();
+    const content = openDetailPanel('扫描投资机会...');
+    if (!content) return;
+
+    try {
+        const resp = await fetch(`/api/investment?budget=${budget}&min_roi=${minRoi}&limit=15`);
+        const data = await resp.json();
+        const items = data.results || [];
+
+        let html = `<div class="panel-title-row">
+            <span class="panel-title-eyebrow">投资顾问</span>
+            <span class="badge ${items.length > 0 ? 'badge-gold' : 'badge-muted'}">${items.length} 机会</span>
+        </div>`;
+
+        if (items.length === 0) {
+            html += `<div class="empty-state"><div class="empty-icon">💎</div>
+                <span class="empty-primary">暂无投资机会</span>
+                <span class="empty-sub">预算 ${budget}p，最低 ROI ${minRoi}%</span></div>`;
+        } else {
+            html += '<div class="card"><div class="card-body">';
+            items.forEach((item, idx) => {
+                const riskColor = item.risk_level === 'low' ? 'var(--green-success)' :
+                    item.risk_level === 'medium' ? 'var(--orange-warning)' : 'var(--red-error)';
+                const riskIcon = item.risk_level === 'low' ? '🟢' :
+                    item.risk_level === 'medium' ? '🟡' : '🔴';
+                html += `<div class="fissure-item" style="flex-direction:column;align-items:flex-start;gap:4px;">
+                    <div style="display:flex;justify-content:space-between;width:100%;align-items:center;">
+                        <div class="fissure-node">${idx + 1}. ${item.display_name || item.item_id}</div>
+                        <span style="color:var(--green-success);font-weight:700;font-family:var(--font-mono);font-size:1.1em;">${item.roi_pct}%</span>
+                    </div>
+                    <div style="display:flex;gap:12px;font-size:0.8em;color:var(--text-secondary);flex-wrap:wrap;">
+                        <span>买: ${item.buy_price}p</span>
+                        <span>卖: ${item.sell_price}p</span>
+                        <span>利润: +${item.profit}p</span>
+                        <span>供/需: ${item.supply_count}/${item.demand_count}</span>
+                        <span>日量: ${item.daily_volume ?? '?'}</span>
+                        <span style="color:${riskColor}">${riskIcon} ${item.risk_level}</span>
+                    </div>
+                </div>`;
+            });
+            html += '</div></div>';
+        }
+        content.innerHTML = html;
+    } catch (err) {
+        content.innerHTML = `<div class="empty-state"><div class="empty-icon">💎</div>
+            <span class="empty-primary">加载失败</span><span class="empty-sub">${err.message}</span></div>`;
+    }
+}
+
+document.getElementById('investment-btn')?.addEventListener('click', () => loadInvestmentAdvisor());

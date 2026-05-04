@@ -94,6 +94,49 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "mod_flipper",
+            "description": "扫描可交易 Mod 的翻转利润，找出最值得低级买、满级卖的 Mod，按每千内融利润排序",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "min_profit": {"type": "integer", "description": "最低利润阈值（白金），默认 5"},
+                    "limit": {"type": "integer", "description": "返回结果数量，默认 20"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_profit",
+            "description": "分析 Prime 套装利润，对比整套买卖 vs 拆件买卖，按利润排序",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "min_profit": {"type": "integer", "description": "最低利润阈值（白金），默认 5"},
+                    "limit": {"type": "integer", "description": "返回结果数量，默认 20"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "investment_advisor",
+            "description": "投资顾问：根据预算扫描物品翻转机会，按 ROI 排序，过滤低成交量和超预算项",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "budget": {"type": "integer", "description": "可用预算（白金），默认 1000"},
+                    "min_roi": {"type": "number", "description": "最低 ROI 百分比，默认 10"},
+                    "limit": {"type": "integer", "description": "返回结果数量，默认 15"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "plan",
             "description": "将复杂请求分解为多个子任务并按顺序执行。用于对比多个物品、投资分析、多步骤查询。",
             "parameters": {
@@ -156,6 +199,21 @@ TOOLS = [
         "name": "general_chat",
         "description": "一般性 Warframe 交易问题或闲聊，不需要调用特定工具",
         "parameters": {"message": "用户消息"},
+    },
+    {
+        "name": "mod_flipper",
+        "description": "扫描 Mod 翻转利润，按每千内融利润排序",
+        "parameters": {"min_profit": "最低利润", "limit": "结果数量"},
+    },
+    {
+        "name": "set_profit",
+        "description": "分析 Prime 套装利润，按利润排序",
+        "parameters": {"min_profit": "最低利润", "limit": "结果数量"},
+    },
+    {
+        "name": "investment_advisor",
+        "description": "投资顾问：按预算和 ROI 扫描翻转机会",
+        "parameters": {"budget": "预算", "min_roi": "最低ROI%", "limit": "结果数量"},
     },
     {
         "name": "plan",
