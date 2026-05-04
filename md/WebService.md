@@ -6,7 +6,7 @@
 
 ### 初始状态（Phase 0-4 完成，相关描述文件在当前文件夹下 README.md 里）
 - 纯终端应用，只适合开发者自用
-- 95 个测试全部通过
+- 145 个测试全部通过
 - 已实现功能：bug 修复、后台监控、价格历史、会话上下文、LLM 工具路由
 
 ### 升级目标
@@ -539,7 +539,7 @@ responsive.css  - 响应式设计（移动端/平板/桌面/大屏/超大屏）
 | 重复查询响应时间 | ~500ms | <1ms |
 | API 请求频率 | 无限制 | 3次/秒 |
 | 并发写入 | 可能锁死 | WAL 模式 |
-| 测试用例数 | 95 个 | 102 个 |
+| 测试用例数 | 95 个 | 145 个 |
 
 ### 前端性能
 | 指标 | 说明 |
@@ -677,11 +677,11 @@ responsive.css  - 响应式设计（移动端/平板/桌面/大屏/超大屏）
 通过 Phase 5-8 的完整升级，Warframe 交易助手已经从一个纯 CLI 工具成功转型为具有专业级 Web UI 的现代化应用：
 
 **后端能力**：
-- ✅ FastAPI REST API（10 个端点）
+- ✅ FastAPI REST API（35+ 个端点）
 - ✅ WebSocket 实时通信（2 个端点）
 - ✅ 异步适配和性能优化
 - ✅ 缓存和限速机制
-- ✅ 102 个单元测试覆盖
+- ✅ 145 个单元测试覆盖
 
 **前端设计**：
 - ✅ Tenno 科技终端风格 UI
@@ -2330,3 +2330,80 @@ messages → LLM → tool_calls? → 执行 → 结果回传 → LLM → ... →
 **文档版本**：v4.0
 **最后更新**：2026-05-03
 **维护者**：Claude (Full-Stack Agent Developer)
+
+---
+
+### Phase 26 — 遗物来源查询与 Bug 修复
+
+**日期**: 2026-05-04
+**重点**: 虚空遗物掉落来源查询、前端 Bug 修复、代码质量改进
+
+#### 1. 遗物来源查询
+
+**功能**: 在虚空裂缝面板中点击遗物，显示该遗物的掉落来源（星球、任务节点、轮次、掉落概率）和精炼等级切换。
+
+**数据来源**: 从 `githubProduct/warframe-drop-data/data/missionRewards.json` 处理提取，生成 `data/relic_sources.json`（62 个遗物，每个含多个掉落来源）。
+
+**后端实现**:
+
+| 端点 | 方法 | 功能 |
+|------|------|------|
+| `/api/relic/sources/{relic_name}` | GET | 获取遗物的掉落来源（星球+节点+轮次+概率） |
+| `/api/relic/drops/{tier}/{relic_name}` | GET | 获取遗物详细掉落表（4 种精炼等级） |
+
+**前端实现**:
+- `loadRelicSources()` — 获取来源数据，按星球分组显示
+- `switchRelicState()` — 精炼等级切换（完整/卓越/无瑕/光辉）
+- 遗物详情面板：掉落表 + 来源列表双 Tab 切换
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 新增 | `data/relic_sources.json` | 62 个遗物的掉落来源数据 |
+| 新增 | `data/relics_detailed/` | 758 个遗物详细掉落 JSON |
+| 修改 | `web/app.py` | 新增 2 个 API 端点 |
+| 修改 | `js/sidebar.js` | 遗物来源展示 + 精炼等级切换 |
+
+#### 2. showPriceChart 未定义修复
+
+**问题**: 点击裂隙追踪面板中的任务项，控制台报 `showPriceChart is not defined`。
+
+**根因**: `showPriceChart` 定义在 `chart.js`（最后加载的脚本），inline onclick handler 无法保证找到该函数。
+
+**修复**:
+- `chart.js`: 添加 `window.showPriceChart = showPriceChart;` 显式暴露到全局
+- `sidebar.js`: 移除 `showFissureTracker()` 中裂隙任务项的错误 onclick（裂隙任务不是市场物品）
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `js/chart.js` | 添加 window.showPriceChart 全局暴露 |
+| 修改 | `js/sidebar.js` | 移除裂隙任务的错误 onclick |
+
+#### 3. FastAPI lifespan 迁移
+
+**变更**: 将 deprecated `@app.on_event("startup")` / `@app.on_event("shutdown")` 迁移到 `lifespan` 上下文管理器。
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    inject_custom_aliases()
+    setup_monitor()
+    yield
+    monitor.stop()
+
+app = FastAPI(title="Warframe Trading Agent API", lifespan=lifespan)
+```
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `web/app.py` | on_event → lifespan 模式 |
+
+#### 4. requirements.txt 补全
+
+**问题**: 缺少 `playwright`、`httpx`、`pydantic` 依赖声明。
+
+**修复**: 添加 `httpx>=0.28.0`、`pydantic>=2.0.0`、`playwright>=1.40.0`。
+
+**测试结果**: 145 个测试全部通过
+
+**文档版本**：v4.1
+**最后更新**：2026-05-04

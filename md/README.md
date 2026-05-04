@@ -32,14 +32,21 @@
   - `set_alert`: 设置价格提醒
   - `price_trend`: 查看价格历史趋势
   - `general_chat`: 一般交易问题闲聊
+- **ReAct 多步推理** — 支持链式工具调用（如"我有50p买什么赋能倒卖最赚"→ 查询多个赋能 → 对比 → 推荐）
+- **多轮对话** — session history 注入 LLM，上下文连贯
+- **行为学习** — 分析用户查询模式构建画像，个性化回答
+- **主动智能** — 价格异常检测 + 趋势监控，Agent 主动给出建议
+- **语义 RAG** — nomic-embed-text 向量搜索，支持"回蓝的赋能"→ arcane_energize 等语义匹配
 - **后台价格监控** — daemon 线程每 5 分钟扫描关注物品和价格提醒，触发阈值时主动推送通知
 - **价格历史追踪** — SQLite 自动记录每次查询的价格快照，支持趋势分析（上涨/下跌/持平）
 - **会话上下文** — 检测追问关键词（"那散件呢"、"涨了吗"、"比昨天"等 14 种模式），自动复用上次查询物品
 - **持久化记忆系统** — 不可变 dataclass 设计，支持：
   - 收藏列表（`/fav add/remove`）
-  - 价格提醒（`/alert add/remove`，支持 below/above 方向）
+  - 价格提醒（`/alert add/remove`，支持 below/above 方向，可添加备注）
   - 交易偏好（平台、crossplay、最大结果数）
+  - 关注列表（定时推送，支持 daily/hourly/weekly）
   - 常见问题自动记录
+  - 智能建议（异常检测结果）
 
 ### Prime 套装
 
@@ -69,13 +76,15 @@
 
 ## 技术栈
 
-- **Python 3.14** — 纯标准库 + 最少外部依赖（requests, ollama, pyperclip）
+- **Python 3.14** — 纯标准库 + 最少外部依赖
 - **Ollama**（qwen3:8b, 5.2GB）— 本地推理，零云端调用
+- **FastAPI + WebSocket** — Web 后端 + 流式通信
 - **warframe.market v2 API** — 实时交易数据
-- **SQLite** — 价格历史持久化存储
-- **threading** — daemon 线程后台监控
-- **dataclasses (frozen=True)** — 不可变数据模型，线程安全
-- **95 个单元测试** — 覆盖所有核心模块，依赖注入支持完整 mock
+- **SQLite** — 价格历史 + 交易历史持久化存储
+- **Playwright** — 浏览器自动化抓取（绕过 Cloudflare）
+- **Chart.js** — 价格趋势可视化
+- **纯 HTML/CSS/JS** — 前端无构建工具，Tenno 科技终端风格
+- **145 个单元测试** — 覆盖所有核心模块和 Web API
 
 ## 快速开始
 
@@ -103,13 +112,20 @@ python tools/build_ollama_model.py
 
 ### 运行
 
-双击 `start_agent.bat`（主菜单）或 `start_chat.bat`（直接进入对话模式）。
+**Web 模式**（推荐）：
 
-或命令行：
+```bash
+python start_web.py
+# 浏览器访问 http://localhost:8000
+```
+
+**CLI 模式**：
 
 ```bash
 python main.py
 ```
+
+或双击 `start_web.bat`（Web 界面）/ `start_agent.bat`（CLI 主菜单）。
 
 ### 对话示例
 
@@ -137,39 +153,52 @@ warframe_agent/        # 核心模块
   config.py            # 配置常量（API 地址、模型名、路径）
   dictionary.py        # 6 层物品名称解析器
   formatter.py         # 输出格式化 + 游戏内私聊命令生成
-  llm.py               # Ollama LLM 调用封装
-  market.py            # warframe.market v2 API 客户端
-  memory.py            # 持久化记忆系统（不可变 dataclass）
-  monitor.py           # 后台价格监控（daemon 线程）
+  llm.py               # Ollama LLM 调用封装（单轮 + 多轮对话）
+  market.py            # warframe.market v2 API 客户端（缓存 + 限速）
+  memory.py            # 持久化记忆系统（不可变 dataclass + 画像 + 建议）
+  monitor.py           # 后台价格监控（daemon 线程 + 异常检测）
   names.py             # 物品显示名称 + 模块级缓存
-  price_history.py     # SQLite 价格历史追踪
-  rag.py               # RAG 语义搜索（关键词 + 编辑距离）
-  session.py           # 会话上下文 + 追问检测
-  tool_router.py       # LLM 工具路由（function calling）
+  price_history.py     # SQLite 价格历史追踪 + 趋势分析
+  rag.py               # RAG 语义搜索（关键词 + 向量余弦相似度）
+  scraper.py           # Playwright 浏览器抓取（绕过 Cloudflare）
+  session.py           # 会话上下文 + 追问检测 + messages 构建
+  tool_router.py       # ReAct 工具路由 + LLM 原生工具调用
+  trade_history.py     # SQLite 交易历史记录
   trade_intent.py      # 交易意图检测（买入/卖出/观望）
   warframes.py         # Prime 套装定价 + 补件计算
-tests/                 # 30 个测试文件，95 个测试用例
-data/                  # 物品数据、别名映射、记忆存储
-tools/                 # Ollama 模型构建 + 数据生成脚本
-md/                    #md文档存放位置
+  web/
+    app.py             # FastAPI Web 应用（35+ API 端点 + 2 WebSocket）
+    static/
+      index.html       # 主页面（Tenno 科技终端风格）
+      css/             # 变量、动画、主样式、响应式
+      js/              # app.js, chat.js, sidebar.js, chart.js
+tests/                 # 32 个测试文件，145 个测试用例
+data/                  # 物品数据、别名映射、记忆存储、遗物数据
+tools/                 # 数据构建 + embedding 预计算脚本
+md/                    # 项目文档
 ```
 
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -v
+python -m pytest tests/ -v
 ```
 
-30 个测试文件，95 个测试用例，覆盖：
+32 个测试文件，145 个测试用例，覆盖：
 - 物品解析全链路（别名、字典、生成式、标准化、LLM、RAG）
 - 对话系统（查价、追问、斜杠命令、记忆操作、RAG 降级）
+- 多轮对话（session history、messages 构建、上下文连贯）
+- ReAct 推理（工具调用、多步分解、链式执行）
+- 行为学习（用户画像、关键词分析、个性化注入）
+- 主动智能（异常检测、趋势监控、建议生成）
+- 语义 RAG（向量搜索、余弦相似度、embedding 缓存）
 - 后台监控（扫描触发、通知队列、线程生命周期、网络容错）
 - 价格历史（记录/查询、趋势计算、边界情况）
 - 会话上下文（追问检测、物品复用、历史记录）
-- LLM 工具路由（prompt 构建、JSON 解析、嵌套大括号、降级回退）
 - Prime 套装（整套定价、拆件对比、补件计算、部件分组）
 - 交易意图（买入/卖出/观望识别）
 - 市场 API 客户端（排序、过滤、格式化）
+- Web API（所有端点、WebSocket、缓存、限速）
 
 ## 架构设计
 

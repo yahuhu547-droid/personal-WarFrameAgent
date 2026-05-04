@@ -2377,8 +2377,7 @@ async function showFissureTracker() {
                 ).join(', ');
 
                 html += `
-                    <div class="list-item" style="margin-bottom:6px; padding:8px 12px; cursor:pointer;"
-                        onclick="showPriceChart('${f.id}')">
+                    <div class="list-item" style="margin-bottom:6px; padding:8px 12px;">
                         <div class="item-header">
                             <span class="item-name" style="font-size:12px;">${f.node}</span>
                             ${f.missionType ? `<span class="item-badge" style="font-size:10px;">${f.missionType}</span>` : ''}

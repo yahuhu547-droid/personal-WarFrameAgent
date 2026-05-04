@@ -95,6 +95,7 @@ async function showPriceChart(itemId, range) {
         content.innerHTML = createChartError(err.message);
     }
 }
+window.showPriceChart = showPriceChart;
 
 async function getItemDetail(itemId) {
     try {

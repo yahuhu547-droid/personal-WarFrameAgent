@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -24,7 +25,15 @@ from ..price_history import PriceHistoryDB
 from ..trade_history import TradeHistoryDB
 from ..formatter import build_whisper
 
-app = FastAPI(title="Warframe Trading Agent API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    inject_custom_aliases()
+    setup_monitor()
+    yield
+    monitor.stop()
+
+
+app = FastAPI(title="Warframe Trading Agent API", lifespan=lifespan)
 
 
 class NoCacheAPIMiddleware(BaseHTTPMiddleware):
@@ -1587,16 +1596,6 @@ def setup_monitor():
     monitor = PriceMonitor(on_alert=on_alert_callback)
     monitor.start()
 
-
-@app.on_event("startup")
-async def startup_event():
-    inject_custom_aliases()
-    setup_monitor()
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    monitor.stop()
 
 
 # ── 装备百科 / MOD数据库 / 遗物搜索 ──────────────────────────────────
