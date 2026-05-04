@@ -3,18 +3,20 @@
    Tenno 科技终端对话模块 v3.0
    ============================================ */
 
-// ===== DOM 元素 =====
-const chatMessages = document.getElementById('chat-messages');
-const chatInput = document.getElementById('chat-input');
-const sendBtn = document.getElementById('send-btn');
-const suggestionsDiv = document.getElementById('suggestions');
+// ===== DOM 元素（用 var 保证全局作用域，onclick 内联处理器可访问） =====
+var chatMessages = document.getElementById('chat-messages');
+var chatInput = document.getElementById('chat-input');
+var sendBtn = document.getElementById('send-btn');
+var suggestionsDiv = document.getElementById('suggestions');
+// 显式挂到 window，防止缓存旧版本（const）导致跨文件访问失败
+window.chatInput = chatInput;
 
 // ===== 状态变量 =====
 let debounceTimer;
 let isTyping = false;
 let chatWs = null;
 let currentStreamMsg = null;
-let wsReconnectDelay = 1000;
+wsReconnectDelay = 1000;
 let wsReconnectTimer = null;
 
 // ===== Markdown 配置 =====
@@ -187,6 +189,21 @@ function createMessageActions(role, text) {
             }
         };
         actions.appendChild(favBtn);
+
+        // 评分按钮
+        const ratingDiv = document.createElement('div');
+        ratingDiv.className = 'msg-rating';
+        for (let i = 1; i <= 5; i++) {
+            const star = document.createElement('button');
+            star.className = 'rating-star';
+            star.textContent = '★';
+            star.dataset.value = i;
+            star.onclick = () => {
+                rateMessage(ratingDiv, i, text);
+            };
+            ratingDiv.appendChild(star);
+        }
+        actions.appendChild(ratingDiv);
     }
 
     return actions;
@@ -228,6 +245,36 @@ function copyWhisper(btn) {
             btn.textContent = '复制私聊';
             btn.classList.remove('copied');
         }, 2000);
+    });
+}
+
+// ===== 消息评分 =====
+
+function rateMessage(ratingDiv, score, replyText) {
+    const userMsg = ratingDiv.closest('.message')?.previousElementSibling;
+    const userText = userMsg?.classList.contains('user')
+        ? userMsg.querySelector('.message-content')?.textContent || ''
+        : '';
+
+    fetch('/api/rate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            message: userText,
+            reply: replyText,
+            rating: score,
+            session_id: ''
+        })
+    }).then(() => {
+        ratingDiv.classList.add('rated');
+        ratingDiv.querySelectorAll('.rating-star').forEach(star => {
+            const val = parseInt(star.dataset.value);
+            star.classList.toggle('active', val <= score);
+            star.disabled = true;
+        });
+        showToast(`已评分 ${score}/5`, 'success');
+    }).catch(() => {
+        showToast('评分失败', 'error');
     });
 }
 
@@ -332,6 +379,8 @@ function ensureChatWs() {
     };
 
     chatWs.onclose = () => {
+        isTyping = false;
+        currentStreamMsg = null;
         console.log('Chat WebSocket 已断开，' + wsReconnectDelay + 'ms 后重连');
         clearTimeout(wsReconnectTimer);
         wsReconnectTimer = setTimeout(ensureChatWs, wsReconnectDelay);
@@ -417,6 +466,7 @@ async function handleSend() {
         addChatMessage('system', '错误: 无法连接到服务器，请检查网络或重启服务');
     }
 }
+window.handleSend = handleSend;
 
 // ===== 物品未找到检测 =====
 
@@ -544,7 +594,7 @@ async function handleBatchQuery() {
         const res = await fetch('/api/batch_query', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(items)
+            body: JSON.stringify({ items })
         });
         const data = await res.json();
         chatMessages.removeChild(loadingMsg);
@@ -673,7 +723,7 @@ async function handleScanWatchlist() {
             const batchRes = await fetch('/api/batch_query', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(itemsToScan)
+                body: JSON.stringify({ items: itemsToScan })
             });
             const batchData = await batchRes.json();
             chatMessages.removeChild(loadingMsg);
@@ -763,7 +813,7 @@ document.addEventListener('keydown', (e) => {
 document.querySelectorAll('.quick-btn').forEach(btn => {
     btn.addEventListener('click', () => {
         if (btn.id === 'compare-btn') {
-            handleCompare();
+            showComparePanel();
         } else if (btn.id === 'batch-query-btn') {
             handleBatchQuery();
         } else if (btn.id === 'scan-watch-btn') {
@@ -1156,6 +1206,7 @@ chatStyles.textContent = `
         background: rgba(212, 167, 55, 0.2);
         border-color: var(--gold-primary);
         transform: scale(1.1);
+        box-shadow: var(--glow-gold-ring);
     }
 
     .whisper-command {
@@ -1168,6 +1219,21 @@ chatStyles.textContent = `
         align-items: center;
         justify-content: space-between;
         gap: 8px;
+        position: relative;
+        overflow: hidden;
+    }
+
+    .whisper-command::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 2px;
+        background: linear-gradient(90deg, var(--blue-primary), var(--gold-primary), var(--blue-primary));
+        background-size: 200% 100%;
+        animation: gradientFlow 4s ease infinite;
+        opacity: 0.6;
     }
 
     .whisper-text {
@@ -1295,6 +1361,40 @@ chatStyles.textContent = `
         color: var(--blue-primary);
         text-decoration: underline;
         text-underline-offset: 2px;
+    }
+
+    .msg-rating {
+        display: flex;
+        gap: 2px;
+        margin-top: 4px;
+    }
+
+    .msg-rating.rated {
+        pointer-events: none;
+    }
+
+    .rating-star {
+        background: none;
+        border: none;
+        cursor: pointer;
+        font-size: 14px;
+        color: rgba(255, 255, 255, 0.2);
+        padding: 1px 2px;
+        transition: color 0.15s, transform 0.15s;
+        line-height: 1;
+    }
+
+    .rating-star:hover {
+        color: var(--gold-primary);
+        transform: scale(1.2);
+    }
+
+    .rating-star.active {
+        color: var(--gold-primary);
+    }
+
+    .msg-rating.rated .rating-star:not(.active) {
+        color: rgba(255, 255, 255, 0.1);
     }
 `;
 document.head.appendChild(chatStyles);

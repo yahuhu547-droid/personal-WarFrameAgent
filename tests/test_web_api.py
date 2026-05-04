@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, MagicMock
 from fastapi.testclient import TestClient
 
 from warframe_agent.web.app import app
@@ -94,6 +94,213 @@ class TestWebAPI(unittest.TestCase):
         data = response.json()
         self.assertEqual(data["item_id"], "arcane_energize")
         self.assertEqual(len(data["snapshots"]), 2)
+
+
+class TestWatchlistAPI(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+
+    @patch("warframe_agent.web.app.AgentMemory")
+    def test_get_watchlist(self, mock_memory_class):
+        mock_item = Mock()
+        mock_item.item_id = "arcane_energize"
+        mock_item.item_name = "充沛赋能"
+        mock_item.frequency = "daily"
+        mock_item.time = "09:00"
+        mock_item.content = "top3_buyers"
+        mock_memory = Mock()
+        mock_memory.watchlist = [mock_item]
+        mock_memory_class.load.return_value = mock_memory
+
+        response = self.client.get("/api/watchlist")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data["watchlist"]), 1)
+        self.assertEqual(data["watchlist"][0]["item_id"], "arcane_energize")
+
+    @patch("warframe_agent.web.app.AgentMemory")
+    def test_add_watch_item(self, mock_memory_class):
+        mock_memory = Mock()
+        mock_memory.with_watch_item.return_value = mock_memory
+        mock_memory_class.load.return_value = mock_memory
+
+        response = self.client.post("/api/watchlist", json={
+            "item_id": "arcane_energize",
+            "item_name": "充沛赋能",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+
+    @patch("warframe_agent.web.app.AgentMemory")
+    def test_remove_watch_item(self, mock_memory_class):
+        mock_memory = Mock()
+        mock_memory.without_watch_item.return_value = mock_memory
+        mock_memory_class.load.return_value = mock_memory
+
+        response = self.client.delete("/api/watchlist/arcane_energize")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+
+
+class TestTradesAPI(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+
+    @patch("warframe_agent.web.app.trade_db")
+    def test_get_trades(self, mock_db):
+        mock_trade = Mock()
+        mock_trade.id = 1
+        mock_trade.item_id = "item1"
+        mock_trade.item_name = "物品一"
+        mock_trade.trade_type = "buy"
+        mock_trade.price = 100
+        mock_trade.player_name = "玩家A"
+        mock_trade.timestamp = "2026-05-01T10:00:00"
+        mock_trade.notes = ""
+        mock_db.get_recent_trades.return_value = [mock_trade]
+
+        response = self.client.get("/api/trades")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data["trades"]), 1)
+        self.assertEqual(data["trades"][0]["item_id"], "item1")
+
+    @patch("warframe_agent.web.app.trade_db")
+    def test_add_trade(self, mock_db):
+        mock_db.add_trade.return_value = 42
+
+        response = self.client.post("/api/trades", json={
+            "item_id": "item1",
+            "item_name": "物品一",
+            "trade_type": "buy",
+            "price": 100,
+        })
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["id"], 42)
+
+    @patch("warframe_agent.web.app.trade_db")
+    def test_delete_trade(self, mock_db):
+        mock_db.delete_trade.return_value = True
+
+        response = self.client.delete("/api/trades/1")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+
+    @patch("warframe_agent.web.app.trade_db")
+    def test_delete_trade_not_found(self, mock_db):
+        mock_db.delete_trade.return_value = False
+
+        response = self.client.delete("/api/trades/999")
+        self.assertEqual(response.status_code, 404)
+
+    @patch("warframe_agent.web.app.trade_db")
+    def test_get_trade_stats(self, mock_db):
+        mock_db.get_trade_stats.return_value = {
+            "total_trades": 5,
+            "buy_count": 3,
+            "sell_count": 2,
+            "total_spent": 300,
+            "total_earned": 500,
+            "net_profit": 200,
+            "most_traded": [],
+        }
+
+        response = self.client.get("/api/trades/stats")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["total_trades"], 5)
+        self.assertEqual(data["net_profit"], 200)
+
+    @patch("warframe_agent.web.app.trade_db")
+    def test_get_trades_by_item(self, mock_db):
+        mock_db.get_trades_by_item.return_value = []
+
+        response = self.client.get("/api/trades/item/item1")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["item_id"], "item1")
+        self.assertEqual(data["trades"], [])
+
+
+class TestSuggestAPI(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+
+    @patch("warframe_agent.web.app.chat_agent")
+    def test_suggest_empty_query(self, mock_agent):
+        response = self.client.get("/api/suggest")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["suggestions"], [])
+
+    @patch("warframe_agent.web.app.chat_agent")
+    def test_suggest_with_results(self, mock_agent):
+        mock_resolver = Mock()
+        mock_resolver.aliases = {"充沛": "arcane_energize", "充沛赋能": "arcane_energize"}
+        mock_resolver.dictionary = {"Arcane Energize": "arcane_energize"}
+        mock_agent.resolver = mock_resolver
+
+        response = self.client.get("/api/suggest?q=充沛")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("充沛", data["suggestions"])
+
+
+class TestAliasesAPI(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+
+    @patch("warframe_agent.web.app.inject_custom_aliases")
+    @patch("warframe_agent.web.app.save_custom_aliases")
+    @patch("warframe_agent.web.app.load_custom_aliases")
+    def test_add_alias(self, mock_load, mock_save, mock_inject):
+        mock_load.return_value = {}
+
+        response = self.client.post("/api/aliases", json={
+            "name": "我的别名",
+            "item_id": "arcane_energize",
+        })
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["name"], "我的别名")
+
+    @patch("warframe_agent.web.app.inject_custom_aliases")
+    @patch("warframe_agent.web.app.save_custom_aliases")
+    @patch("warframe_agent.web.app.load_custom_aliases")
+    def test_add_alias_empty_name(self, mock_load, mock_save, mock_inject):
+        mock_load.return_value = {}
+
+        response = self.client.post("/api/aliases", json={
+            "name": "",
+            "item_id": "arcane_energize",
+        })
+        self.assertEqual(response.status_code, 400)
+
+    @patch("warframe_agent.web.app.inject_custom_aliases")
+    @patch("warframe_agent.web.app.save_custom_aliases")
+    @patch("warframe_agent.web.app.load_custom_aliases")
+    def test_remove_alias(self, mock_load, mock_save, mock_inject):
+        mock_load.return_value = {"我的别名": "arcane_energize"}
+
+        response = self.client.request("DELETE", "/api/aliases", json={"name": "我的别名"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+
+    @patch("warframe_agent.web.app.display_item_name")
+    @patch("warframe_agent.web.app.load_custom_aliases")
+    def test_get_aliases(self, mock_load, mock_display):
+        mock_load.return_value = {"我的别名": "arcane_energize"}
+        mock_display.return_value = "Arcane Energize"
+
+        response = self.client.get("/api/aliases")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("aliases", data)
+        self.assertEqual(len(data["aliases"]), 1)
+        self.assertEqual(data["aliases"][0]["name"], "我的别名")
+        self.assertEqual(data["aliases"][0]["item_id"], "arcane_energize")
 
 
 if __name__ == "__main__":

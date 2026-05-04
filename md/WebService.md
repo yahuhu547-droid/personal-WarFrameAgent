@@ -6,7 +6,7 @@
 
 ### 初始状态（Phase 0-4 完成，相关描述文件在当前文件夹下 README.md 里）
 - 纯终端应用，只适合开发者自用
-- 145 个测试全部通过
+- 169 个测试全部通过
 - 已实现功能：bug 修复、后台监控、价格历史、会话上下文、LLM 工具路由
 
 ### 升级目标
@@ -539,7 +539,7 @@ responsive.css  - 响应式设计（移动端/平板/桌面/大屏/超大屏）
 | 重复查询响应时间 | ~500ms | <1ms |
 | API 请求频率 | 无限制 | 3次/秒 |
 | 并发写入 | 可能锁死 | WAL 模式 |
-| 测试用例数 | 95 个 | 145 个 |
+| 测试用例数 | 95 个 | 169 个 |
 
 ### 前端性能
 | 指标 | 说明 |
@@ -681,7 +681,7 @@ responsive.css  - 响应式设计（移动端/平板/桌面/大屏/超大屏）
 - ✅ WebSocket 实时通信（2 个端点）
 - ✅ 异步适配和性能优化
 - ✅ 缓存和限速机制
-- ✅ 145 个单元测试覆盖
+- ✅ 169 个单元测试覆盖
 
 **前端设计**：
 - ✅ Tenno 科技终端风格 UI
@@ -2282,7 +2282,7 @@ messages → LLM → tool_calls? → 执行 → 结果回传 → LLM → ... →
 | 24 | 语义 RAG | SemanticRAG embedding 余弦相似度搜索 | +6 |
 | 25 | ReAct 循环 | react_loop 多步推理 + 原生工具调用 | +13 |
 
-**测试**: 102 → 145（+43 新测试）
+**测试**: 102 → 145（+43 新测试）→ 169（+24 新测试）
 
 **新增配置**:
 
@@ -2405,5 +2405,154 @@ app = FastAPI(title="Warframe Trading Agent API", lifespan=lifespan)
 
 **测试结果**: 145 个测试全部通过
 
-**文档版本**：v4.1
+---
+
+### Phase 27 — 全面代码审查与修复
+
+**目标**: 对整个项目进行全面审查，发现并修复 21 个问题（HIGH 3 / MEDIUM 10 / LOW 8）。
+
+#### 1. HIGH 优先级修复
+
+| 问题 | 文件 | 修复 |
+|------|------|------|
+| `toggleMoreMenu` 空指针 | `app.js` | 添加 null 检查 |
+| chat.js DOM 引用安全性 | `chat.js` | 验证 script 在 `</body>` 前加载，DOM 已就绪 |
+| `setup_monitor` 异常时 lifespan | `app.py` | 添加 try/except 保护 shutdown |
+
+#### 2. MEDIUM 优先级修复
+
+| 问题 | 文件 | 修复 |
+|------|------|------|
+| 重复 report-btn 绑定 | `chart.js` | 移除 chart.js 中的重复绑定 |
+| `showPriceAnomalies` 重复定义 | `sidebar.js` | 移除第一个死代码定义 |
+| `renderFavorites`/`renderAlerts` 空指针 | `sidebar.js` | 添加 null 检查 |
+| XSS: inline onclick 注入 | `chart.js`, `sidebar.js` | 使用 `JSON.stringify()` 转义 |
+| 死代码 `_ducat_cache` | `app.py` | 删除未使用的变量 |
+| 未使用的 `getHistory` | `app.js` | 删除 |
+| 未使用的 `createEmptyState` | `sidebar.js` | 删除 |
+| `getHistoryWithRange` 缺 try/catch | `chart.js` | 添加异常处理 |
+| report copy 模板注入 | `sidebar.js` | 改用 addEventListener |
+
+#### 3. LOW 优先级修复
+
+| 问题 | 文件 | 修复 |
+|------|------|------|
+| `asyncio.get_event_loop()` 已废弃 | `app.py` | 改为 `asyncio.get_running_loop()` |
+| `get_item_type_info` 重复读文件 | `app.py` | 添加 `_export_file_cache` 文件级缓存 |
+| `ws_connections` 迭代安全 | `app.py` | 迭代前拷贝列表 |
+| Pydantic 请求模型缺失 | `app.py` | 添加 `ItemListRequest`、`AliasRequest`、`AliasDeleteRequest` |
+
+#### 4. Pydantic 请求模型
+
+为以下端点添加类型化请求模型：
+- `/api/compare` — `ItemListRequest`（items 列表，限制 3 个）
+- `/api/batch_query` — `ItemListRequest`（items 列表，限制 10 个）
+- `/api/ducats/batch` — `ItemListRequest`（items 列表，限制 10 个）
+- `/api/aliases` POST — `AliasRequest`（name + item_id）
+- `/api/aliases` DELETE — `AliasDeleteRequest`（name）
+
+#### 5. 测试补充
+
+新增 24 个测试：
+- `tests/test_trade_history.py`（10 个）— TradeHistoryDB 完整覆盖
+- `tests/test_web_api.py` 新增（14 个）— watchlist、trades、suggest、aliases API
+
+| 指标 | 修改前 | 修改后 |
+|------|--------|--------|
+| 测试用例数 | 145 | 169 |
+
+**测试结果**: 169 个测试全部通过
+
+---
+
+### Phase 28 — 同步文件 I/O 阻塞事件循环修复（M10）
+
+**目标**: 消除 async 端点中的同步文件 I/O，避免阻塞事件循环。
+
+#### 问题分析
+
+经审查发现 `app.py` 中有 **35+ 处同步文件 I/O 调用**分布在 **25 个 async 端点**中：
+
+| 类别 | 数量 | 说明 |
+|------|------|------|
+| AgentMemory.load()/save() | 14 端点，~22 次 | 最频繁，每次请求读写磁盘 |
+| 大文件直接读取 | 5 端点 | relics_drop_data.json（数百 KB）等 |
+| 缓存辅助函数 | 6 端点 | 首次加载大文件，后续缓存命中 |
+| 别名文件 | 3 端点 | custom_aliases.json |
+
+#### 修复方案
+
+**策略 1: 启动预热** — 在 `lifespan` 中用 `asyncio.gather` + `asyncio.to_thread` 并行预热所有缓存：
+- `_load_export_file()` — ExportRelicArcane_en.json, ExportUpgrades_en.json
+- `_load_wiki_json()` — Warframes.json, Weapons.json, Mods.json
+- `_load_zh_names()` — Warframes, Weapons, Upgrades
+- `_preload_relic_drop_data()` — relics_drop_data.json（新增模块级缓存）
+- `_load_relic_vault_status()` — relic_vault_status.json
+- `_load_relic_sources()` — relic_sources.json（新增模块级缓存）
+
+**策略 2: 模块级缓存** — 为 `relics_drop_data.json` 和 `relic_sources.json` 添加 `_relic_drop_data_cache` / `_relic_sources_cache`，在 lifespan 中预热，端点直接从缓存读取。
+
+**策略 3: asyncio.to_thread 包装** — 创建 `_load_memory_async()` / `_save_memory_async()` 替换 14 个端点中的 `AgentMemory.load()` / `memory.save()`。
+
+**策略 4: asyncio.to_thread 包装** — 对 `/api/fissures/relics`、`/api/relic/drops` 详细 JSON、`/api/aliases` 的 `load_custom_aliases()` / `save_custom_aliases()` 使用 `asyncio.to_thread()`。
+
+#### 修改的端点（21 个）
+
+| 端点 | 策略 |
+|------|------|
+| GET /api/memory, POST/DELETE /api/fav, POST/DELETE /api/alert, GET/POST/DELETE /api/watchlist, POST /api/pref, GET /api/price/anomalies, GET /api/favorites_prices, GET /api/report, GET /api/arbitrage | 策略 3: async memory |
+| GET /api/fissures, GET /api/relic/search, GET /api/relic/drops (fallback) | 策略 2: 模块级缓存 |
+| GET /api/fissures/relics, GET /api/relic/drops (detailed) | 策略 4: to_thread |
+| GET /api/relic/sources | 策略 2: 模块级缓存 |
+| GET/POST/DELETE /api/aliases | 策略 4: to_thread |
+| lifespan | 策略 1: 预热 |
+
+| 指标 | 修改前 | 修改后 |
+|------|--------|--------|
+| 同步 I/O 调用点 | 35+ | 0（全部异步化） |
+
+**测试结果**: 169 个测试全部通过
+
+---
+
+### Phase 29 — UI 动画增强与功能借鉴
+
+**目标**: 借鉴 GitHub 和大厂网页的动画效果，在已有 Tenno 科技终端风格基础上增强视觉体验。
+
+#### 1. 纯 CSS 增强（零依赖）
+
+| 效果 | 文件 | 说明 |
+|------|------|------|
+| CRT 扫描线叠加层 | `animations.css` | 经典终端扫描线效果，body 添加 `scanlines` 类 |
+| 角落括号装饰 | `animations.css` + `style.css` | 模态框添加金色角落边框装饰 |
+| 增强文字辉光 | `style.css` | 标题 "Warframe 交易助手" 添加多层金色 text-shadow |
+| 全息微光效果 | `animations.css` + `style.css` | 侧边栏标题栏添加流动渐变微光背景 |
+| Glitch 效果 | `animations.css` | 用于错误状态或数据更新时的视觉提示 |
+| 主题切换过渡 | `animations.css` + `app.js` | `theme-transitioning` 类实现全元素平滑颜色过渡 |
+| 主题按钮旋转 | `animations.css` + `app.js` | 切换主题时图标 360° 旋转动画 |
+
+#### 2. JavaScript 微交互（零依赖）
+
+| 效果 | 文件 | 说明 |
+|------|------|------|
+| 列表交错入场 | `sidebar.js` | 收藏/提醒列表每项延迟 50ms 依次滑入（`stagger-item` 类） |
+| 价格更新闪烁 | `sidebar.js` | 价格变化时列表项金色闪烁提示（`price-updated` 类） |
+| 面板滑入增强 | `app.js` | 详情面板打开时添加 `panel-enter` 滑入动画 |
+
+#### 3. CDN 库集成
+
+| 库 | 大小 | 用途 |
+|------|------|------|
+| CountUp.js v2.10.0 | ~2KB | 价格数字平滑计数动画，价格变化时从旧值滚动到新值 |
+
+**修改文件**:
+- `web/static/css/animations.css` — 新增 11 个 keyframe 动画和工具类
+- `web/static/css/style.css` — 应用辉光、括号、微光效果到组件
+- `web/static/index.html` — 添加 `scanlines` 类、CountUp.js CDN
+- `web/static/js/sidebar.js` — 交错入场、价格动画、CountUp 集成
+- `web/static/js/app.js` — 主题切换过渡、面板滑入动画
+
+**测试结果**: 169 个测试全部通过
+
+**文档版本**：v4.4
 **最后更新**：2026-05-04

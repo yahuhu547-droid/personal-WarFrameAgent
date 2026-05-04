@@ -141,7 +141,7 @@
 
   /* ===== 动画 ===== */
   --duration-fast: 150ms;
-  --duration-normal: 300ms;
+  --duration-normal: 200ms;
   --duration-slow: 500ms;
   --duration-slower: 700ms;
 
@@ -201,6 +201,26 @@
   --status-idle: #f59e0b;
   --status-offline: #6b7280;
   --status-busy: #ef4444;
+
+  /* ===== UI 升级：大厂设计借鉴 ===== */
+
+  /* Spring 缓动（借鉴 Linear.app） */
+  --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-smooth: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+
+  /* 层次化背景深度（Vercel 风格） */
+  --bg-deepest: #050810;
+  --bg-overlay: #1a2035;
+
+  /* Glow ring 系统（Vercel 风格） */
+  --glow-gold-ring: 0 0 0 1px rgba(212, 167, 55, 0.3), 0 0 20px rgba(212, 167, 55, 0.1);
+  --glow-blue-ring: 0 0 0 1px rgba(74, 158, 255, 0.3), 0 0 20px rgba(74, 158, 255, 0.1);
+  --glow-gold-ring-hover: 0 0 0 1px rgba(212, 167, 55, 0.5), 0 0 30px rgba(212, 167, 55, 0.15);
+  --glow-blue-ring-hover: 0 0 0 1px rgba(74, 158, 255, 0.5), 0 0 30px rgba(74, 158, 255, 0.15);
+
+  /* 噪点纹理透明度 */
+  --noise-opacity: 0.03;
 }
 
 /* ===== 暗色主题变量 ===== */

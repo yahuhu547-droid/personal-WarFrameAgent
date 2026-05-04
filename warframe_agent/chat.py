@@ -48,8 +48,19 @@ def build_item_context(item_id: str, orders: Iterable[dict]) -> str:
 
 def build_item_context_result(item_id: str, orders: Iterable[dict]) -> ItemContext:
     order_list = list(orders)
-    sellers = best_sellers(order_list, limit=5)
-    buyers = best_buyers(order_list, limit=5)
+
+    # 检测是否有 rank/mod_rank 字段（赋能/Mod），统一用满级比较
+    rank_filter = None
+    ranks = []
+    for o in order_list:
+        r = o.get("rank") if o.get("rank") is not None else o.get("mod_rank")
+        if r is not None:
+            ranks.append(r)
+    if ranks:
+        rank_filter = max(ranks)
+
+    sellers = best_sellers(order_list, limit=5, rank_filter=rank_filter)
+    buyers = best_buyers(order_list, limit=5, rank_filter=rank_filter)
     lines = [f"物品: {display_item_name(item_id)}"]
 
     best_seller = sellers[0] if sellers else None
@@ -66,8 +77,16 @@ def build_item_context_result(item_id: str, orders: Iterable[dict]) -> ItemConte
         lines.append("最高收价: 暂无在线买家")
     if best_seller and best_buyer:
         lines.append(f"价差: {best_seller.platinum - best_buyer.platinum}p")
-    if item_id.startswith("arcane_") and best_seller:
-        lines.append(f"满级估算: 21 个约 {best_seller.platinum * 21}p")
+
+    # 赋能/Mod：额外显示 rank 0 零散价格
+    rank0_sell = None
+    if (item_id.startswith("arcane_") or item_id.startswith("mod_")) and rank_filter is not None and rank_filter > 0:
+        rank0_sellers = best_sellers(order_list, limit=1, rank_filter=0)
+        if rank0_sellers:
+            rank0_sell = rank0_sellers[0].platinum
+            lines.append(f"零散价格（rank 0）: {rank0_sell}p")
+        lines.append(f"满级价格（rank {rank_filter}）: {best_seller.platinum}p" if best_seller else f"满级价格: 暂无")
+
     return ItemContext(
         item_id=item_id,
         text="\n".join(lines),
@@ -138,6 +157,7 @@ class ChatAgent:
         warframe_answer = price_warframe_query(message, self.warframe_items, self.order_fetcher)
         if warframe_answer:
             self.session.add_exchange(message, warframe_answer)
+            self._log_answer(message, warframe_answer)
             return warframe_answer
         if is_followup(message) and self.session.has_context():
             contexts = self._contexts_for_items(self.session.last_item_ids)
@@ -147,41 +167,64 @@ class ChatAgent:
             routed = self._try_router(message)
             if routed:
                 self.session.add_exchange(message, routed)
+                self._log_answer(message, routed)
                 return routed
-            return "没有找到匹配的物品，请输入 warframe.market 的 item_id，例如：充沛 / arcane_energize"
+            result = "没有找到匹配的物品，请输入 warframe.market 的 item_id，例如：充沛 / arcane_energize"
+            self._log_answer(message, result)
+            return result
         self.session.update([ctx.item_id for ctx in contexts])
         deterministic_answer = _deterministic_trade_intent_answer(message, contexts)
         if deterministic_answer:
             self.session.add_exchange(message, deterministic_answer)
+            self._log_answer(message, deterministic_answer, contexts)
             return deterministic_answer
         prompt_messages = build_chat_messages(message, contexts, self.memory, self.session.to_messages())
         try:
             answer = self._call_llm_messages(prompt_messages).strip()
             if answer:
                 self.session.add_exchange(message, answer)
+                self._log_answer(message, answer, contexts)
                 return answer
         except Exception:
             result = fallback_answer(message, contexts, llm_failed=True)
             self.session.add_exchange(message, result)
+            self._log_answer(message, result, contexts)
             return result
         result = fallback_answer(message, contexts)
         self.session.add_exchange(message, result)
+        self._log_answer(message, result, contexts)
         return result
+
+    def _log_answer(self, message: str, reply: str, contexts=None) -> None:
+        try:
+            from .conversation_log import log_conversation, ConversationEntry
+            log_conversation(ConversationEntry(
+                user_message=message,
+                assistant_reply=reply,
+                contexts=[ctx.item_id for ctx in contexts] if contexts else None,
+            ))
+        except Exception:
+            pass
 
     async def answer_stream(self, message: str) -> AsyncIterator[str]:
         """流式版本的 answer，逐 token yield。对于不需要 LLM 的路径，一次性 yield 全文。"""
         self._reload_memory()
         stripped = message.strip()
         if stripped.startswith("/"):
-            yield self._handle_agent_command(stripped)
+            result = self._handle_agent_command(stripped)
+            self._log_answer(message, result)
+            yield result
             return
         if is_watchlist_command(message):
-            yield self.scan_watchlist()
+            result = self.scan_watchlist()
+            self._log_answer(message, result)
+            yield result
             return
         self._remember_common_question(message)
         warframe_answer = price_warframe_query(message, self.warframe_items, self.order_fetcher)
         if warframe_answer:
             self.session.add_exchange(message, warframe_answer)
+            self._log_answer(message, warframe_answer)
             yield warframe_answer
             return
         if is_followup(message) and self.session.has_context():
@@ -192,14 +235,18 @@ class ChatAgent:
             routed = self._try_router(message)
             if routed:
                 self.session.add_exchange(message, routed)
+                self._log_answer(message, routed)
                 yield routed
                 return
-            yield "没有找到匹配的物品，请输入 warframe.market 的 item_id，例如：充沛 / arcane_energize"
+            result = "没有找到匹配的物品，请输入 warframe.market 的 item_id，例如：充沛 / arcane_energize"
+            self._log_answer(message, result)
+            yield result
             return
         self.session.update([ctx.item_id for ctx in contexts])
         deterministic_answer = _deterministic_trade_intent_answer(message, contexts)
         if deterministic_answer:
             self.session.add_exchange(message, deterministic_answer)
+            self._log_answer(message, deterministic_answer, contexts)
             yield deterministic_answer
             return
         prompt_messages = build_chat_messages(message, contexts, self.memory, self.session.to_messages())
@@ -213,14 +260,17 @@ class ChatAgent:
         except Exception:
             result = fallback_answer(message, contexts, llm_failed=True)
             self.session.add_exchange(message, result)
+            self._log_answer(message, result, contexts)
             yield result
             return
         reply_text = "".join(full_reply).strip()
         if reply_text:
             self.session.add_exchange(message, reply_text)
+            self._log_answer(message, reply_text, contexts)
         else:
             result = fallback_answer(message, contexts)
             self.session.add_exchange(message, result)
+            self._log_answer(message, result, contexts)
             yield result
 
     def scan_watchlist(self) -> str:
@@ -450,7 +500,7 @@ class ChatAgent:
         except Exception:
             return None
 
-    def _execute_tool_call(self, tool_call, message: str) -> str | None:
+    def _execute_tool_call(self, tool_call, message: str = "") -> str | None:
         args = tool_call.arguments
         if tool_call.name == "query_price":
             item_name = args.get("item_name", message)
@@ -692,8 +742,6 @@ def _render_trade_intent_context(context: ItemContext, intent: str) -> str:
             lines.append(f"当前价差: {context.best_sell_price - context.best_buy_price}p")
     else:
         return None
-    if context.item_id.startswith("arcane_") and context.best_sell_price is not None:
-        lines.append(f"满级估算: 21 个约 {context.best_sell_price * 21}p")
     return "\n".join(lines)
 
 

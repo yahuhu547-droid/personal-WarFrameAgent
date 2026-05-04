@@ -17,9 +17,9 @@ from pathlib import Path
 from .. import config
 from ..chat import ChatAgent, build_item_context_result
 from ..dictionary import normalize_lookup_key, normalize_market_id
-from ..market import fetch_orders_async, best_sellers, best_buyers
+from ..market import fetch_orders_async, best_sellers, best_buyers, get_max_rank_from_orders
 from ..memory import AgentMemory, PriceAlert, MEMORY_PATH
-from ..monitor import PriceMonitor, AlertNotification
+from ..monitor import PriceMonitor, AlertNotification, WatchNotification, EnrichedNotification
 from ..names import display_item_name
 from ..price_history import PriceHistoryDB
 from ..trade_history import TradeHistoryDB
@@ -29,8 +29,25 @@ from ..formatter import build_whisper
 async def lifespan(app: FastAPI):
     inject_custom_aliases()
     setup_monitor()
+    # 预热缓存（在线程池中执行避免阻塞启动）
+    await asyncio.gather(
+        asyncio.to_thread(_load_export_file, "ExportRelicArcane_en.json"),
+        asyncio.to_thread(_load_export_file, "ExportUpgrades_en.json"),
+        asyncio.to_thread(_load_wiki_json, "Warframes.json"),
+        asyncio.to_thread(_load_wiki_json, "Weapons.json"),
+        asyncio.to_thread(_load_wiki_json, "Mods.json"),
+        asyncio.to_thread(_load_zh_names, "Warframes"),
+        asyncio.to_thread(_load_zh_names, "Weapons"),
+        asyncio.to_thread(_load_zh_names, "Upgrades"),
+        asyncio.to_thread(_preload_relic_drop_data),
+        asyncio.to_thread(_load_relic_vault_status),
+        asyncio.to_thread(_load_relic_sources),
+    )
     yield
-    monitor.stop()
+    try:
+        monitor.stop()
+    except Exception:
+        pass
 
 
 app = FastAPI(title="Warframe Trading Agent API", lifespan=lifespan)
@@ -56,13 +73,61 @@ ws_connections: list[WebSocket] = []
 # 自定义别名存储
 CUSTOM_ALIASES_PATH = Path(__file__).parent.parent.parent / "data" / "custom_aliases.json"
 
-# 杜卡特数据缓存
-_ducat_cache: dict[str, dict] = {}
-_ducat_cache_time = 0
-DUCAT_CACHE_TTL = 3600  # 1小时缓存
-
 # 物品类型和等级缓存
 _item_type_cache: dict[str, dict] = {}
+_export_file_cache: dict[str, dict] = {}
+
+# 大文件模块级缓存
+_relic_drop_data_cache: dict = {}
+_relic_sources_cache: dict = {}
+
+
+def _preload_relic_drop_data() -> dict:
+    """预加载遗物掉落数据到缓存"""
+    if not _relic_drop_data_cache:
+        relic_path = config.DATA_DIR / "relics_drop_data.json"
+        if relic_path.exists():
+            try:
+                with relic_path.open("r", encoding="utf-8") as f:
+                    _relic_drop_data_cache.update(json.load(f))
+            except Exception:
+                pass
+    return _relic_drop_data_cache
+
+
+def _load_relic_sources() -> dict:
+    """带缓存的遗物来源数据加载"""
+    if not _relic_sources_cache:
+        sources_path = config.DATA_DIR / "relic_sources.json"
+        if sources_path.exists():
+            try:
+                with sources_path.open("r", encoding="utf-8") as f:
+                    _relic_sources_cache.update(json.load(f))
+            except Exception:
+                pass
+    return _relic_sources_cache
+
+
+async def _load_memory_async() -> AgentMemory:
+    return await asyncio.to_thread(AgentMemory.load, MEMORY_PATH)
+
+
+async def _save_memory_async(memory: AgentMemory) -> None:
+    await asyncio.to_thread(memory.save, MEMORY_PATH)
+
+
+def _load_export_file(filename: str) -> dict:
+    """带文件级缓存的导出文件加载"""
+    if filename in _export_file_cache:
+        return _export_file_cache[filename]
+    export_dir = Path(__file__).parent.parent.parent / "data" / "export"
+    try:
+        with (export_dir / filename).open("r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        _export_file_cache[filename] = data
+        return data
+    except Exception:
+        return {}
 
 
 def get_item_type_info(item_id: str) -> dict | None:
@@ -74,11 +139,8 @@ def get_item_type_info(item_id: str) -> dict | None:
 
     # 检查是否是赋能 (Arcane)
     if item_id_lower.startswith("arcane_"):
-        # 从导出数据中查找赋能的最大等级
-        export_dir = Path(__file__).parent.parent.parent / "data" / "export"
         try:
-            with (export_dir / "ExportRelicArcane_en.json").open("r", encoding="utf-8-sig") as f:
-                data = json.load(f)
+            data = _load_export_file("ExportRelicArcane_en.json")
             for item in data.get("ExportRelicArcane", []):
                 unique_name = item.get("uniqueName", "").lower()
                 name = item.get("name", "").lower().replace(" ", "_")
@@ -101,10 +163,8 @@ def get_item_type_info(item_id: str) -> dict | None:
         return result
 
     # 检查是否是 Mod
-    export_dir = Path(__file__).parent.parent.parent / "data" / "export"
     try:
-        with (export_dir / "ExportUpgrades_en.json").open("r", encoding="utf-8-sig") as f:
-            data = json.load(f)
+        data = _load_export_file("ExportUpgrades_en.json")
         for item in data.get("ExportUpgrades", []):
             unique_name = item.get("uniqueName", "").lower()
             name = item.get("name", "").lower().replace(" ", "_")
@@ -513,7 +573,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
 @app.get("/api/memory", response_model=MemoryResponse)
 async def get_memory() -> MemoryResponse:
-    memory = AgentMemory.load(MEMORY_PATH)
+    memory = await _load_memory_async()
     prefs = memory.preferences
     if hasattr(prefs, 'platform'):
         prefs_dict = {
@@ -548,33 +608,33 @@ async def get_memory() -> MemoryResponse:
 
 @app.post("/api/fav")
 async def add_favorite(request: FavoriteRequest) -> JSONResponse:
-    memory = AgentMemory.load(MEMORY_PATH)
+    memory = await _load_memory_async()
     memory = memory.with_favorite_item(request.item_id)
-    memory.save(MEMORY_PATH)
+    await _save_memory_async(memory)
     return JSONResponse({"status": "ok"})
 
 
 @app.delete("/api/fav")
 async def remove_favorite(request: FavoriteRequest) -> JSONResponse:
-    memory = AgentMemory.load(MEMORY_PATH)
+    memory = await _load_memory_async()
     memory = memory.without_favorite_item(request.item_id)
-    memory.save(MEMORY_PATH)
+    await _save_memory_async(memory)
     return JSONResponse({"status": "ok"})
 
 
 @app.post("/api/alert")
 async def add_alert(request: AlertRequest) -> JSONResponse:
-    memory = AgentMemory.load(MEMORY_PATH)
+    memory = await _load_memory_async()
     memory = memory.with_price_alert(request.item_id, request.direction, request.price, request.note)
-    memory.save(MEMORY_PATH)
+    await _save_memory_async(memory)
     return JSONResponse({"status": "ok"})
 
 
 @app.delete("/api/alert")
 async def remove_alert(request: AlertRequest) -> JSONResponse:
-    memory = AgentMemory.load(MEMORY_PATH)
+    memory = await _load_memory_async()
     memory = memory.without_price_alert(request.item_id, request.direction, request.price)
-    memory.save(MEMORY_PATH)
+    await _save_memory_async(memory)
     return JSONResponse({"status": "ok"})
 
 
@@ -591,7 +651,7 @@ class WatchRequest(BaseModel):
 @app.get("/api/watchlist")
 async def get_watchlist() -> JSONResponse:
     """获取关注列表"""
-    memory = AgentMemory.load(MEMORY_PATH)
+    memory = await _load_memory_async()
     return JSONResponse({
         "watchlist": [
             {
@@ -609,7 +669,7 @@ async def get_watchlist() -> JSONResponse:
 @app.post("/api/watchlist")
 async def add_watch_item(request: WatchRequest) -> JSONResponse:
     """添加关注项"""
-    memory = AgentMemory.load(MEMORY_PATH)
+    memory = await _load_memory_async()
     memory = memory.with_watch_item(
         item_id=request.item_id,
         item_name=request.item_name,
@@ -617,24 +677,43 @@ async def add_watch_item(request: WatchRequest) -> JSONResponse:
         time=request.time,
         content=request.content,
     )
-    memory.save(MEMORY_PATH)
+    await _save_memory_async(memory)
     return JSONResponse({"status": "ok"})
 
 
 @app.delete("/api/watchlist/{item_id}")
 async def remove_watch_item(item_id: str) -> JSONResponse:
     """移除关注项"""
-    memory = AgentMemory.load(MEMORY_PATH)
+    memory = await _load_memory_async()
     memory = memory.without_watch_item(item_id)
-    memory.save(MEMORY_PATH)
+    await _save_memory_async(memory)
     return JSONResponse({"status": "ok"})
 
 
 @app.post("/api/pref")
 async def set_preference(request: PreferenceRequest) -> JSONResponse:
-    memory = AgentMemory.load(MEMORY_PATH)
+    memory = await _load_memory_async()
     memory = memory.set_preference(request.key, request.value)
-    memory.save(MEMORY_PATH)
+    await _save_memory_async(memory)
+    return JSONResponse({"status": "ok"})
+
+
+class RatingRequest(BaseModel):
+    message: str
+    reply: str
+    rating: int = 3
+    session_id: str = ""
+
+
+@app.post("/api/rate")
+async def rate_response(request: RatingRequest) -> JSONResponse:
+    from ..conversation_log import log_conversation, ConversationEntry
+    log_conversation(ConversationEntry(
+        user_message=request.message,
+        assistant_reply=request.reply,
+        rating=max(1, min(5, request.rating)),
+        session_id=request.session_id,
+    ))
     return JSONResponse({"status": "ok"})
 
 
@@ -706,7 +785,7 @@ async def detect_price_anomalies(threshold: float = 30.0) -> JSONResponse:
     """检测价格异常（暴涨暴跌）
     threshold: 偏离平均价格的百分比阈值，默认30%
     """
-    memory = AgentMemory.load(MEMORY_PATH)
+    memory = await _load_memory_async()
     anomalies = []
 
     # 检查收藏物品
@@ -788,12 +867,9 @@ async def get_fissures() -> JSONResponse:
 
     # 外部 API 失败，使用本地掉落数据分析推荐
     try:
-        relic_path = config.DATA_DIR / "relics_drop_data.json"
-        if not relic_path.exists():
+        data = _preload_relic_drop_data()
+        if not data:
             return JSONResponse({"fissures": {}, "message": "外部API不可用且无本地遗物数据", "source": "none"})
-
-        with relic_path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
 
         # 按纪元分组，只取 Intact 状态，计算稀有掉落
         tiers = {"Lith": [], "Meso": [], "Neo": [], "Axi": [], "Requiem": []}
@@ -848,8 +924,11 @@ async def get_relic_info() -> JSONResponse:
         if not relic_path.exists():
             return JSONResponse({"relics": [], "message": "遗物数据不存在"})
 
-        with relic_path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
+        def _read_json():
+            with relic_path.open("r", encoding="utf-8") as f:
+                return json.load(f)
+
+        data = await asyncio.to_thread(_read_json)
 
         relics = []
         for item in data.get("ExportRelicArcane", []):
@@ -873,22 +952,31 @@ async def get_relic_info() -> JSONResponse:
 
 
 @app.get("/api/favorites_prices")
-async def get_favorites_prices() -> JSONResponse:
-    memory = AgentMemory.load(MEMORY_PATH)
+async def get_favorites_prices(mode: str = "scatter") -> JSONResponse:
+    """收藏物品价格。mode: scatter=零散(rank 0), maxrank=满级成品"""
+    memory = await _load_memory_async()
     results = []
     for item_id in memory.favorite_items:
         try:
             orders = await fetch_orders_async(item_id)
-            sellers = best_sellers(orders, limit=1)
-            buyers = best_buyers(orders, limit=1)
-            results.append({
+            max_rank = get_max_rank_from_orders(orders)
+            is_ranked = max_rank is not None and (
+                item_id.startswith("arcane_") or item_id.startswith("mod_")
+            )
+            # scatter: rank 0 价格; maxrank: 满级成品价格
+            sell_rank_filter = (max_rank if mode == "maxrank" and is_ranked else 0) if is_ranked else None
+            sellers = best_sellers(orders, limit=1, rank_filter=sell_rank_filter)
+            buyers = best_buyers(orders, limit=1, rank_filter=sell_rank_filter)
+            entry = {
                 "item_id": item_id,
                 "sell_price": sellers[0].platinum if sellers else None,
                 "buy_price": buyers[0].platinum if buyers else None,
-            })
+                "max_rank": max_rank,
+            }
+            results.append(entry)
         except Exception:
-            results.append({"item_id": item_id, "sell_price": None, "buy_price": None})
-    return JSONResponse({"items": results})
+            results.append({"item_id": item_id, "sell_price": None, "buy_price": None, "max_rank": None})
+    return JSONResponse({"items": results, "mode": mode})
 
 
 @app.get("/api/item_detail/{item_id}")
@@ -919,8 +1007,15 @@ async def get_item_detail(item_id: str) -> JSONResponse:
         whisper_buy = build_whisper(ctx.best_buyer.user_name, item_id, ctx.best_buyer.platinum, 'buy') if ctx.best_buyer else None
         result["whisper_sell"] = whisper_sell
         result["whisper_buy"] = whisper_buy
-        if item_id.startswith("arcane_") and ctx.best_sell_price:
-            result["max_level_cost"] = ctx.best_sell_price * 21
+        # 赋能/Mod：额外显示 rank 0 零散价格
+        max_rank = get_max_rank_from_orders(orders)
+        is_ranked = max_rank is not None and (
+            item_id.startswith("arcane_") or item_id.startswith("mod_")
+        )
+        if is_ranked and max_rank > 0:
+            rank0_sellers = best_sellers(orders, limit=1, rank_filter=0)
+            result["rank0_sell_price"] = rank0_sellers[0].platinum if rank0_sellers else None
+            result["max_rank_sell_price"] = ctx.best_sell_price  # 已按 max_rank 过滤
 
         # 物品类型和等级信息
         type_info = get_item_type_info(item_id)
@@ -979,7 +1074,7 @@ async def get_item_detail(item_id: str) -> JSONResponse:
 
 @app.get("/api/report")
 async def get_report() -> JSONResponse:
-    memory = AgentMemory.load(MEMORY_PATH)
+    memory = await _load_memory_async()
     report_lines = []
     report_lines.append(f"# Warframe 每日价格报告")
     report_lines.append(f"关注物品: {len(memory.favorite_items)} 个")
@@ -1012,7 +1107,8 @@ async def get_ducats(item_id: str) -> JSONResponse:
     # 获取当前市场价格
     try:
         orders = await fetch_orders_async(item_id)
-        sellers = best_sellers(orders, limit=1)
+        rank_filter = get_max_rank_from_orders(orders)
+        sellers = best_sellers(orders, limit=1, rank_filter=rank_filter)
         sell_price = sellers[0].platinum if sellers else None
     except Exception:
         sell_price = None
@@ -1038,15 +1134,16 @@ async def get_ducats(item_id: str) -> JSONResponse:
 
 
 @app.post("/api/ducats/batch")
-async def get_ducats_batch(item_ids: list[str]) -> JSONResponse:
+async def get_ducats_batch(request: ItemListRequest) -> JSONResponse:
     """批量获取物品的杜卡特价值"""
     results = []
-    for item_id in item_ids[:10]:  # 限制最多10个
+    for item_id in request.items[:10]:  # 限制最多10个
         ducat_value = get_ducat_value(item_id)
         if ducat_value is not None:
             try:
                 orders = await fetch_orders_async(item_id)
-                sellers = best_sellers(orders, limit=1)
+                rank_filter = get_max_rank_from_orders(orders)
+                sellers = best_sellers(orders, limit=1, rank_filter=rank_filter)
                 sell_price = sellers[0].platinum if sellers else None
             except Exception:
                 sell_price = None
@@ -1153,104 +1250,6 @@ async def get_trades_by_item(item_id: str, limit: int = 10) -> JSONResponse:
 
 # ===== 套利检测 API =====
 
-@app.get("/api/arbitrage")
-async def get_arbitrage_opportunities(min_profit: int = 3) -> JSONResponse:
-    """检测套利机会（低买高卖）"""
-    memory = AgentMemory.load(MEMORY_PATH)
-    opportunities = []
-
-    # 检查所有收藏物品的套利机会
-    for item_id in memory.favorite_items:
-        try:
-            orders = await fetch_orders_async(item_id)
-            sellers = best_sellers(orders, limit=3)
-            buyers = best_buyers(orders, limit=3)
-
-            if not sellers or not buyers:
-                continue
-
-            lowest_sell = sellers[0].platinum
-            highest_buy = buyers[0].platinum
-
-            # 计算潜在利润
-            potential_profit = lowest_sell - highest_buy
-
-            if potential_profit >= min_profit:
-                # 计算杜卡特效率
-                ducat_value = get_ducat_value(item_id)
-                ducat_efficiency = None
-                if ducat_value and lowest_sell:
-                    ducat_efficiency = calculate_ducat_efficiency(lowest_sell, ducat_value)
-
-                opportunities.append({
-                    "item_id": item_id,
-                    "display": display_item_name(item_id),
-                    "buy_price": highest_buy,
-                    "sell_price": lowest_sell,
-                    "profit": potential_profit,
-                    "profit_margin": round((potential_profit / highest_buy) * 100, 1) if highest_buy > 0 else 0,
-                    "buyer": buyers[0].user_name,
-                    "seller": sellers[0].user_name,
-                    "ducat_value": ducat_value,
-                    "ducat_efficiency": ducat_efficiency,
-                })
-        except Exception:
-            continue
-
-    # 按利润排序
-    opportunities.sort(key=lambda x: x["profit"], reverse=True)
-
-    return JSONResponse({
-        "opportunities": opportunities,
-        "total": len(opportunities),
-        "min_profit_filter": min_profit,
-    })
-
-
-@app.get("/api/arbitrage/scan")
-async def scan_arbitrage_from_watchlist() -> JSONResponse:
-    """从 watchlist 扫描套利机会"""
-    try:
-        from pathlib import Path
-        watchlist_path = config.DATA_DIR / "watchlist.json"
-        if not watchlist_path.exists():
-            return JSONResponse({"opportunities": [], "message": "watchlist 不存在"})
-
-        with watchlist_path.open("r", encoding="utf-8") as f:
-            watchlist = json.load(f)
-
-        opportunities = []
-        for item_id in list(watchlist.keys())[:20]:  # 限制扫描数量
-            try:
-                orders = await fetch_orders_async(item_id)
-                sellers = best_sellers(orders, limit=1)
-                buyers = best_buyers(orders, limit=1)
-
-                if not sellers or not buyers:
-                    continue
-
-                lowest_sell = sellers[0].platinum
-                highest_buy = buyers[0].platinum
-                potential_profit = lowest_sell - highest_buy
-
-                if potential_profit >= 2:  # watchlist 使用更低的阈值
-                    opportunities.append({
-                        "item_id": item_id,
-                        "display": display_item_name(item_id),
-                        "buy_price": highest_buy,
-                        "sell_price": lowest_sell,
-                        "profit": potential_profit,
-                        "buyer": buyers[0].user_name,
-                        "seller": sellers[0].user_name,
-                    })
-            except Exception:
-                continue
-
-        opportunities.sort(key=lambda x: x["profit"], reverse=True)
-        return JSONResponse({"opportunities": opportunities})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
 
 # ===== 利润计算器 API =====
 
@@ -1259,14 +1258,28 @@ class ProfitCalcRequest(BaseModel):
     material_costs: list[dict]  # [{"item_id": str, "quantity": int, "unit_cost": int}]
 
 
+class ItemListRequest(BaseModel):
+    items: list[str]
+
+
+class AliasRequest(BaseModel):
+    name: str
+    item_id: str
+
+
+class AliasDeleteRequest(BaseModel):
+    name: str
+
+
 @app.post("/api/profit/calculate")
 async def calculate_profit(request: ProfitCalcRequest) -> JSONResponse:
     """计算制成品利润"""
     try:
         # 获取成品当前市场价格
         orders = await fetch_orders_async(request.item_id)
-        sellers = best_sellers(orders, limit=1)
-        buyers = best_buyers(orders, limit=1)
+        rank_filter = get_max_rank_from_orders(orders)
+        sellers = best_sellers(orders, limit=1, rank_filter=rank_filter)
+        buyers = best_buyers(orders, limit=1, rank_filter=rank_filter)
 
         sell_price = sellers[0].platinum if sellers else None
         buy_price = buyers[0].platinum if buyers else None
@@ -1342,14 +1355,15 @@ async def suggest_items(q: str = "") -> JSONResponse:
 
 
 @app.post("/api/compare")
-async def compare_items(items: list[str]) -> JSONResponse:
+async def compare_items(request: ItemListRequest) -> JSONResponse:
     results = []
-    for item_name in items[:3]:
+    for item_name in request.items[:3]:
         try:
             result = chat_agent.resolver.resolve(item_name)
             orders = await fetch_orders_async(result.item_id)
-            sellers = best_sellers(orders, limit=1)
-            buyers = best_buyers(orders, limit=1)
+            rank_filter = get_max_rank_from_orders(orders)
+            sellers = best_sellers(orders, limit=1, rank_filter=rank_filter)
+            buyers = best_buyers(orders, limit=1, rank_filter=rank_filter)
 
             item_result = {
                 "name": display_item_name(result.item_id),
@@ -1372,15 +1386,16 @@ async def compare_items(items: list[str]) -> JSONResponse:
 
 
 @app.post("/api/batch_query")
-async def batch_query_items(items: list[str]) -> JSONResponse:
+async def batch_query_items(request: ItemListRequest) -> JSONResponse:
     """批量查询物品价格（支持更多物品）"""
     results = []
-    for item_name in items[:10]:  # 最多支持10个物品
+    for item_name in request.items[:10]:  # 最多支持10个物品
         try:
             result = chat_agent.resolver.resolve(item_name)
             orders = await fetch_orders_async(result.item_id)
-            sellers = best_sellers(orders, limit=1)
-            buyers = best_buyers(orders, limit=1)
+            rank_filter = get_max_rank_from_orders(orders)
+            sellers = best_sellers(orders, limit=1, rank_filter=rank_filter)
+            buyers = best_buyers(orders, limit=1, rank_filter=rank_filter)
 
             item_result = {
                 "name": display_item_name(result.item_id),
@@ -1424,7 +1439,7 @@ async def batch_query_items(items: list[str]) -> JSONResponse:
 
 @app.get("/api/aliases")
 async def get_aliases() -> JSONResponse:
-    aliases = load_custom_aliases()
+    aliases = await asyncio.to_thread(load_custom_aliases)
     return JSONResponse({"aliases": [
         {"name": k, "item_id": v, "display": display_item_name(v)}
         for k, v in aliases.items()
@@ -1432,27 +1447,27 @@ async def get_aliases() -> JSONResponse:
 
 
 @app.post("/api/aliases")
-async def add_alias(request: dict) -> JSONResponse:
-    name = request.get("name", "").strip()
-    item_id = request.get("item_id", "").strip()
+async def add_alias(request: AliasRequest) -> JSONResponse:
+    name = request.name.strip()
+    item_id = request.item_id.strip()
     if not name or not item_id:
         return JSONResponse({"error": "名称和物品ID不能为空"}, status_code=400)
-    aliases = load_custom_aliases()
+    aliases = await asyncio.to_thread(load_custom_aliases)
     aliases[name] = item_id
-    save_custom_aliases(aliases)
+    await asyncio.to_thread(save_custom_aliases, aliases)
     inject_custom_aliases()
     return JSONResponse({"status": "ok", "name": name, "item_id": item_id})
 
 
 @app.delete("/api/aliases")
-async def remove_alias(request: dict) -> JSONResponse:
-    name = request.get("name", "").strip()
+async def remove_alias(request: AliasDeleteRequest) -> JSONResponse:
+    name = request.name.strip()
     if not name:
         return JSONResponse({"error": "名称不能为空"}, status_code=400)
-    aliases = load_custom_aliases()
+    aliases = await asyncio.to_thread(load_custom_aliases)
     if name in aliases:
         del aliases[name]
-        save_custom_aliases(aliases)
+        await asyncio.to_thread(save_custom_aliases, aliases)
         inject_custom_aliases()
     return JSONResponse({"status": "ok"})
 
@@ -1576,7 +1591,48 @@ async def broadcast_alert(notification: AlertNotification):
         "price": notification.alert.price,
         "current_price": notification.current_price,
     }
-    for ws in ws_connections:
+    for ws in list(ws_connections):
+        try:
+            await ws.send_json(message)
+        except Exception:
+            pass
+
+
+async def broadcast_watch(notification: WatchNotification):
+    price_info = ""
+    if notification.sell_price is not None:
+        price_info = f"卖价 {notification.sell_price}p"
+    if notification.buy_price is not None:
+        price_info += f" 买价 {notification.buy_price}p" if price_info else f"买价 {notification.buy_price}p"
+
+    message = {
+        "type": "watch",
+        "item_id": notification.item_id,
+        "item_name": notification.item_name,
+        "sell_price": notification.sell_price,
+        "buy_price": notification.buy_price,
+        "price_info": price_info.strip(),
+        "content": notification.content,
+        "frequency": notification.frequency,
+    }
+    for ws in list(ws_connections):
+        try:
+            await ws.send_json(message)
+        except Exception:
+            pass
+
+
+async def broadcast_enriched(notification: EnrichedNotification):
+    message = {
+        "type": "enriched_analysis",
+        "item_id": notification.item_id,
+        "item_display": notification.item_display,
+        "notification_type": notification.notification_type,
+        "analysis": notification.analysis,
+        "priority": notification.priority,
+        "raw_data": notification.raw_data,
+    }
+    for ws in list(ws_connections):
         try:
             await ws.send_json(message)
         except Exception:
@@ -1586,14 +1642,29 @@ async def broadcast_alert(notification: AlertNotification):
 def setup_monitor():
     def on_alert_callback(notification: AlertNotification):
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(broadcast_alert(notification), loop)
         except Exception:
             pass
 
+    def on_watch_callback(notification: WatchNotification):
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(broadcast_watch(notification), loop)
+        except Exception:
+            pass
+
+    def llm_analyzer(prompt: str) -> str:
+        from ..llm import chat_with_ollama
+        return chat_with_ollama([
+            {"role": "system", "content": "你是 Warframe 交易分析师，用简洁中文回答。"},
+            {"role": "user", "content": prompt},
+        ])
+
     global monitor
-    monitor = PriceMonitor(on_alert=on_alert_callback)
+    monitor = PriceMonitor(on_alert=on_alert_callback, on_watch=on_watch_callback, llm_analyzer=llm_analyzer)
     monitor.start()
 
 
@@ -1886,8 +1957,7 @@ async def relic_search(q: str = ""):
     if not RELIC_DROP_DATA_PATH.exists():
         return {"results": [], "total": 0, "error": "遗物数据不可用"}
 
-    with open(RELIC_DROP_DATA_PATH, "r", encoding="utf-8") as f:
-        relic_data = json.load(f)
+    relic_data = _preload_relic_drop_data()
 
     q_lower = q.lower()
     results = []
@@ -1922,12 +1992,9 @@ async def relic_search(q: str = ""):
 @app.get("/api/relic/sources/{relic_name}")
 async def get_relic_sources(relic_name: str):
     """获取遗物的掉落来源（哪些任务掉落）"""
-    sources_path = config.DATA_DIR / "relic_sources.json"
-    if not sources_path.exists():
+    all_sources = _load_relic_sources()
+    if not all_sources:
         return JSONResponse({"sources": [], "error": "来源数据不可用"})
-
-    with open(sources_path, "r", encoding="utf-8") as f:
-        all_sources = json.load(f)
 
     sources = all_sources.get(relic_name, [])
     return JSONResponse({
@@ -1946,8 +2013,11 @@ async def get_relic_drops(tier: str, relic_name: str):
     # 优先使用详细数据（来自 warframe-drop-data）
     detailed_path = config.DATA_DIR / "relics_detailed" / tier_upper / f"{relic_name_upper}.json"
     if detailed_path.exists():
-        with open(detailed_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        def _read_detailed():
+            with open(detailed_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+
+        data = await asyncio.to_thread(_read_detailed)
 
         vault_status = _get_vault_status(f"{tier_upper} {relic_name}")
 
@@ -1975,11 +2045,9 @@ async def get_relic_drops(tier: str, relic_name: str):
         })
 
     # 回退到旧数据
-    if not RELIC_DROP_DATA_PATH.exists():
+    relic_data = _preload_relic_drop_data()
+    if not relic_data:
         return JSONResponse({"error": "遗物数据不可用"}, status_code=404)
-
-    with open(RELIC_DROP_DATA_PATH, "r", encoding="utf-8") as f:
-        relic_data = json.load(f)
 
     results = []
     for relic in relic_data.get("relics", []):

@@ -19,6 +19,9 @@
     <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 
+    <!-- CountUp.js — 价格数字动画 -->
+    <script src="https://cdn.jsdelivr.net/npm/countup.js@2.10.0/dist/countUp.umd.js"></script>
+
     <!-- Markdown 渲染 + XSS 防护 -->
     <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
@@ -26,7 +29,7 @@
     <!-- Favicon -->
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
 </head>
-<body>
+<body class="scanlines">
     <!-- 全局错误捕获 -->
     <script>
     window.onerror = function(msg, url, line, col, error) {
@@ -40,6 +43,15 @@
 
     <!-- 粒子背景 -->
     <canvas id="particle-bg"></canvas>
+
+    <!-- Mesh gradient background (Stripe-style) -->
+    <div class="mesh-gradient-bg" aria-hidden="true">
+        <div class="mesh-blob mesh-blob-gold"></div>
+        <div class="mesh-blob mesh-blob-blue"></div>
+    </div>
+
+    <!-- Noise texture overlay -->
+    <div class="noise-overlay" aria-hidden="true"></div>
 
     <div class="container">
         <!-- 左侧边栏 - 收藏和提醒 -->

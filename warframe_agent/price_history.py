@@ -131,3 +131,31 @@ class PriceHistoryDB:
             "current": current,
             "average": round(avg, 1),
         }
+
+    def predict_trend(self, item_id: str) -> dict | None:
+        """简单线性回归预测价格趋势。返回 {direction, slope, predicted_next, data_points, current}"""
+        snapshots = self.recent(item_id, limit=10)
+        if len(snapshots) < 3:
+            return None
+        prices = [(i, s.sell_price) for i, s in enumerate(reversed(snapshots)) if s.sell_price is not None]
+        if len(prices) < 3:
+            return None
+        n = len(prices)
+        sum_x = sum(p[0] for p in prices)
+        sum_y = sum(p[1] for p in prices)
+        sum_xy = sum(p[0] * p[1] for p in prices)
+        sum_x2 = sum(p[0] ** 2 for p in prices)
+        denominator = n * sum_x2 - sum_x ** 2
+        if denominator == 0:
+            return None
+        slope = (n * sum_xy - sum_x * sum_y) / denominator
+        intercept = (sum_y - slope * sum_x) / n
+        predicted_next = slope * n + intercept
+        direction = "rising" if slope > 0.5 else "falling" if slope < -0.5 else "stable"
+        return {
+            "direction": direction,
+            "slope": round(slope, 2),
+            "predicted_next": round(predicted_next, 0),
+            "data_points": n,
+            "current": prices[-1][1],
+        }

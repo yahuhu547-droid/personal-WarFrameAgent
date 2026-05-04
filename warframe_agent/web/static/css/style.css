@@ -146,16 +146,47 @@ body {
   border-radius: var(--radius-md);
   border: var(--glass-border-light);
   position: relative;
-  transition: all var(--duration-normal) var(--ease-out);
+  transition: all var(--duration-fast) var(--ease-spring);
   cursor: pointer;
   overflow: hidden;
 }
 
-.list-item:hover {
-  border-color: rgba(212, 167, 55, 0.2);
-  transform: translateX(4px);
-  box-shadow: var(--shadow-deep-sm);
+/* 顶部发光线（Vercel 风格） */
+.list-item::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 1px;
+  width: 0;
+  background: linear-gradient(90deg, transparent, var(--gold-primary), transparent);
+  transition: width var(--duration-normal) var(--ease-spring);
+  opacity: 0;
 }
+
+.list-item:hover::before {
+  width: 100%;
+  opacity: 0.6;
+}
+
+.list-item:hover {
+  border-color: rgba(212, 167, 55, 0.15);
+  transform: translateX(4px);
+  box-shadow: var(--shadow-deep-sm), 0 0 20px rgba(212, 167, 55, 0.05);
+  background: var(--bg-overlay);
+}
+
+/* 交错入场动画 */
+.list-item:nth-child(1) { animation-delay: 0ms; }
+.list-item:nth-child(2) { animation-delay: 40ms; }
+.list-item:nth-child(3) { animation-delay: 80ms; }
+.list-item:nth-child(4) { animation-delay: 120ms; }
+.list-item:nth-child(5) { animation-delay: 160ms; }
+.list-item:nth-child(6) { animation-delay: 200ms; }
+.list-item:nth-child(7) { animation-delay: 240ms; }
+.list-item:nth-child(8) { animation-delay: 280ms; }
+.list-item:nth-child(9) { animation-delay: 320ms; }
+.list-item:nth-child(10) { animation-delay: 360ms; }
 
 /* ===== 主聊天区域 ===== */
 .chat-area {
@@ -200,7 +231,11 @@ body {
   font-weight: var(--font-bold);
   letter-spacing: var(--tracking-wider);
   text-transform: uppercase;
-  text-shadow: 0 0 30px var(--gold-glow);
+  text-shadow:
+    0 0 7px rgba(212, 167, 55, 0.6),
+    0 0 10px rgba(212, 167, 55, 0.4),
+    0 0 21px rgba(212, 167, 55, 0.2),
+    0 0 30px var(--gold-glow);
 }
 
 /* ===== 消息区域 ===== */
@@ -211,6 +246,23 @@ body {
   display: flex;
   flex-direction: column;
   gap: var(--space-lg);
+  position: relative;
+}
+
+/* 聊天区网格渐变背景（Stripe 风格） */
+.chat-messages::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: var(--sidebar-width);
+  right: 0;
+  bottom: 0;
+  background:
+    radial-gradient(ellipse at 20% 80%, rgba(212, 167, 55, 0.03) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 20%, rgba(74, 158, 255, 0.03) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 50%, rgba(212, 167, 55, 0.015) 0%, transparent 60%);
+  pointer-events: none;
+  z-index: -1;
 }
 
 /* ===== 消息气泡 ===== */
@@ -224,23 +276,49 @@ body {
 
 /* 用户消息 */
 .message.user {
-  background: rgba(74, 158, 255, 0.1);
+  background: rgba(74, 158, 255, 0.08);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  border: 1px solid rgba(74, 158, 255, 0.15);
+  border: 1px solid rgba(74, 158, 255, 0.12);
   margin-left: auto;
   text-align: right;
-  animation: messageInUser var(--duration-normal) var(--ease-out);
+  animation: messageInUser var(--duration-normal) var(--ease-spring);
+  position: relative;
+  overflow: hidden;
+}
+
+/* 用户消息顶部能量线 */
+.message.user::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(74, 158, 255, 0.3), transparent);
 }
 
 /* Agent 消息 */
 .message.agent {
-  background: var(--glass-bg-light);
+  background: var(--bg-overlay);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  border: var(--glass-border-light);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   margin-right: auto;
-  animation: messageInAgent var(--duration-normal) var(--ease-out);
+  animation: messageInAgent var(--duration-normal) var(--ease-spring);
+  position: relative;
+  overflow: hidden;
+}
+
+/* Agent 消息顶部能量线 */
+.message.agent::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(212, 167, 55, 0.2), transparent);
 }
 
 /* 系统消息 */
@@ -285,14 +363,19 @@ body {
   transition: all var(--duration-normal) var(--ease-out);
 }
 
-#chat-input::placeholder {
-  color: var(--text-tertiary);
-}
-
 #chat-input:focus {
   outline: none;
-  border-color: rgba(212, 167, 55, 0.3);
-  box-shadow: 0 0 0 3px rgba(212, 167, 55, 0.1);
+  border-color: rgba(212, 167, 55, 0.4);
+  box-shadow:
+    0 0 0 3px rgba(212, 167, 55, 0.08),
+    0 0 20px rgba(212, 167, 55, 0.05);
+  transition: all var(--duration-fast) var(--ease-spring);
+}
+
+#chat-input::placeholder {
+  color: var(--text-tertiary);
+  font-style: italic;
+  letter-spacing: var(--tracking-wide);
 }
 
 /* ===== 发送按钮 ===== */
@@ -313,6 +396,7 @@ body {
   position: relative;
   overflow: hidden;
   box-shadow: var(--shadow-gold-sm);
+  animation: energyPulse 3s ease-in-out infinite;
 }
 
 #send-btn::before {
@@ -428,6 +512,18 @@ body {
   position: relative;
 }
 
+.detail-panel::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 2px;
+  height: 100%;
+  background: linear-gradient(180deg, var(--gold-primary), var(--blue-primary), transparent);
+  opacity: 0.6;
+  z-index: 10;
+}
+
 .detail-panel.active {
   display: flex;
   animation: fadeInRight var(--duration-normal) var(--ease-out);
@@ -522,6 +618,7 @@ body {
   background: var(--gold-primary);
   border-radius: var(--radius-full);
   animation: loadingDots 1.4s infinite ease-in-out both;
+  box-shadow: 0 0 6px var(--gold-glow);
 }
 
 .loading-dot:nth-child(1) { animation-delay: -0.32s; }
@@ -562,6 +659,30 @@ body {
   box-shadow: var(--shadow-deep-lg);
   position: relative;
   animation: modalIn var(--duration-slow) var(--ease-out);
+}
+
+/* 模态框角落括号装饰 */
+.modal-content::before,
+.modal-content::after {
+  content: '';
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+}
+.modal-content::before {
+  top: 8px;
+  left: 8px;
+  border-top: 2px solid var(--gold-primary);
+  border-left: 2px solid var(--gold-primary);
+  opacity: 0.6;
+}
+.modal-content::after {
+  bottom: 8px;
+  right: 8px;
+  border-bottom: 2px solid var(--gold-primary);
+  border-right: 2px solid var(--gold-primary);
+  opacity: 0.6;
 }
 
 .modal-content h2 {
@@ -607,6 +728,7 @@ body {
   border-color: rgba(74, 158, 255, 0.3);
   color: var(--blue-light);
   transform: translateY(-2px);
+  box-shadow: var(--glow-blue-ring);
 }
 
 .platform-btn.selected {
@@ -773,6 +895,89 @@ body {
   opacity: 1;
 }
 
+/* ===== Mesh 渐变背景（Stripe 风格） ===== */
+.mesh-gradient-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.mesh-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.4;
+}
+
+.mesh-blob-gold {
+  width: 600px;
+  height: 600px;
+  background: radial-gradient(circle, rgba(212, 167, 55, 0.15) 0%, transparent 70%);
+  top: -10%;
+  right: -5%;
+  animation: meshDrift1 20s ease-in-out infinite;
+}
+
+.mesh-blob-blue {
+  width: 500px;
+  height: 500px;
+  background: radial-gradient(circle, rgba(74, 158, 255, 0.12) 0%, transparent 70%);
+  bottom: -10%;
+  left: -5%;
+  animation: meshDrift2 25s ease-in-out infinite;
+}
+
+/* ===== 噪点纹理叠加 ===== */
+.noise-overlay {
+  position: fixed;
+  inset: -50%;
+  width: 200%;
+  height: 200%;
+  z-index: -1;
+  pointer-events: none;
+  opacity: var(--noise-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 256px 256px;
+  animation: noiseShift 8s steps(10) infinite;
+}
+
+/* ===== 骨架屏加载 ===== */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.03) 25%,
+    rgba(255, 255, 255, 0.08) 50%,
+    rgba(255, 255, 255, 0.03) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: var(--radius-sm);
+}
+
+.skeleton-text {
+  height: 14px;
+  margin-bottom: 8px;
+  width: 80%;
+}
+
+.skeleton-title {
+  height: 20px;
+  margin-bottom: 12px;
+  width: 60%;
+}
+
+.skeleton-price {
+  height: 28px;
+  width: 120px;
+}
+
+.skeleton-chart {
+  height: 160px;
+  width: 100%;
+}
+
 /* ===== 响应式设计 ===== */
 @media (max-width: 1024px) {
   :root {
@@ -846,6 +1051,31 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  padding: var(--space-md) var(--space-lg);
+  margin-top: var(--space-md);
+  border-bottom: 1px solid rgba(212, 167, 55, 0.1);
+  background: linear-gradient(
+    135deg,
+    rgba(212, 167, 55, 0.04) 0%,
+    rgba(74, 158, 255, 0.04) 50%,
+    rgba(212, 167, 55, 0.04) 100%
+  );
+  background-size: 200% 200%;
+  animation: gradientFlow 6s ease infinite;
+  position: relative;
+}
+
+.sidebar-header::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 1px;
+  background: linear-gradient(90deg, var(--gold-primary), var(--blue-primary), var(--gold-primary));
+  background-size: 200% 100%;
+  animation: gradientFlow 4s ease infinite;
+  opacity: 0.5;
 }
 
 .sidebar-header-actions {
@@ -921,6 +1151,7 @@ body {
 .sidebar-btn:hover {
   background: rgba(74, 158, 255, 0.12);
   border-color: rgba(74, 158, 255, 0.2);
+  box-shadow: var(--glow-blue-ring);
 }
 
 .status-indicator {
@@ -1568,6 +1799,48 @@ body {
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-sm);
+}
+
+/* ===== 赋能满级购买方案 ===== */
+.buy-plan-card {
+  background: rgba(30, 41, 59, 0.7);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: var(--radius-lg);
+  padding: var(--space-md);
+  margin-top: var(--space-sm);
+}
+.buy-plan-title {
+  font-weight: var(--font-semibold);
+  color: var(--text-primary);
+  margin-bottom: var(--space-xs);
+  font-size: var(--text-sm);
+}
+.buy-plan-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: var(--space-xs);
+}
+.buy-plan-entry {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  padding: 2px 0;
+}
+.bp-seller { color: var(--text-primary); }
+.bp-price { color: var(--gold-primary); font-variant-numeric: tabular-nums; }
+.buy-plan-total {
+  font-weight: var(--font-bold);
+  color: var(--gold-primary);
+  font-size: var(--text-sm);
+  border-top: 1px solid rgba(99, 102, 241, 0.15);
+  padding-top: var(--space-xs);
+}
+.buy-plan-warn {
+  color: #f59e0b;
+  font-size: var(--text-xs);
+  margin-top: var(--space-xs);
 }
 
 /* ===== 徽章系统 (借鉴 WarStonks) ===== */

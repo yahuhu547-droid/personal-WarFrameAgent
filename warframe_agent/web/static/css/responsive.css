@@ -19,8 +19,13 @@
     --space-3xl: 24px;
   }
 
-  /* 移动端禁用粒子背景 */
+  /* 移动端禁用粒子背景和网格渐变 */
   #particle-bg {
+    display: none;
+  }
+
+  .mesh-gradient-bg,
+  .noise-overlay {
     display: none;
   }
 
@@ -452,6 +457,28 @@
 
   .suggestions.active {
     animation: none !important;
+  }
+
+  /* 禁用新添加的动态效果 */
+  .mesh-gradient-bg,
+  .noise-overlay {
+    display: none !important;
+  }
+
+  #send-btn {
+    animation: none !important;
+  }
+
+  .item-detail-card::before,
+  .whisper-command::before,
+  .sidebar-header::after,
+  .detail-panel::before {
+    animation: none !important;
+  }
+
+  .sidebar-header {
+    animation: none !important;
+    background-size: 100% 100% !important;
   }
 }
 

@@ -227,6 +227,18 @@ class AgentMemory:
             ),
         )
 
+    def set_preference(self, key: str, value: str) -> "AgentMemory":
+        if key == "platform":
+            return self.with_updated_preferences(platform=value)
+        if key == "crossplay":
+            return self.with_updated_preferences(crossplay=value.lower() in ("true", "1", "yes"))
+        if key == "max_results":
+            try:
+                return self.with_updated_preferences(max_results=int(value))
+            except ValueError:
+                return self
+        return self
+
     def with_favorite_item(self, item_id: str) -> "AgentMemory":
         if item_id in self.favorite_items:
             return self

@@ -107,8 +107,12 @@ async function getItemDetail(itemId) {
 }
 
 async function getHistoryWithRange(itemId, range) {
-    const res = await fetch(`/api/history/${itemId}?range=${range}`);
-    return await res.json();
+    try {
+        const res = await fetch(`/api/history/${itemId}?range=${range}`);
+        return await res.json();
+    } catch (e) {
+        return { snapshots: [] };
+    }
 }
 
 // ===== 物品详情卡片 =====
@@ -233,8 +237,14 @@ function renderItemDetailCard(data) {
         card += renderDucatInfo(data);
     }
 
-    if (data.max_level_cost) {
-        card += `<div class="item-detail-extra">满级估算: ${data.max_rank + 1 || 21} 个约 ${data.max_level_cost}p</div>`;
+    if (data.rank0_sell_price !== undefined && data.rank0_sell_price !== null) {
+        card += `<div class="item-detail-extra buy-plan-card">`;
+        card += `<div class="buy-plan-title">赋能/Mod 价格对比</div>`;
+        card += `<div class="buy-plan-entries">`;
+        card += `<div class="buy-plan-entry"><span class="bp-seller">零散（rank 0）</span> <span class="bp-price">${data.rank0_sell_price}p</span></div>`;
+        card += `<div class="buy-plan-entry"><span class="bp-seller">满级（rank ${data.max_rank}）</span> <span class="bp-price">${data.max_rank_sell_price || '-'}p</span></div>`;
+        card += `</div>`;
+        card += `</div>`;
     }
 
     card += `
@@ -436,39 +446,6 @@ function renderChartStats(snapshots) {
 
 // ===== 关闭面板（handler moved to app.js） =====
 
-// ===== 每日报告 =====
-
-document.getElementById('report-btn')?.addEventListener('click', async () => {
-    console.log('[Report] button clicked');
-    try {
-        toggleMoreMenu();
-        const content = openDetailPanel('加载每日报告...');
-        if (!content) {
-            console.error('[Report] openDetailPanel returned null');
-            return;
-        }
-
-        const res = await fetch('/api/report');
-        const data = await res.json();
-        content.innerHTML = `
-            <div class="report-container">
-                <h3 class="report-title">每日价格报告</h3>
-                <pre class="report-text">${escapeHtml(data.report)}</pre>
-                <button class="detail-action-btn" id="copy-report-btn">
-                    复制报告
-                </button>
-            </div>
-        `;
-        document.getElementById('copy-report-btn')?.addEventListener('click', () => {
-            copyToClipboard(data.report);
-        });
-    } catch (err) {
-        console.error('[Report] error:', err);
-        const content = document.getElementById('detail-content');
-        if (content) content.innerHTML = createChartError('加载报告失败: ' + err.message);
-    }
-});
-
 // ===== 样式注入 =====
 
 const chartStyles = document.createElement('style');
@@ -480,6 +457,21 @@ chartStyles.textContent = `
         padding: 16px;
         margin-bottom: 16px;
         animation: fadeInUp 0.4s ease-out;
+        position: relative;
+        overflow: hidden;
+    }
+
+    .item-detail-card::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 2px;
+        background: linear-gradient(90deg, var(--gold-primary), var(--blue-primary), var(--gold-primary));
+        background-size: 200% 100%;
+        animation: gradientFlow 4s ease infinite;
+        opacity: 0.7;
     }
 
     .item-detail-header {
@@ -524,11 +516,11 @@ chartStyles.textContent = `
         color: var(--text-primary);
     }
 
-    .price-block.sell .price-value { color: var(--red-error); }
-    .price-block.buy .price-value { color: var(--green-success); }
-    .price-block.spread .price-value { color: var(--gold-primary); }
-    .price-block.spread.positive .price-value { color: var(--green-success); }
-    .price-block.spread.negative .price-value { color: var(--red-error); }
+    .price-block.sell .price-value { color: var(--red-error); text-shadow: 0 0 8px rgba(239, 68, 68, 0.4); }
+    .price-block.buy .price-value { color: var(--green-success); text-shadow: 0 0 8px rgba(74, 222, 128, 0.4); }
+    .price-block.spread .price-value { color: var(--gold-primary); text-shadow: 0 0 8px rgba(212, 167, 55, 0.4); }
+    .price-block.spread.positive .price-value { color: var(--green-success); text-shadow: 0 0 8px rgba(74, 222, 128, 0.4); }
+    .price-block.spread.negative .price-value { color: var(--red-error); text-shadow: 0 0 8px rgba(239, 68, 68, 0.4); }
 
     .price-player {
         font-size: 10px;
@@ -567,6 +559,7 @@ chartStyles.textContent = `
     .detail-action-btn:hover {
         background: rgba(74, 158, 255, 0.2);
         transform: translateY(-1px);
+        box-shadow: var(--glow-blue-ring);
     }
 
     .detail-action-btn.share-btn {
@@ -609,6 +602,7 @@ chartStyles.textContent = `
         background: rgba(212, 167, 55, 0.15);
         border-color: var(--gold-primary);
         color: var(--gold-primary);
+        box-shadow: var(--glow-gold-ring);
     }
 
     .chart-header { margin-bottom: 16px; }
@@ -1111,7 +1105,7 @@ const COMPARE_COLORS = [
 ];
 
 let compareChart = null;
-let compareItems = ['', ''];
+var compareItems = ['', ''];
 let compareRange = '7d';
 
 function showComparePanel() {
@@ -1218,7 +1212,7 @@ async function showCompareSuggestions(input, index) {
         }
 
         sugDiv.innerHTML = data.suggestions.map(s =>
-            `<div class="suggestion-item" onclick="selectCompareItem(${index}, '${s}')">${s}</div>`
+            `<div class="suggestion-item" onclick="selectCompareItem(${index}, ${JSON.stringify(s)})">${s}</div>`
         ).join('');
         sugDiv.style.display = 'block';
         sugDiv.style.cssText = 'display:block; position:absolute; background:var(--glass-bg); border:var(--glass-border); border-radius:8px; max-height:150px; overflow-y:auto; z-index:10; width:100%;';
@@ -1374,9 +1368,6 @@ function renderCompareChart(data) {
         ).join('');
     }
 }
-
-// 绑定对比按钮
-document.getElementById('compare-btn')?.addEventListener('click', showComparePanel);
 
 // ===== 社交分享 - 生成价格卡片图片 =====
 

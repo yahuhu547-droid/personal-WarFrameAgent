@@ -1,4 +1,6 @@
-﻿import unittest
+﻿import tempfile
+import unittest
+from pathlib import Path
 
 from warframe_agent.chat import ChatAgent
 from warframe_agent.dictionary import ResolveResult
@@ -53,12 +55,17 @@ class ChatMemoryIntegrationTests(unittest.TestCase):
             common_questions=[],
             watchlist=[],
         )
+        # 使用临时文件存储测试记忆，避免污染真实数据
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+            tmp_path = Path(f.name)
+        memory.save(tmp_path)
         prompts = []
         agent = ChatAgent(
             resolver=AlertResolver(),
             order_fetcher=lambda item_id: ORDERS,
             model_call=lambda prompt: prompts.append(prompt) or "触发提醒：充沛低于45。",
             memory=memory,
+            memory_path=tmp_path,
         )
 
         answer = agent.answer("充沛现在价格怎么样")

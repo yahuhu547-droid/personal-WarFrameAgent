@@ -57,16 +57,11 @@ async function removeAlertApi(itemId, direction, price) {
     return await res.json();
 }
 
-async function getHistory(itemId) {
-    const res = await fetch(`${API_BASE}/api/history/${itemId}`);
-    return await res.json();
-}
-
 async function compareItems(items) {
     const res = await fetch(`${API_BASE}/api/compare`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(items)
+        body: JSON.stringify({ items })
     });
     return await res.json();
 }
@@ -123,10 +118,22 @@ function initTheme() {
 function toggleTheme() {
     const current = document.documentElement.getAttribute('data-theme') || 'dark';
     const next = current === 'dark' ? 'light' : 'dark';
+
+    // 添加主题切换过渡类
+    document.documentElement.classList.add('theme-transitioning');
+    const btn = document.getElementById('theme-toggle');
+    if (btn) btn.classList.add('theme-rotating');
+
     document.documentElement.setAttribute('data-theme', next);
     localStorage.setItem('warframe_theme', next);
     updateThemeIcon(next);
     showToast(`已切换为${next === 'dark' ? '暗色' : '亮色'}主题`, 'info');
+
+    // 移除过渡类
+    setTimeout(() => {
+        document.documentElement.classList.remove('theme-transitioning');
+        if (btn) btn.classList.remove('theme-rotating');
+    }, 500);
 }
 
 function updateThemeIcon(theme) {
@@ -168,6 +175,21 @@ function setupWebSocket() {
                 const msg = `${data.item}: 当前 ${data.current_price}p (${data.direction} ${data.price}p)`;
                 showNotification(msg, 'warning');
                 addChatMessage('system', msg);
+                loadSidebar();
+            } else if (data.type === 'watch') {
+                const freq = {'hourly': '每小时', 'daily': '每日', 'weekly': '每周'}[data.frequency] || data.frequency;
+                const msg = `⏰ ${freq}关注推送: ${data.item_name} — ${data.price_info || '暂无价格'}`;
+                showNotification(msg, 'info');
+                addChatMessage('system', msg);
+                // 自动查询该物品价格
+                queryItemPrice(data.item_id);
+            } else if (data.type === 'enriched_analysis') {
+                const typeMap = {'anomaly': '价格异常', 'opportunity': '套利机会', 'trend': '趋势分析'};
+                const priorityIcon = data.priority === 1 ? '🔴' : data.priority === 2 ? '🟡' : '🔵';
+                const label = typeMap[data.notification_type] || data.notification_type;
+                const msg = `${priorityIcon} ${label}: ${data.item_display}\n${data.analysis}`;
+                showNotification(msg, data.priority === 1 ? 'warning' : 'info');
+                addChatMessage('agent', msg);
                 loadSidebar();
             }
         };
@@ -321,6 +343,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initCommandPalette();
     initKeyboardShortcuts();
     initResizeHandles();
+    initMouseGradient();
 
     // 主题切换按钮
     document.getElementById('theme-toggle')?.addEventListener('click', toggleTheme);
@@ -603,6 +626,31 @@ function initResizeHandles() {
     }
 }
 
+// ===== 鼠标跟随渐变（Stripe 风格） =====
+
+function initMouseGradient() {
+    const blob = document.querySelector('.mesh-blob-gold');
+    if (!blob) return;
+
+    let mouseX = 0, mouseY = 0;
+    let currentX = 0, currentY = 0;
+    const speed = 0.05;
+
+    document.addEventListener('mousemove', (e) => {
+        mouseX = (e.clientX / window.innerWidth - 0.5) * 30;
+        mouseY = (e.clientY / window.innerHeight - 0.5) * 30;
+    });
+
+    function animate() {
+        currentX += (mouseX - currentX) * speed;
+        currentY += (mouseY - currentY) * speed;
+        blob.style.transform = `translate(${currentX}px, ${currentY}px)`;
+        requestAnimationFrame(animate);
+    }
+
+    animate();
+}
+
 // ===== 工具函数 =====
 
 function formatPrice(price) {
@@ -644,7 +692,7 @@ style.textContent = `
         letter-spacing: var(--tracking-wide);
         transform: translateX(100%);
         opacity: 0;
-        transition: all 0.3s ease-out;
+        transition: all 0.4s var(--ease-spring);
         max-width: 300px;
     }
 
@@ -1272,6 +1320,9 @@ function openDetailPanel(loadingText) {
     panel.style.display = '';  // Clear any inline display override
     panel.scrollTop = 0;
     panel.classList.add('active');
+    // 面板滑入动画
+    panel.classList.add('panel-enter');
+    setTimeout(() => panel.classList.remove('panel-enter'), 400);
     content.innerHTML = createChartLoading(loadingText || '加载中...');
     return content;
 }
@@ -1359,7 +1410,7 @@ function createChartError(message) {
 
 function toggleMoreMenu() {
     const menu = document.getElementById('more-menu');
-    menu.classList.toggle('active');
+    if (menu) menu.classList.toggle('active');
 }
 
 function closeMoreMenu() {

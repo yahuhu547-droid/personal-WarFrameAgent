@@ -20,12 +20,14 @@ SAMPLE_ORDERS = [
         "type": "sell",
         "platinum": 5,
         "quantity": 21,
+        "mod_rank": 5,
         "user": {"ingameName": "Seller", "status": "ingame", "reputation": 10},
     },
     {
         "type": "buy",
         "platinum": 3,
         "quantity": 10,
+        "mod_rank": 5,
         "user": {"ingameName": "Buyer", "status": "ingame", "reputation": 5},
     },
 ]
@@ -45,7 +47,7 @@ class ChatTests(unittest.TestCase):
         self.assertIn("最低卖价: 5p", context)
         self.assertIn("最高收价: 3p", context)
         self.assertIn("价差: 2p", context)
-        self.assertIn("满级估算: 21 个约 105p", context)
+        self.assertIn("满级价格（rank 5）: 5p", context)
         self.assertIn("/w Seller", context)
 
     def test_answer_uses_model_with_market_context(self):

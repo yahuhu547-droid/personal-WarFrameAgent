@@ -91,6 +91,33 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "plan",
+            "description": "将复杂请求分解为多个子任务并按顺序执行。用于对比多个物品、投资分析、多步骤查询。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string", "description": "用户目标简述"},
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tool": {"type": "string", "description": "子任务工具名"},
+                                "args": {"type": "object", "description": "工具参数"},
+                                "purpose": {"type": "string", "description": "步骤目的"},
+                            },
+                            "required": ["tool", "args"],
+                        },
+                        "description": "子任务列表",
+                    },
+                },
+                "required": ["goal", "steps"],
+            },
+        },
+    },
 ]
 
 
@@ -130,6 +157,11 @@ TOOLS = [
         "description": "一般性 Warframe 交易问题或闲聊，不需要调用特定工具",
         "parameters": {"message": "用户消息"},
     },
+    {
+        "name": "plan",
+        "description": "将复杂请求分解为多个子任务并按顺序执行",
+        "parameters": {"goal": "用户目标", "steps": "子任务列表"},
+    },
 ]
 
 
@@ -137,6 +169,66 @@ TOOLS = [
 class ToolCall:
     name: str
     arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PlanStep:
+    tool: str
+    arguments: dict[str, Any]
+    purpose: str = ""
+
+
+@dataclass(frozen=True)
+class ExecutionPlan:
+    goal: str
+    steps: list[PlanStep]
+
+
+def _parse_plan(tc: ToolCall) -> ExecutionPlan | None:
+    """从 ToolCall 参数中解析 ExecutionPlan。"""
+    args = tc.arguments
+    goal = args.get("goal", "")
+    raw_steps = args.get("steps", [])
+    if not goal or not raw_steps:
+        return None
+    steps = []
+    for s in raw_steps:
+        if not isinstance(s, dict) or "tool" not in s:
+            continue
+        steps.append(PlanStep(
+            tool=s["tool"],
+            arguments=s.get("args", {}),
+            purpose=s.get("purpose", ""),
+        ))
+    return ExecutionPlan(goal=goal, steps=steps) if steps else None
+
+
+def _format_plan_results(goal: str, results: list[tuple[PlanStep, str | None]]) -> str:
+    """将所有步骤结果格式化为 LLM 可推理的聚合文本。"""
+    parts = [f"## 执行计划: {goal}\n"]
+    for i, (step, result) in enumerate(results, 1):
+        parts.append(f"### 步骤 {i}: {step.purpose or step.tool}")
+        parts.append(f"工具: {step.tool}({json.dumps(step.arguments, ensure_ascii=False)})")
+        if result:
+            parts.append(f"结果:\n{result}")
+        else:
+            parts.append("结果: 执行失败或无结果")
+        parts.append("")
+    parts.append("请根据以上所有步骤的结果，综合回答用户的问题。")
+    return "\n".join(parts)
+
+
+def execute_plan(
+    plan: ExecutionPlan,
+    tool_executor: Callable[[ToolCall], str | None],
+) -> list[tuple[PlanStep, str | None]]:
+    """顺序执行 plan 的每一步，收集 (step, result) 对。"""
+    results = []
+    for step in plan.steps:
+        tc = ToolCall(name=step.tool, arguments=step.arguments)
+        result = tool_executor(tc)
+        results.append((step, result))
+    return results
 
 
 def build_router_prompt(message: str) -> str:
@@ -214,6 +306,7 @@ def react_loop(
             "role": "system",
             "content": (
                 "你是 Warframe 交易助手的工具路由器。根据用户消息选择合适的工具调用。"
+                "如果用户需要对比多个物品、做投资分析、或需要多步骤查询，请使用 plan 工具。"
                 "如果不需要工具，直接回答用户问题。"
             ),
         },
@@ -232,7 +325,18 @@ def react_loop(
             # 没有工具调用，视为最终回答
             return response.strip() if response.strip() else None
 
-        # 执行工具调用并回传结果
+        # 检查是否有 plan 调用 — 优先处理
+        plan_calls = [tc for tc in tool_calls if tc.name == "plan"]
+        if plan_calls:
+            plan = _parse_plan(plan_calls[0])
+            if plan:
+                step_results = execute_plan(plan, tool_executor)
+                aggregated = _format_plan_results(plan.goal, step_results)
+                messages.append({"role": "assistant", "content": response})
+                messages.append({"role": "tool", "content": aggregated})
+                continue  # 让 LLM 从聚合结果中生成最终回答
+
+        # 执行普通工具调用并回传结果
         messages.append({"role": "assistant", "content": response})
         for tc in tool_calls:
             result = tool_executor(tc)

@@ -50,8 +50,22 @@ function updatePriceIndicators() {
         const priceEl = div.querySelector('.item-price');
         if (!priceEl) return;
 
-        const sellText = price.sell !== null ? `${price.sell}p` : '-';
-        priceEl.textContent = sellText;
+        // 使用 CountUp.js 动画显示价格
+        if (typeof CountUp !== 'undefined' && price.sell !== null && prev && prev.sell !== null && prev.sell !== price.sell) {
+            const counter = new CountUp(priceEl, price.sell, {
+                suffix: 'p',
+                duration: 0.6,
+                useGrouping: false,
+            });
+            if (!counter.error) {
+                counter.start();
+            } else {
+                priceEl.textContent = `${price.sell}p`;
+            }
+        } else {
+            const sellText = price.sell !== null ? `${price.sell}p` : '-';
+            priceEl.textContent = sellText;
+        }
 
         // 移除旧的变化指示器
         const oldIndicator = div.querySelector('.price-change');
@@ -64,6 +78,9 @@ function updatePriceIndicators() {
                 indicator.className = `price-change ${diff > 0 ? 'up' : 'down'}`;
                 indicator.textContent = diff > 0 ? `▲${diff}` : `▼${Math.abs(diff)}`;
                 priceEl.appendChild(indicator);
+                // 价格更新闪烁效果
+                div.classList.add('price-updated');
+                setTimeout(() => div.classList.remove('price-updated'), 800);
             }
         }
     });
@@ -91,6 +108,7 @@ async function loadSidebar() {
 
 function renderFavorites(favorites) {
     const list = document.getElementById('favorites-list');
+    if (!list) return;
     const header = list.previousElementSibling;
     list.innerHTML = '';
 
@@ -105,8 +123,8 @@ function renderFavorites(favorites) {
 
     favorites.forEach((fav, index) => {
         const div = document.createElement('div');
-        div.className = 'list-item favorite-item';
-        div.style.animationDelay = `${index * 100}ms`;
+        div.className = 'list-item favorite-item stagger-item';
+        div.style.animationDelay = `${index * 50}ms`;
         div.dataset.itemId = typeof fav === 'object' ? fav.item_id : '';
 
         // 兼容新旧格式：新格式为 {display, item_id} 对象，旧格式为字符串
@@ -156,6 +174,7 @@ let showAllAlerts = false;
 
 function renderAlerts(alerts) {
     const list = document.getElementById('alerts-list');
+    if (!list) return;
     const header = list.previousElementSibling;
     list.innerHTML = '';
 
@@ -172,8 +191,8 @@ function renderAlerts(alerts) {
 
     visibleAlerts.forEach((alert, index) => {
         const div = document.createElement('div');
-        div.className = 'list-item alert-item';
-        div.style.animationDelay = `${index * 100}ms`;
+        div.className = 'list-item alert-item stagger-item';
+        div.style.animationDelay = `${index * 50}ms`;
 
         const directionIcon = alert.direction === 'below' ? '📉' : '📈';
         const directionText = alert.direction === 'below' ? '低于' : '高于';
@@ -214,18 +233,6 @@ function renderAlerts(alerts) {
 function toggleAlertsView() {
     showAllAlerts = !showAllAlerts;
     loadSidebar();
-}
-
-// ===== 创建空状态 =====
-
-function createEmptyState(title, subtitle) {
-    return `
-        <div class="empty-state">
-            <div class="empty-state-icon">📭</div>
-            <div class="empty-state-text">${title}</div>
-            <div class="empty-state-sub">${subtitle}</div>
-        </div>
-    `;
 }
 
 // ===== 批量操作 =====
@@ -337,9 +344,10 @@ function updateSidebarStatus(status) {
 
 async function queryItemPrice(itemId) {
     if (!itemId) return;
-
-    chatInput.value = itemId;
-    handleSend();
+    const input = window.chatInput || document.getElementById('chat-input');
+    if (input) input.value = itemId;
+    if (typeof handleSend === 'function') handleSend();
+    else if (typeof window.handleSend === 'function') window.handleSend();
 }
 
 async function removeFavoriteItem(itemId) {
@@ -593,138 +601,36 @@ document.getElementById('report-btn')?.addEventListener('click', async () => {
         html += '</div></div>';
 
         html += `<div style="margin-top:12px;display:flex;gap:8px;">
-            <button class="btn-gradient" onclick="navigator.clipboard.writeText(\`${report.replace(/`/g, '\\`')}\`).then(()=>showToast('已复制','success'))">复制报告</button>
-            <button class="btn-gradient btn-gradient-cyan" onclick="document.getElementById('report-btn').click()">刷新</button>
+            <button class="btn-gradient" id="copy-report-btn">复制报告</button>
+            <button class="btn-gradient btn-gradient-cyan" id="refresh-report-btn">刷新</button>
         </div>`;
 
         content.innerHTML = html;
+        document.getElementById('copy-report-btn')?.addEventListener('click', () => {
+            navigator.clipboard.writeText(report).then(() => showToast('已复制', 'success'));
+        });
+        document.getElementById('refresh-report-btn')?.addEventListener('click', () => {
+            document.getElementById('report-btn')?.click();
+        });
     } catch (err) {
         content.innerHTML = `<div class="empty-state"><div class="empty-icon">📊</div>
             <span class="empty-primary">报告生成失败</span><span class="empty-sub">${err.message}</span></div>`;
     }
 });
 
-// ===== 套利检测功能 =====
-
-async function loadArbitrageOpportunities() {
-    const content = openDetailPanel('检测套利机会...');
-    if (!content) return;
-
-    try {
-        const res = await fetch('/api/arbitrage?min_profit=3');
-        const data = await res.json();
-
-        let html = `
-            <div class="arbitrage-container">
-                <div class="arbitrage-header">
-                    <h3 class="arbitrage-title">套利机会</h3>
-                    <div class="arbitrage-subtitle">低买高卖的盈利机会</div>
-                </div>
-        `;
-
-        if (data.opportunities && data.opportunities.length > 0) {
-            html += `
-                <div class="arbitrage-summary">
-                    <div class="arbitrage-stat">
-                        <span class="arbitrage-stat-label">发现机会</span>
-                        <span class="arbitrage-stat-value">${data.total}</span>
-                    </div>
-                    <div class="arbitrage-stat">
-                        <span class="arbitrage-stat-label">最低利润</span>
-                        <span class="arbitrage-stat-value">${data.min_profit_filter}p</span>
-                    </div>
-                </div>
-            `;
-
-            html += '<div class="arbitrage-list">';
-            data.opportunities.forEach((opp, index) => {
-                const profitClass = opp.profit >= 10 ? 'high' : (opp.profit >= 5 ? 'medium' : 'low');
-
-                html += `
-                    <div class="arbitrage-item" style="animation-delay: ${index * 50}ms">
-                        <div class="arbitrage-item-header">
-                            <span class="arbitrage-item-name">${opp.display}</span>
-                            <span class="arbitrage-profit ${profitClass}">+${opp.profit}p</span>
-                        </div>
-                        <div class="arbitrage-prices">
-                            <div class="arbitrage-price buy">
-                                <span class="price-label">买入</span>
-                                <span class="price-value">${opp.buy_price}p</span>
-                                <span class="price-player">${opp.buyer}</span>
-                            </div>
-                            <div class="arbitrage-arrow">→</div>
-                            <div class="arbitrage-price sell">
-                                <span class="price-label">卖出</span>
-                                <span class="price-value">${opp.sell_price}p</span>
-                                <span class="price-player">${opp.seller}</span>
-                            </div>
-                        </div>
-                        ${opp.ducat_value ? `
-                            <div class="arbitrage-ducat">
-                                <span class="ducat-info">杜卡特: ${opp.ducat_value}</span>
-                                ${opp.ducat_efficiency ? `
-                                    <span class="ducat-efficiency ${opp.ducat_efficiency.recommendation === 'ducat' ? 'good' : ''}">
-                                        ${opp.ducat_efficiency.ducats_per_plat} ducats/p
-                                    </span>
-                                ` : ''}
-                            </div>
-                        ` : ''}
-                        <div class="arbitrage-actions">
-                            <button class="detail-action-btn" onclick="copyToClipboard('/w ${opp.buyer} Hi! I want to buy...')">
-                                复制买入私聊
-                            </button>
-                            <button class="detail-action-btn" onclick="copyToClipboard('/w ${opp.seller} Hi! I want to sell...')">
-                                复制卖出私聊
-                            </button>
-                            <button class="detail-action-btn" onclick="queryItemPrice('${opp.item_id}')">
-                                查看详情
-                            </button>
-                        </div>
-                    </div>
-                `;
-            });
-            html += '</div>';
-        } else {
-            html += `
-                <div class="arbitrage-empty">
-                    <div class="empty-state-icon">💰</div>
-                    <div class="empty-state-text">暂无套利机会</div>
-                    <div class="empty-state-sub">收藏物品后，系统将自动检测套利机会</div>
-                    <div class="arbitrage-tips">
-                        <div class="tip-title">套利提示：</div>
-                        <ul>
-                            <li>收藏您感兴趣的物品</li>
-                            <li>系统会自动检测买卖价差</li>
-                            <li>利润 ≥ 3p 的机会会被标记</li>
-                        </ul>
-                    </div>
-                </div>
-            `;
-        }
-
-        html += '</div>';
-        content.innerHTML = html;
-    } catch (err) {
-        content.innerHTML = createChartError('加载套利数据失败');
-    }
-}
-
-// 套利检测按钮事件
-document.getElementById('arbitrage-btn')?.addEventListener('click', () => {
-    toggleMoreMenu();
-    loadArbitrageOpportunities();
-});
-
 // ===== 收藏夹仪表盘 =====
 
-async function loadFavoritesDashboard() {
+let dashboardMode = 'scatter';
+
+async function loadFavoritesDashboard(mode) {
+    if (mode) dashboardMode = mode;
     const content = openDetailPanel('加载收藏仪表盘...');
     if (!content) return;
 
     try {
         const [memoryRes, pricesRes] = await Promise.all([
             fetch('/api/memory'),
-            fetch('/api/favorites_prices')
+            fetch(`/api/favorites_prices?mode=${dashboardMode}`)
         ]);
         const memoryData = await memoryRes.json();
         const pricesData = await pricesRes.json();
@@ -777,17 +683,21 @@ async function loadFavoritesDashboard() {
                     <h3 class="dashboard-title">收藏夹仪表盘</h3>
                     <div class="dashboard-subtitle">收藏物品价格概览 · 点击物品查看详情</div>
                 </div>
+                <div class="mode-toggle-bar">
+                    <button class="mode-toggle-btn ${dashboardMode === 'scatter' ? 'active' : ''}" onclick="loadFavoritesDashboard('scatter')">零散价格</button>
+                    <button class="mode-toggle-btn ${dashboardMode === 'maxrank' ? 'active' : ''}" onclick="loadFavoritesDashboard('maxrank')">满级成本</button>
+                </div>
 
                 <div class="dashboard-summary">
                     <div class="dashboard-stat main">
-                        <div class="dashboard-stat-label">总卖出价值</div>
+                        <div class="dashboard-stat-label">${dashboardMode === 'maxrank' ? '总满级卖价' : '总卖出价值'}</div>
                         <div class="dashboard-stat-value">${totalSell}p</div>
-                        <div style="font-size:11px;color:var(--text-tertiary)">全部收藏按最低卖价</div>
+                        <div style="font-size:11px;color:var(--text-tertiary)">${dashboardMode === 'maxrank' ? '全部收藏按满级最低卖价' : '全部收藏按最低卖价'}</div>
                     </div>
                     <div class="dashboard-stat">
-                        <div class="dashboard-stat-label">总收购价值</div>
+                        <div class="dashboard-stat-label">${dashboardMode === 'maxrank' ? '总满级收价' : '总收购价值'}</div>
                         <div class="dashboard-stat-value" style="color:var(--blue-primary)">${totalBuy}p</div>
-                        <div style="font-size:11px;color:var(--text-tertiary)">全部收藏按最高收价</div>
+                        <div style="font-size:11px;color:var(--text-tertiary)">${dashboardMode === 'maxrank' ? '全部收藏按满级最高收价' : '全部收藏按最高收价'}</div>
                     </div>
                     <div class="dashboard-stat">
                         <div class="dashboard-stat-label">物品数</div>
@@ -826,6 +736,7 @@ async function loadFavoritesDashboard() {
             const display = typeof fav === 'object' ? fav.display : fav;
             const price = priceMap[itemId];
             const prev = previousPrices[itemId];
+            const isRanked = price && price.max_rank && price.max_rank > 0;
 
             let changeHtml = '';
             if (price && prev && prev.sell !== null && price.sell_price !== null) {
@@ -840,6 +751,9 @@ async function loadFavoritesDashboard() {
             const spread = price && price.sell_price && price.buy_price ? price.sell_price - price.buy_price : null;
             const spreadClass = spread !== null ? (spread > 20 ? 'high' : spread > 5 ? 'mid' : 'low') : '';
 
+            const sellLabel = dashboardMode === 'maxrank' && isRanked ? '满级卖价' : '卖价';
+            const buyLabel = dashboardMode === 'maxrank' && isRanked ? '满级收价' : '收价';
+
             html += `
                 <div class="dashboard-item" style="animation-delay: ${index * 50}ms" onclick="queryItemPrice('${itemId}')">
                     <div class="dashboard-item-header">
@@ -850,7 +764,7 @@ async function loadFavoritesDashboard() {
                         </span>
                     </div>
                     <div class="dashboard-item-detail">
-                        <span class="detail-label">收价</span>
+                        <span class="detail-label">${buyLabel}</span>
                         <span class="detail-value" style="color:var(--blue-primary)">${price && price.buy_price ? price.buy_price + 'p' : '-'}</span>
                         ${spread !== null ? `<span class="detail-spread ${spreadClass}">差 ${spread}p</span>` : ''}
                         <button class="copy-whisper-btn" onclick="event.stopPropagation();copyWhisperMessage('seller','${display.split(' / ')[0]}',${price?.sell_price || 0})" title="复制私聊" style="margin-left:auto">📋</button>
@@ -914,6 +828,8 @@ sidebarStyles.textContent = `
     .alert-item:hover {
         transform: translateX(4px);
         border-left-color: var(--gold-primary);
+        background: var(--bg-overlay);
+        box-shadow: inset 3px 0 0 var(--gold-primary), var(--shadow-gold-sm);
     }
 
     .item-header {
@@ -991,12 +907,8 @@ sidebarStyles.textContent = `
     .item-actions {
         display: flex;
         gap: 8px;
-        opacity: 0;
-        transition: opacity 0.3s ease-out;
-    }
-
-    .list-item:hover .item-actions {
         opacity: 1;
+        transition: opacity 0.3s ease-out;
     }
 
     .action-btn {
@@ -1712,9 +1624,10 @@ sidebarStyles.textContent = `
     }
 
     .dashboard-item:hover {
-        background: rgba(212, 167, 55, 0.05);
+        background: var(--bg-overlay);
         border-color: rgba(212, 167, 55, 0.2);
         transform: translateX(2px);
+        box-shadow: inset 3px 0 0 var(--gold-primary), var(--shadow-gold-sm);
     }
 
     .dashboard-item-header {
@@ -1913,6 +1826,59 @@ sidebarStyles.textContent = `
     .notify-threshold-val { font-family: var(--font-mono); font-size: 14px; font-weight: 600; color: var(--gold-primary); min-width: 40px; }
     .notify-threshold-desc { font-size: 11px; color: var(--text-tertiary); margin-top: 6px; }
     .notify-actions { display: flex; gap: 8px; margin-top: 16px; }
+
+    /* 模式切换按钮 */
+    .mode-toggle-bar {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 12px;
+    }
+    .mode-toggle-btn {
+        flex: 1;
+        padding: 8px 12px;
+        background: rgba(255,255,255,0.03);
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 6px;
+        color: var(--text-tertiary);
+        font-size: 13px;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .mode-toggle-btn:hover {
+        background: rgba(212, 167, 55, 0.1);
+        border-color: rgba(212, 167, 55, 0.3);
+        color: var(--gold-primary);
+    }
+    .mode-toggle-btn.active {
+        background: rgba(212, 167, 55, 0.15);
+        border-color: var(--gold-primary);
+        color: var(--gold-primary);
+        font-weight: 600;
+    }
+
+    /* 购买方案迷你卡片 */
+    .buy-plan-mini {
+        margin-top: 6px;
+        padding: 6px 8px;
+        background: rgba(99, 102, 241, 0.08);
+        border: 1px solid rgba(99, 102, 241, 0.15);
+        border-radius: 6px;
+        font-size: 11px;
+    }
+    .bp-mini-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 2px 0;
+        color: var(--text-secondary);
+    }
+    .bp-mini-row span:last-child {
+        color: var(--gold-primary);
+        font-family: var(--font-mono);
+    }
+    .bp-more {
+        color: var(--text-tertiary);
+        font-style: italic;
+    }
 `;
 document.head.appendChild(sidebarStyles);
 
@@ -1973,7 +1939,7 @@ async function showProfitItemSuggestions(input) {
         }
 
         sugDiv.innerHTML = data.suggestions.map(s =>
-            `<div class="suggestion-item" onclick="selectProfitItem('${s}')">${s}</div>`
+            `<div class="suggestion-item" onclick="selectProfitItem(${JSON.stringify(s)})">${s}</div>`
         ).join('');
         sugDiv.style.display = 'block';
         sugDiv.style.cssText = 'display:block; position:absolute; background:var(--glass-bg); border:var(--glass-border); border-radius:8px; max-height:150px; overflow-y:auto; z-index:10; width:100%;';
@@ -2112,73 +2078,6 @@ function renderProfitResult(data, container) {
 document.getElementById('profit-calc-btn')?.addEventListener('click', () => {
     toggleMoreMenu();
     showProfitCalculator();
-});
-
-// ===== 价格异常检测 =====
-
-async function showPriceAnomalies() {
-    const content = openDetailPanel('检测价格异常...');
-    if (!content) return;
-
-    try {
-        const res = await fetch('/api/price/anomalies?threshold=30');
-        const data = await res.json();
-
-        if (!data.anomalies || data.anomalies.length === 0) {
-            content.innerHTML = `
-                <div class="profit-calc-container">
-                    <div class="profit-calc-title">价格异常提醒</div>
-                    <div class="empty-state" style="padding:32px 0;">
-                        <div class="empty-state-icon">📊</div>
-                        <div class="empty-state-text">暂无价格异常</div>
-                        <div class="empty-state-sub">当物品价格偏离均值超过30%时会在此显示</div>
-                    </div>
-                </div>
-            `;
-            return;
-        }
-
-        let html = `
-            <div class="profit-calc-container">
-                <div class="profit-calc-title">价格异常提醒</div>
-                <div style="font-size:12px; color:var(--text-tertiary); margin-bottom:16px;">
-                    检测到 ${data.total} 个价格异常（偏离阈值 ${data.threshold}%）
-                </div>
-        `;
-
-        data.anomalies.forEach(item => {
-            const isSpike = item.type === 'spike';
-            const icon = isSpike ? '📈' : '📉';
-            const colorClass = isSpike ? 'positive' : 'negative';
-            const deviationSign = item.deviation > 0 ? '+' : '';
-
-            html += `
-                <div class="list-item" style="margin-bottom:8px; cursor:pointer;"
-                    onclick="showPriceChart('${item.item_id}')">
-                    <div class="item-header">
-                        <span class="item-name">${icon} ${item.display}</span>
-                        <span class="item-price">${item.current_price}p</span>
-                    </div>
-                    <div class="item-sub" style="display:flex; justify-content:space-between;">
-                        <span>均值 ${item.avg_price}p</span>
-                        <span class="${colorClass}" style="font-weight:600;">${deviationSign}${item.deviation}%</span>
-                    </div>
-                    <div class="item-sub">${item.type_display} | 基于 ${item.snapshots_count} 条历史数据</div>
-                </div>
-            `;
-        });
-
-        html += `</div>`;
-        content.innerHTML = html;
-    } catch (err) {
-        content.innerHTML = createChartError('检测价格异常失败');
-    }
-}
-
-// 绑定价格异常按钮
-document.getElementById('anomaly-btn')?.addEventListener('click', () => {
-    toggleMoreMenu();
-    showPriceAnomalies();
 });
 
 // ===== 通知设置面板 =====
@@ -2947,7 +2846,7 @@ async function showRelicDrops(tier, relicName) {
             <span class="panel-title-eyebrow">遗物掉落</span>
             <span class="badge badge-gold">${data.displayName || tier + ' ' + relicName}</span>
             ${data.vaultStatus ? `<span class="badge ${data.vaultStatus === '已入库' ? 'badge-red' : 'badge-green'}">${data.vaultStatus}</span>` : ''}
-            <button class="btn-gradient" style="margin-left:auto;padding:4px 12px;font-size:11px" onclick="showFissures()">← 返回裂隙</button>
+            <button class="btn-gradient" style="margin-left:auto;padding:4px 12px;font-size:11px" onclick="showFissureTracker()">← 返回裂隙</button>
         </div>`;
 
         // 如果有分状态数据（新格式）
@@ -3130,8 +3029,6 @@ async function loadRelicSources(relicDisplayName) {
         </div>`;
     }
 }
-
-document.getElementById('fissure-btn')?.addEventListener('click', () => showFissures());
 
 // ===== 价格异常检测 (借鉴 WarStonks 套利扫描) =====
 async function showPriceAnomalies() {

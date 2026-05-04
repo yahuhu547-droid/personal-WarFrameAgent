@@ -84,7 +84,7 @@
 - **Playwright** — 浏览器自动化抓取（绕过 Cloudflare）
 - **Chart.js** — 价格趋势可视化
 - **纯 HTML/CSS/JS** — 前端无构建工具，Tenno 科技终端风格
-- **145 个单元测试** — 覆盖所有核心模块和 Web API
+- **169 个单元测试** — 覆盖所有核心模块和 Web API
 
 ## 快速开始
 
@@ -172,7 +172,7 @@ warframe_agent/        # 核心模块
       index.html       # 主页面（Tenno 科技终端风格）
       css/             # 变量、动画、主样式、响应式
       js/              # app.js, chat.js, sidebar.js, chart.js
-tests/                 # 32 个测试文件，145 个测试用例
+tests/                 # 33 个测试文件，169 个测试用例
 data/                  # 物品数据、别名映射、记忆存储、遗物数据
 tools/                 # 数据构建 + embedding 预计算脚本
 md/                    # 项目文档
@@ -184,7 +184,7 @@ md/                    # 项目文档
 python -m pytest tests/ -v
 ```
 
-32 个测试文件，145 个测试用例，覆盖：
+33 个测试文件，169 个测试用例，覆盖：
 - 物品解析全链路（别名、字典、生成式、标准化、LLM、RAG）
 - 对话系统（查价、追问、斜杠命令、记忆操作、RAG 降级）
 - 多轮对话（session history、messages 构建、上下文连贯）

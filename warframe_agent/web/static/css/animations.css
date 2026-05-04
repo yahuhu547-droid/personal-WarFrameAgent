@@ -679,6 +679,214 @@
   transform: scale(0.97);
 }
 
+/* ===== 科技终端增强效果 ===== */
+
+/* CRT 扫描线叠加层 */
+.scanlines::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(0, 0, 0, 0.12) 0px,
+    rgba(0, 0, 0, 0.12) 1px,
+    transparent 1px,
+    transparent 2px
+  );
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.4;
+}
+
+/* 角落括号装饰 */
+.bracket-corners {
+  position: relative;
+}
+.bracket-corners::before,
+.bracket-corners::after {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  pointer-events: none;
+}
+.bracket-corners::before {
+  top: -1px;
+  left: -1px;
+  border-top: 2px solid var(--gold-primary);
+  border-left: 2px solid var(--gold-primary);
+}
+.bracket-corners::after {
+  bottom: -1px;
+  right: -1px;
+  border-bottom: 2px solid var(--gold-primary);
+  border-right: 2px solid var(--gold-primary);
+}
+
+/* 增强文字辉光 */
+.glow-text {
+  text-shadow:
+    0 0 7px rgba(212, 167, 55, 0.6),
+    0 0 10px rgba(212, 167, 55, 0.4),
+    0 0 21px rgba(212, 167, 55, 0.2);
+}
+.glow-text-blue {
+  text-shadow:
+    0 0 7px rgba(74, 158, 255, 0.6),
+    0 0 10px rgba(74, 158, 255, 0.4),
+    0 0 21px rgba(74, 158, 255, 0.2);
+}
+
+/* 全息微光效果 */
+@keyframes gradientFlow {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.holo-shimmer {
+  background: linear-gradient(
+    135deg,
+    rgba(212, 167, 55, 0.06) 0%,
+    rgba(74, 158, 255, 0.06) 50%,
+    rgba(212, 167, 55, 0.06) 100%
+  );
+  background-size: 200% 200%;
+  animation: gradientFlow 4s ease infinite;
+}
+
+/* Glitch 效果 */
+@keyframes glitch {
+  0%, 87%, 100% { transform: none; opacity: 1; }
+  88% { transform: skewX(1deg); opacity: 0.85; }
+  89% { transform: skewX(-1deg) translateX(2px); }
+  90% { transform: none; opacity: 1; }
+}
+.animate-glitch { animation: glitch 3s infinite; }
+
+/* 数字滚动效果 */
+@keyframes numberRollIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-number-roll {
+  animation: numberRollIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* 列表交错入场 */
+@keyframes staggerIn {
+  from {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.stagger-item {
+  animation: staggerIn 0.3s ease-out both;
+}
+.stagger-item:nth-child(1) { animation-delay: 0ms; }
+.stagger-item:nth-child(2) { animation-delay: 50ms; }
+.stagger-item:nth-child(3) { animation-delay: 100ms; }
+.stagger-item:nth-child(4) { animation-delay: 150ms; }
+.stagger-item:nth-child(5) { animation-delay: 200ms; }
+.stagger-item:nth-child(6) { animation-delay: 250ms; }
+.stagger-item:nth-child(7) { animation-delay: 300ms; }
+.stagger-item:nth-child(8) { animation-delay: 350ms; }
+.stagger-item:nth-child(9) { animation-delay: 400ms; }
+.stagger-item:nth-child(10) { animation-delay: 450ms; }
+
+/* 主题切换过渡 */
+html.theme-transitioning,
+html.theme-transitioning *,
+html.theme-transitioning *::before,
+html.theme-transitioning *::after {
+  transition: background-color 0.4s ease, color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease !important;
+}
+
+/* 主题切换按钮旋转 */
+@keyframes themeRotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.theme-rotating .theme-icon {
+  animation: themeRotate 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* 价格更新闪烁 */
+@keyframes priceUpdateFlash {
+  0% { background-color: rgba(212, 167, 55, 0.2); }
+  100% { background-color: transparent; }
+}
+.price-updated {
+  animation: priceUpdateFlash 0.8s ease-out;
+}
+
+/* 面板滑入增强 */
+@keyframes panelSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.panel-enter {
+  animation: panelSlideIn 0.35s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+/* ===== UI 升级：大厂设计借鉴动画 ===== */
+
+/* Stripe 风格网格渐变漂移 */
+@keyframes meshDrift1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(30px, -20px) scale(1.1); }
+  66% { transform: translate(-20px, 15px) scale(0.95); }
+}
+
+@keyframes meshDrift2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(-25px, 20px) scale(1.05); }
+  66% { transform: translate(15px, -30px) scale(1.1); }
+}
+
+/* 骨架屏闪烁 */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* 发送按钮能量脉冲 */
+@keyframes energyPulse {
+  0%, 100% { box-shadow: 0 0 10px rgba(212, 167, 55, 0.2); }
+  50% { box-shadow: 0 0 25px rgba(212, 167, 55, 0.4), 0 0 50px rgba(212, 167, 55, 0.1); }
+}
+
+/* 噪点纹理移动 */
+@keyframes noiseShift {
+  0% { transform: translate(0, 0); }
+  10% { transform: translate(-5%, -10%); }
+  20% { transform: translate(-15%, 5%); }
+  30% { transform: translate(7%, -25%); }
+  40% { transform: translate(-5%, 25%); }
+  50% { transform: translate(-15%, 10%); }
+  60% { transform: translate(15%, 0%); }
+  70% { transform: translate(0%, 15%); }
+  80% { transform: translate(3%, 35%); }
+  90% { transform: translate(-10%, 10%); }
+  100% { transform: translate(0, 0); }
+}
+
 /* 禁用动画 */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
