@@ -2556,3 +2556,235 @@ app = FastAPI(title="Warframe Trading Agent API", lifespan=lifespan)
 
 **文档版本**：v4.4
 **最后更新**：2026-05-04
+
+---
+
+### Phase 30 — GitHub 借鉴：三大交易效率工具
+
+**日期**: 2026-05-04
+**重点**: 从 GitHub Warframe 交易项目中借鉴 3 个高价值功能，提升交易决策效率
+
+#### 背景
+
+使用 Playwright 自动化搜索 GitHub 上的 Warframe trading 相关项目，分析并借鉴了以下 3 个功能：
+- **Mod Flipper** — 借鉴自 warframe-market 相关项目的 Mod 翻转分析
+- **Set Profit Analyzer** — 借鉴自套装利润对比的思路
+- **Investment Advisor** — 借鉴自 ROI 投资回报分析模式
+
+#### 1. Mod 翻转分析器
+
+**功能**: 分析低买 R0 Mod → 内融升级满级 → 高价卖出的翻转利润，按"每千内融利润"排序。
+
+**核心逻辑**:
+- R0 买入成本 = 最低卖价（`best_sellers(orders, rank_filter=0)`）
+- 满级卖出收入 = 最高收价（`best_buyers(orders, rank_filter=max_rank)`）
+- 翻转利润 = 满级收价 - R0 卖价
+- 每千内融利润 = 翻转利润 / (内融消耗 / 1000)
+- Value Score = 每千内融利润 × log₂(48h成交量 + 1)
+
+**内融消耗表**:
+
+| 等级 | 所需内融 |
+|------|----------|
+| R3 | 320 |
+| R5 | 1,280 |
+| R10 | 20,470 |
+
+**后端实现**:
+
+| 端点 | 方法 | 功能 |
+|------|------|------|
+| `/api/mod_flipper` | GET | 扫描 Mod 翻转机会（参数: min_profit, limit） |
+
+**核心函数**:
+```python
+def analyze_mod_flip(item_id, max_rank, rarity, order_fetcher) -> ModFlipResult | None
+def scan_all_mod_flips(items, order_fetcher, min_profit=5, limit=20) -> list[ModFlipResult]
+```
+
+**前端显示**:
+```
+┌─────────────────────────────────────┐
+│  Mod 翻转                    8 机会 │
+│  ─────────────────────────────────  │
+│  1. Primed Flow              +45p  │
+│     买 R0: 10p  卖满级: 55p        │
+│     内融: 20.5k  每千内融: 2.2p    │
+│     48h量: 15  🟢 low              │
+│  ─────────────────────────────────  │
+│  2. Vitality                 +28p  │
+│     买 R0: 5p   卖满级: 33p        │
+│     内融: 1.3k   每千内融: 21.5p   │
+│     48h量: 32  🟢 low              │
+└─────────────────────────────────────┘
+```
+
+**新增文件**:
+| 文件 | 说明 |
+|------|------|
+| `warframe_agent/mod_flipper.py` | Mod 翻转核心逻辑 |
+| `tests/test_mod_flipper.py` | 10 个测试用例 |
+
+---
+
+#### 2. 套装利润分析器
+
+**功能**: 对比 Prime 套装整套买 vs 拆件买的价格差异，推荐最优策略。
+
+**两种策略**:
+- **买部件→卖套装**: 各部件最低卖价总和 vs 套装最高收价
+- **买套装→卖部件**: 套装最低卖价 vs 各部件最高收价总和
+
+**后端实现**:
+
+| 端点 | 方法 | 功能 |
+|------|------|------|
+| `/api/set_profit` | GET | 扫描套装利润机会（参数: min_profit, limit） |
+
+**核心函数**:
+```python
+def analyze_set_profit(group: PrimeGroup, order_fetcher) -> SetProfitResult | None
+def scan_all_set_profits(items, order_fetcher, min_profit=5, limit=20) -> list[SetProfitResult]
+```
+
+**前端显示**:
+```
+┌─────────────────────────────────────┐
+│  套装利润                   5 套装  │
+│  ─────────────────────────────────  │
+│  1. Rhino Prime             +15p  │
+│     策略: 买部件→卖套装             │
+│     套装价: 70p  部件总和: 55p     │
+│     48h量: 23                      │
+│  ─────────────────────────────────  │
+│  2. Nova Prime              +50p  │
+│     策略: 买套装→卖部件             │
+│     套装价: 30p  部件总和: 80p     │
+│     48h量: 12                      │
+└─────────────────────────────────────┘
+```
+
+**新增文件**:
+| 文件 | 说明 |
+|------|------|
+| `warframe_agent/set_profit.py` | 套装利润分析核心逻辑 |
+| `tests/test_set_profit.py` | 5 个测试用例 |
+
+---
+
+#### 3. 投资顾问
+
+**功能**: 按预算扫描所有物品翻转机会，按 ROI% 排序并显示风险等级。
+
+**风险评估逻辑**:
+- **低风险**: 日成交量 ≥ 5 且 供需比 < 3
+- **中风险**: 日成交量 ≥ 2 或 供需比 < 5
+- **高风险**: 其他情况
+
+**后端实现**:
+
+| 端点 | 方法 | 功能 |
+|------|------|------|
+| `/api/investment` | GET | 扫描投资机会（参数: budget, min_roi, limit） |
+
+**核心函数**:
+```python
+def analyze_investment(item_id, orders, filters) -> InvestmentOpportunity | None
+def scan_investments(items, order_fetcher, filters) -> list[InvestmentOpportunity]
+```
+
+**前端显示**:
+```
+┌─────────────────────────────────────┐
+│  投资顾问                  7 机会  │
+│  ─────────────────────────────────  │
+│  1. Arcane Energize         66.7% │
+│     买: 30p  卖: 50p  利润: +20p  │
+│     供/需: 2/2  日量: 5  🟢 low   │
+│  ─────────────────────────────────  │
+│  2. Primed Continuity       42.9% │
+│     买: 35p  卖: 50p  利润: +15p  │
+│     供/需: 3/5  日量: 3  🟡 med   │
+└─────────────────────────────────────┘
+```
+
+**新增文件**:
+| 文件 | 说明 |
+|------|------|
+| `warframe_agent/investment.py` | 投资顾问核心逻辑 |
+| `tests/test_investment.py` | 9 个测试用例 |
+
+---
+
+#### 4. 工具路由集成
+
+三个新功能均已注册为 ReAct 工具，支持自然语言调用：
+
+**工具定义**（tool_router.py）:
+```python
+{"name": "mod_flipper", "description": "扫描 Mod 翻转机会..."}
+{"name": "set_profit", "description": "扫描 Prime 套装利润..."}
+{"name": "investment_advisor", "description": "按预算扫描投资机会..."}
+```
+
+**对话处理器**（chat.py）:
+- `mod_flipper` → 调用 `scan_all_mod_flips()`，格式化排名列表
+- `set_profit` → 调用 `scan_all_set_profits()`，显示策略和利润
+- `investment_advisor` → 调用 `scan_investments()`，显示风险图标
+
+**前端入口**（index.html + sidebar.js）:
+- 侧边栏"更多功能"菜单新增 3 个按钮
+- 点击后调用对应 API，渲染到详情面板
+
+---
+
+#### 5. 测试修复
+
+**问题**: 测试 mock 订单格式与 `_to_market_orders()` 不匹配。
+
+**根因**: `_to_market_orders()` 期望嵌套的 `user` 对象：
+```python
+# 期望格式
+{"order_type": "sell", "platinum": 10, "user": {"ingame_name": "seller", "status": "ingame", "reputation": 5}, "rank": 0}
+# 测试原格式（错误）
+{"order_type": "sell", "platinum": 10, "user_name": "seller", "status": "ingame", "reputation": 5, "mod_rank": 0}
+```
+
+**修复**: 更新 3 个测试文件中的 mock 订单格式，23 个新测试全部通过。
+
+---
+
+#### Phase 30 实施总结
+
+| 功能 | 模块 | 测试 | API 端点 | 前端 |
+|------|------|------|----------|------|
+| Mod 翻转 | `mod_flipper.py` | 10 | `/api/mod_flipper` | 侧边栏面板 |
+| 套装利润 | `set_profit.py` | 5 | `/api/set_profit` | 侧边栏面板 |
+| 投资顾问 | `investment.py` | 9 | `/api/investment` | 侧边栏面板 |
+
+**修改文件**:
+| 文件 | 变更 |
+|------|------|
+| `warframe_agent/tool_router.py` | 新增 3 个工具 schema |
+| `warframe_agent/chat.py` | 新增 3 个工具处理器 |
+| `warframe_agent/web/app.py` | 新增 3 个 API 端点 + `_load_items_full()` 辅助函数 |
+| `warframe_agent/web/static/index.html` | 新增 3 个菜单按钮 |
+| `warframe_agent/web/static/js/sidebar.js` | 新增 `loadModFlipper()`、`loadSetProfit()`、`loadInvestmentAdvisor()` |
+
+**新增文件**:
+| 文件 | 说明 |
+|------|------|
+| `warframe_agent/mod_flipper.py` | Mod 翻转核心逻辑 |
+| `warframe_agent/set_profit.py` | 套装利润分析 |
+| `warframe_agent/investment.py` | 投资顾问 |
+| `tests/test_mod_flipper.py` | 10 个测试 |
+| `tests/test_set_profit.py` | 5 个测试 |
+| `tests/test_investment.py` | 9 个测试 |
+| `scripts/browse_github.py` | Playwright GitHub 调研脚本 |
+| `scripts/explore_repos.py` | 仓库探索脚本 |
+| `scripts/read_source.py` | 源码阅读脚本 |
+
+**测试结果**: 211 个测试全部通过（新增 24 个）
+
+**文档版本**：v4.5
+**最后更新**：2026-05-04
