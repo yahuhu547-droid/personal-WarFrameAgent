@@ -1,11 +1,15 @@
 """Prime 套装利润分析器 — 对比整套买卖 vs 拆件买卖。"""
 from __future__ import annotations
 
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable
 
+logger = logging.getLogger(__name__)
+
 from . import config
-from .market import best_buyers, best_sellers, fetch_orders
+from .market import best_buyers, best_sellers, fetch_item_statistics, fetch_orders
 from .names import display_item_name
 from .warframes import PARTS, PrimeGroup, build_prime_groups, _load_items
 
@@ -26,18 +30,6 @@ class SetProfitResult:
     part_count: int
 
 
-def _fetch_statistics(item_id: str) -> int | None:
-    """获取 48 小时成交量。"""
-    import requests
-    url = f"https://api.warframe.market/v1/items/{item_id}/statistics"
-    try:
-        resp = requests.get(url, headers={"Platform": "pc", "Language": "en"}, timeout=10)
-        if resp.status_code == 200:
-            stats = resp.json().get("payload", {}).get("statistics_closed", [])
-            return sum(s.get("volume", 0) for s in stats[-4:])
-    except Exception:
-        pass
-    return None
 
 
 def analyze_set_profit(
@@ -60,8 +52,8 @@ def analyze_set_profit(
             set_buyers = best_buyers(set_orders, limit=1)
             set_buy_price = set_sellers[0].platinum if set_sellers else None
             set_sell_price = set_buyers[0].platinum if set_buyers else None
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("获取套装 %s 订单失败: %s", set_id, exc)
 
     # 获取各部件价格
     parts_sell_total = 0
@@ -79,7 +71,8 @@ def analyze_set_profit(
             if buyers:
                 parts_buy_total += buyers[0].platinum
                 parts_with_buy += 1
-        except Exception:
+        except Exception as exc:
+            logger.debug("获取部件 %s 订单失败: %s", pid, exc)
             continue
 
     if parts_with_sell == 0 and parts_with_buy == 0:
@@ -103,7 +96,8 @@ def analyze_set_profit(
     # 48h 成交量
     volume_48h = None
     if set_id:
-        volume_48h = _fetch_statistics(set_id)
+        stats = fetch_item_statistics(set_id)
+        volume_48h = stats.get("volume_48h") if stats else None
 
     return SetProfitResult(
         base_id=group.base_id,
@@ -126,17 +120,41 @@ def scan_all_set_profits(
     order_fetcher: Callable[[str], list[dict]] = fetch_orders,
     min_profit: int = 5,
     limit: int = 20,
+    scout_fn: Callable[[list], list[str]] | None = None,
 ) -> list[SetProfitResult]:
     """扫描所有 Prime 套装，找出利润机会。"""
     groups = build_prime_groups(items)
-    results = []
-    for group in list(groups.values())[:15]:  # 限制扫描数量
+    all_candidates = list(groups.values())[:15]
+
+    # 智能预筛选
+    if scout_fn is not None:
         try:
-            result = analyze_set_profit(group, order_fetcher)
+            scouted_ids = scout_fn(all_candidates)
+            if scouted_ids:
+                id_set = set(scouted_ids)
+                candidates = [g for g in all_candidates if g.base_id in id_set]
+                logger.info("Scout 预筛选: %d → %d 个套装", len(all_candidates), len(candidates))
+            else:
+                candidates = all_candidates
+        except Exception as exc:
+            logger.debug("Scout 预筛选失败，使用原始列表: %s", exc)
+            candidates = all_candidates
+    else:
+        candidates = all_candidates
+
+    def _analyze(group: PrimeGroup) -> SetProfitResult | None:
+        try:
+            return analyze_set_profit(group, order_fetcher)
+        except Exception:
+            return None
+
+    results = []
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(_analyze, g): g for g in candidates}
+        for future in as_completed(futures):
+            result = future.result()
             if result and result.best_profit >= min_profit:
                 results.append(result)
-        except Exception:
-            continue
 
     results.sort(key=lambda r: r.best_profit, reverse=True)
     return results[:limit]

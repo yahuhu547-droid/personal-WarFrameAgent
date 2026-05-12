@@ -71,8 +71,8 @@ class ChatMemoryIntegrationTests(unittest.TestCase):
         answer = agent.answer("充沛现在价格怎么样")
 
         self.assertIn("触发提醒", answer)
-        self.assertIn("记忆提醒: 充沛低于45提醒", prompts[0])
-        self.assertIn("偏好: platform=pc, crossplay=True", prompts[0])
+        self.assertIn("充沛低于45提醒", prompts[0])
+        self.assertIn("平台=pc", prompts[0])
 
 
 if __name__ == "__main__":

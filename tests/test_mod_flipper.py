@@ -107,6 +107,7 @@ def test_value_score_formula():
         flip_profit=50, endo_cost=20470,
         plat_per_1k_endo=50 / 20.47,
         value_score=0, volume_48h=10, max_rank=10, rarity="RARE",
+        roi_pct=500.0, is_prime=False,
     )
     expected = (50 / 20.47) * math.log2(11)
     assert abs(result.value_score - expected) < 0.01 or result.value_score == 0  # value_score is computed at creation

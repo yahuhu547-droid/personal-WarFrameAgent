@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from . import config
@@ -37,11 +38,26 @@ class SessionContext:
         if len(self.history) > max_history:
             self.history = self.history[-max_history:]
 
-    def to_messages(self, limit: int | None = None) -> list[dict[str, str]]:
-        """将历史对话转为 Ollama messages 格式（最近 N 轮）"""
+    def to_messages(self, limit: int | None = None, current_query: str | None = None) -> list[dict[str, str]]:
+        """将历史对话转为 Ollama messages 格式（最近 N 轮）。
+
+        当提供 current_query 时，按相关性（关键词重叠 + 时间衰减）排序历史，
+        优先保留与当前查询相关的对话轮次。
+        """
         if limit is None:
             limit = config.CONTEXT_WINDOW
-        recent = self.history[-limit:]
+        if not current_query or len(self.history) <= limit:
+            recent = self.history[-limit:]
+        else:
+            scored = []
+            query_tokens = set(current_query.lower().split())
+            for i, (user_msg, assistant_reply) in enumerate(self.history):
+                relevance = _relevance_score(query_tokens, user_msg + " " + assistant_reply)
+                time_decay = math.exp(-0.1 * (len(self.history) - 1 - i))
+                scored.append((relevance + time_decay, i, user_msg, assistant_reply))
+            scored.sort(key=lambda x: -x[0])
+            selected = sorted(scored[:limit], key=lambda x: x[1])
+            recent = [(item[2], item[3]) for item in selected]
         messages = []
         for user_msg, assistant_reply in recent:
             messages.append({"role": "user", "content": user_msg})
@@ -50,6 +66,12 @@ class SessionContext:
 
     def has_context(self) -> bool:
         return bool(self.last_item_ids)
+
+
+def _relevance_score(query_tokens: set[str], text: str) -> float:
+    """简单子串匹配评分，不依赖 embedding，零开销。"""
+    text_lower = text.lower()
+    return sum(1 for token in query_tokens if token in text_lower)
 
 
 def is_followup(message: str) -> bool:

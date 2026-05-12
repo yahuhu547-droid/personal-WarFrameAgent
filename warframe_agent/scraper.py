@@ -167,24 +167,22 @@ async def scrape_item_statistics(item_url_name: str) -> dict | None:
 
 async def scrape_wiki_page(url: str) -> str | None:
     """抓取 Wiki 页面内容"""
+    browser = await _get_browser()
+    page = await browser.new_page()
     try:
-        html = await fetch_market_page(url, wait_selector="#mw-content-text")
-        # 简单提取文本内容
-        browser = await _get_browser()
-        page = await browser.new_page()
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-            text = await page.evaluate("""
-                () => {
-                    const content = document.getElementById('mw-content-text');
-                    return content ? content.innerText : '';
-                }
-            """)
-            return text
-        finally:
-            await page.close()
+        await page.goto(url, wait_until="networkidle", timeout=15000)
+        await page.wait_for_selector("#mw-content-text", timeout=10000)
+        text = await page.evaluate("""
+            () => {
+                const content = document.getElementById('mw-content-text');
+                return content ? content.innerText : '';
+            }
+        """)
+        return text
     except Exception:
         return None
+    finally:
+        await page.close()
 
 
 def scrape_sync(coro):

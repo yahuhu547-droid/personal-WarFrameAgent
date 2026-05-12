@@ -1,4 +1,4 @@
-"""测试自主触发 + LLM 分析：异常检测、机会检测、趋势预测、prompt 构建。"""
+"""测试规则驱动监控：机会检测、知识库集成、市场状态评估。"""
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -8,42 +8,10 @@ from warframe_agent.monitor import (
     FavoriteSnapshot,
     PriceMonitor,
     ScanResult,
-    build_anomaly_analysis_prompt,
     detect_opportunities,
 )
+from warframe_agent.knowledge import MarketKnowledge
 from warframe_agent.price_history import PriceHistoryDB
-
-
-# ── build_anomaly_analysis_prompt ──
-
-def test_build_anomaly_analysis_prompt_contains_all_fields():
-    prompt = build_anomaly_analysis_prompt(
-        item_id="arcane_energize",
-        item_display="充沛赋能",
-        anomaly={"current": 120, "average": 80, "deviation_pct": 50, "direction": "spike"},
-        trend="近 7 天上涨",
-        history_high=150,
-        history_low=40,
-    )
-    assert "充沛赋能" in prompt
-    assert "arcane_energize" in prompt
-    assert "120" in prompt
-    assert "80" in prompt
-    assert "50%" in prompt
-    assert "暴涨" in prompt
-    assert "近 7 天上涨" in prompt
-    assert "150" in prompt
-    assert "40" in prompt
-
-
-def test_build_anomaly_analysis_prompt_handles_none_trend():
-    prompt = build_anomaly_analysis_prompt(
-        item_id="test", item_display="Test",
-        anomaly={"current": 10, "average": 20, "deviation_pct": 50, "direction": "dip"},
-        trend=None, history_high=None, history_low=None,
-    )
-    assert "暴跌" in prompt
-    assert "未知" in prompt
 
 
 # ── detect_opportunities ──
@@ -73,16 +41,23 @@ def test_detect_opportunities_ignores_missing_prices():
     assert detect_opportunities(snapshots) == []
 
 
-# ── PriceMonitor with llm_analyzer ──
+# ── PriceMonitor with knowledge ──
 
-def test_monitor_with_llm_analyzer():
-    """验证 llm_analyzer 回调被调用，分析结果被保存到通知。"""
-    analyzer = MagicMock(return_value="这是 LLM 分析结果")
+def test_monitor_with_knowledge():
+    """验证 knowledge 参数被正确传递。"""
+    knowledge = MarketKnowledge()
     monitor = PriceMonitor(
         order_fetcher=lambda _: [],
-        llm_analyzer=analyzer,
+        knowledge=knowledge,
     )
-    assert monitor.llm_analyzer is analyzer
+    assert monitor.knowledge is knowledge
+
+
+def test_monitor_default_knowledge():
+    """验证未传 knowledge 时自动创建空知识库。"""
+    monitor = PriceMonitor(order_fetcher=lambda _: [])
+    assert isinstance(monitor.knowledge, MarketKnowledge)
+    assert monitor.knowledge.get_item_stats("anything") is None
 
 
 def test_enriched_notification_fields():

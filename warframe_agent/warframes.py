@@ -27,6 +27,22 @@ PARTS = {
     "string": {"suffix": "string", "label": "弓弦", "terms": ["弓弦", "string"]},
     "upper_limb": {"suffix": "upper_limb", "label": "上弓臂", "terms": ["上弓臂", "upper limb"]},
     "lower_limb": {"suffix": "lower_limb", "label": "下弓臂", "terms": ["下弓臂", "lower limb"]},
+    "hilt": {"suffix": "hilt", "label": "剑柄", "terms": ["剑柄", "hilt"]},
+    "guard": {"suffix": "guard", "label": "护手", "terms": ["护手", "guard"]},
+    "gauntlet": {"suffix": "gauntlet", "label": "护臂", "terms": ["护臂", "gauntlet"]},
+    "carapace": {"suffix": "carapace", "label": "外壳", "terms": ["外壳", "carapace"]},
+    "cerebrum": {"suffix": "cerebrum", "label": "中枢", "terms": ["中枢", "cerebrum"]},
+    "boot": {"suffix": "boot", "label": "靴甲", "terms": ["靴甲", "boot"]},
+    "head": {"suffix": "head", "label": "头部", "terms": ["头部", "head"]},
+    "blades": {"suffix": "blades", "label": "双刃", "terms": ["双刃", "blades"]},
+    "pouch": {"suffix": "pouch", "label": "囊袋", "terms": ["囊袋", "pouch"]},
+    "stars": {"suffix": "stars", "label": "星镖", "terms": ["星镖", "stars"]},
+    "band": {"suffix": "band", "label": "项圈", "terms": ["项圈", "band"]},
+    "buckle": {"suffix": "buckle", "label": "扣环", "terms": ["扣环", "buckle"]},
+    "ornament": {"suffix": "ornament", "label": "饰物", "terms": ["饰物", "ornament"]},
+    "chain": {"suffix": "chain", "label": "锁链", "terms": ["锁链", "chain"]},
+    "bag": {"suffix": "bag", "label": "袋囊", "terms": ["袋囊", "bag"]},
+    "wing": {"suffix": "wing", "label": "翼片", "terms": ["翼片", "wing"]},
 }
 SET_TERMS = ["一套", "整套", "总价", "set", "成本", "拆件", "全套"]
 MISSING_TERMS = ["还差", "缺", "补齐", "补全", "做一套", "做全", "还要"]
@@ -238,10 +254,29 @@ def _summarize_orders(item_id: str | None, orders: list[dict] | None) -> dict:
     buyers = best_buyers(orders, limit=1)
     seller = sellers[0] if sellers else None
     buyer = buyers[0] if buyers else None
+    # 当没有在线卖家时，回退到所有卖家的最低价作为参考
+    sell_price = seller.platinum if seller else None
+    if sell_price is None:
+        all_sell = sorted(
+            [o for o in orders if (o.get("type") or o.get("order_type")) == "sell"],
+            key=lambda x: x.get("platinum", 999),
+        )
+        if all_sell:
+            sell_price = int(all_sell[0].get("platinum", 0))
+    # 当没有在线买家时，回退到所有买家的最高价
+    buy_price = buyer.platinum if buyer else None
+    if buy_price is None:
+        all_buy = sorted(
+            [o for o in orders if (o.get("type") or o.get("order_type")) == "buy"],
+            key=lambda x: x.get("platinum", 0),
+            reverse=True,
+        )
+        if all_buy:
+            buy_price = int(all_buy[0].get("platinum", 0))
     return {
         "item_id": item_id,
-        "sell_price": seller.platinum if seller else None,
-        "buy_price": buyer.platinum if buyer else None,
+        "sell_price": sell_price,
+        "buy_price": buy_price,
         "seller": seller,
         "buyer": buyer,
     }
@@ -315,8 +350,11 @@ def _price_text(price: int | None) -> str:
 
 def _detect_base_id(message: str, groups: dict[str, PrimeGroup]) -> str | None:
     normalized = message.lower().replace(" ", "_")
+    # 价格查询相关的关键词，即使没有 "p" 或 "prime" 也应识别
+    _PRICE_QUERY_HINTS = {"一套", "多少钱", "价格", "收", "卖", "买", "出", "多少", "查", "看看"}
+    has_price_hint = any(hint in message for hint in _PRICE_QUERY_HINTS)
     for zh_alias, english_base in COMMON_WARFRAME_ALIASES.items():
-        if zh_alias in message and ("p" in message.lower() or "prime" in message.lower()):
+        if zh_alias in message and ("p" in message.lower() or "prime" in message.lower() or has_price_hint):
             candidate = f"{english_base}_prime"
             if candidate in groups:
                 return candidate

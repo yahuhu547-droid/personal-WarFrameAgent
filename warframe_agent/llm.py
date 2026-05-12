@@ -1,7 +1,178 @@
 ﻿from __future__ import annotations
 
+import json
+import logging
+from typing import AsyncIterator
+
 from . import config
 from .dictionary import normalize_market_id
+
+logger = logging.getLogger(__name__)
+
+# ── 云端模型 ──────────────────────────────────────────────────────────────
+
+
+def _cloud_chat_sync(messages: list[dict[str, str]], model: str = config.CLOUD_MODEL) -> str:
+    """同步调用云端 OpenAI 兼容 API"""
+    import urllib.request
+    payload = json.dumps({
+        "model": model,
+        "messages": messages,
+        "max_tokens": config.CLOUD_MAX_TOKENS,
+        "stream": False,
+    }).encode()
+    req = urllib.request.Request(
+        f"{config.CLOUD_API_BASE}/chat/completions",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {config.CLOUD_API_KEY}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read())
+    return data["choices"][0]["message"]["content"]
+
+
+async def _cloud_chat_stream(messages: list[dict[str, str]], model: str = config.CLOUD_MODEL) -> AsyncIterator[str]:
+    """流式调用云端 OpenAI 兼容 API"""
+    import urllib.request
+    payload = json.dumps({
+        "model": model,
+        "messages": messages,
+        "max_tokens": config.CLOUD_MAX_TOKENS,
+        "stream": True,
+    }).encode()
+    req = urllib.request.Request(
+        f"{config.CLOUD_API_BASE}/chat/completions",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {config.CLOUD_API_KEY}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        buffer = ""
+        while True:
+            chunk = resp.read(1024)
+            if not chunk:
+                break
+            buffer += chunk.decode()
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.strip()
+                if not line or not line.startswith("data: "):
+                    continue
+                data_str = line[6:]
+                if data_str == "[DONE]":
+                    return
+                try:
+                    data = json.loads(data_str)
+                    delta = data["choices"][0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        yield content
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+
+
+# ── 复杂度评估 ────────────────────────────────────────────────────────────
+
+
+def estimate_complexity(message: str) -> int:
+    """评估查询复杂度，返回分数。越高越复杂，需要云端模型。
+
+    分数规则：
+    - 长度 > 50 字符: +1
+    - 包含对比/分析关键词: +2
+    - 包含多个物品名: +1 per extra item
+    - 包含投资/策略关键词: +2
+    """
+    score = 0
+    if len(message) > 50:
+        score += 1
+
+    analysis_keywords = ["对比", "比较", "哪个更", "划算", "推荐", "分析", "投资", "策略", "收益", "风险", "组合"]
+    if any(kw in message for kw in analysis_keywords):
+        score += 2
+
+    invest_keywords = ["预算", "ROI", "翻转", "利润", "低买高卖", "赚钱"]
+    if any(kw in message for kw in invest_keywords):
+        score += 2
+
+    # 多物品检测（"和"、"、"、"vs"分隔）
+    import re
+    separators = re.compile(r"[和、,，vs]+")
+    parts = separators.split(message)
+    item_count = sum(1 for p in parts if len(p.strip()) > 1 and len(p.strip()) < 30)
+    if item_count > 2:
+        score += item_count - 2
+
+    return score
+
+
+def should_use_cloud(message: str) -> bool:
+    """根据配置和复杂度决定是否使用云端模型。"""
+    if config.MODEL_ROUTING == "cloud":
+        return True
+    if config.MODEL_ROUTING == "local":
+        return False
+    # auto 模式
+    return estimate_complexity(message) >= config.COMPLEXITY_THRESHOLD
+
+
+# ── 统一接口 ──────────────────────────────────────────────────────────────
+
+
+def chat_with_model(messages: list[dict[str, str]], model: str | None = None) -> str:
+    """统一 LLM 调用接口。model="local" | "cloud" | None(自动)"""
+    if model == "cloud":
+        return _cloud_chat_sync(messages)
+    if model == "local":
+        return chat_with_ollama(messages)
+    # 自动路由：从最后一条 user 消息提取内容判断复杂度
+    user_msg = ""
+    for m in reversed(messages):
+        if m["role"] == "user":
+            user_msg = m["content"]
+            break
+    if should_use_cloud(user_msg):
+        try:
+            return _cloud_chat_sync(messages)
+        except Exception as exc:
+            logger.warning("云端模型调用失败，回退本地: %s", exc)
+            return chat_with_ollama(messages)
+    return chat_with_ollama(messages)
+
+
+async def stream_chat_model(messages: list[dict[str, str]], model: str | None = None) -> AsyncIterator[str]:
+    """统一流式 LLM 调用接口。"""
+    if model == "cloud":
+        async for chunk in _cloud_chat_stream(messages):
+            yield chunk
+        return
+    if model == "local":
+        async for chunk in stream_chat_ollama(messages):
+            yield chunk
+        return
+    # 自动路由
+    user_msg = ""
+    for m in reversed(messages):
+        if m["role"] == "user":
+            user_msg = m["content"]
+            break
+    if should_use_cloud(user_msg):
+        try:
+            async for chunk in _cloud_chat_stream(messages):
+                yield chunk
+            return
+        except Exception as exc:
+            logger.warning("云端流式调用失败，回退本地: %s", exc)
+    async for chunk in stream_chat_ollama(messages):
+        yield chunk
+
+
+# ── Ollama 本地 ───────────────────────────────────────────────────────────
 
 
 def resolve_with_ollama(name: str, model: str = config.MODEL_NAME) -> str | None:

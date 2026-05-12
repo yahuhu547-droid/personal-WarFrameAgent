@@ -2786,5 +2786,1660 @@ def scan_investments(items, order_fetcher, filters) -> list[InvestmentOpportunit
 
 **测试结果**: 211 个测试全部通过（新增 24 个）
 
-**文档版本**：v4.5
+---
+
+### Phase 31 — 投资顾问重设计 + Mod 翻转优化
+
+**日期**: 2026-05-04
+**重点**: 将投资顾问从通用价差扫描重构为 Prime 套装套利顾问，优化 Mod 翻转显示
+
+#### 1. Mod 翻转优化
+
+**问题**: 前端字段名不匹配导致显示 "undefinedp"，买/卖价格相同。
+
+**修复**:
+- API 端点新增 `min_roi_pct` 参数（默认 100%），只显示 ROI ≥ 100% 的 Mod
+- 响应新增 `roi_pct` 和 `is_prime` 字段
+- 前端修正字段名：`item.flip_profit`、`item.r0_buy_price`、`item.r10_sell_price`
+- 新增分页（5 个/页）、PRIME 徽标、ROI 颜色编码
+- 显示名只取中文名（`split(' / ')[0]`）
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `web/app.py` | `/api/mod_flipper` 新增 `min_roi_pct` 参数，返回 `roi_pct`/`is_prime` |
+| 修改 | `js/sidebar.js` | `loadModFlipper` 重写：正确字段名 + 分页 + PRIME 徽标 |
+
+#### 2. warframes.py PARTS 字典补全
+
+**问题**: 42 个 Prime 部件因后缀不在 PARTS 字典中被 `build_prime_groups()` 静默丢弃。
+
+**修复**: 新增 18 个部件后缀：
+
+| 后缀 | 中文标签 | 典型物品 |
+|------|---------|---------|
+| hilt | 剑柄 | Nikana Prime |
+| guard | 护手 | Silva & Aegis Prime |
+| gauntlet | 护臂 | Ankyros Prime, Tekko Prime |
+| carapace | 外壳 | Carrier Prime |
+| cerebrum | 中枢 | Carrier Prime |
+| boot | 靴甲 | Kogake Prime |
+| head | 头部 | Fragor Prime |
+| blades | 双刃 | Venka Prime |
+| pouch | 囊袋 | Hikou Prime |
+| stars | 星镖 | Hikou Prime |
+| band | 项圈 | Kavasa Prime |
+| buckle | 扣环 | Kavasa Prime |
+| ornament | 饰物 | Bo Prime, Tipedo Prime |
+| chain | 锁链 | Ninkondi Prime |
+| bag | 袋囊 | — |
+| wing | 翼片 | — |
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 修改 | `warframes.py` | PARTS 字典新增 18 个后缀 |
+
+#### 3. 投资顾问重设计
+
+**设计理念**: 原投资顾问与 Mod 翻转功能重叠（都是"遍历物品找价差"）。重新设计为 **Prime 套装套利顾问**：
+- **Mod 翻转** = 单品策略：买 R0 → 内融升级 → 卖满级
+- **投资顾问** = 组合策略：用有限预算，在多个 Prime 套装间分配资金，最大化总利润
+
+**核心逻辑**:
+
+```python
+# 策略 A: 散买部件 → 整套卖出
+profit_a = set_sell_price - sum(parts_buy_prices)
+
+# 策略 B: 整套买入 → 散卖部件
+profit_b = sum(parts_sell_prices) - set_buy_price
+
+# 选择更优策略
+sets_affordable = budget // buy_cost
+total_profit = sets_affordable * profit_per_set
+```
+
+**关键优化 — 并发获取价格**:
+```python
+def _fetch_prices_parallel(item_ids, order_fetcher, max_workers=5):
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(order_fetcher, iid): iid for iid in item_ids}
+        # 5 个部件并发获取，而非串行等待
+```
+
+**数据结构**:
+```python
+@dataclass(frozen=True)
+class PrimeInvestment:
+    base_id: str
+    display_name: str
+    strategy: str           # "buy_parts_sell_set" 或 "buy_set_sell_parts"
+    buy_cost: int           # 买入总成本
+    sell_price: int         # 卖出收入
+    profit_per_set: int     # 每套利润
+    roi_pct: float          # ROI%
+    sets_affordable: int    # 预算内可买几套
+    total_profit: int       # 可买套数 × 每套利润
+    volume_48h: int | None
+    risk_level: str
+    part_details: list[dict]
+    set_item_id: str
+```
+
+**API 端点**:
+
+| 端点 | 参数 | 功能 |
+|------|------|------|
+| `/api/investment` | budget=500, min_roi_pct=10, limit=30 | Prime 套装套利扫描 |
+
+**响应示例**:
+```json
+{
+  "results": [{
+    "base_id": "atlas_prime",
+    "display_name": "Atlas Prime 一套",
+    "strategy": "buy_set_sell_parts",
+    "buy_cost": 65,
+    "sell_price": 306,
+    "profit_per_set": 241,
+    "roi_pct": 370.8,
+    "sets_affordable": 7,
+    "total_profit": 1687,
+    "part_details": [
+      {"name": "蓝图", "buy": 2, "sell": 2},
+      {"name": "机体", "buy": 7, "sell": 0},
+      {"name": "头部神经光元", "buy": 44, "sell": 301},
+      {"name": "系统", "buy": 5, "sell": 3}
+    ]
+  }],
+  "budget": 500
+}
+```
+
+**前端功能**:
+- 预算输入框（默认 500p）+ 扫描按钮
+- 分页显示（5 个/页）
+- ROI 颜色编码：≥100% 绿色，≥50% 黄色，<50% 橙色
+- 策略标签："散买→整卖" 或 "整买→散卖"
+- 部件价格明细（可折叠）
+- warframe.market 查看链接
+- 总利润汇总："预算 500p · 全部执行可赚 +3534p"
+
+| 操作 | 文件 | 变更 |
+|------|------|------|
+| 重写 | `warframe_agent/investment.py` | PrimeInvestment 数据结构、并发价格获取、套装套利分析 |
+| 修改 | `web/app.py` | `/api/investment` 端点重写 |
+| 重写 | `js/sidebar.js` | `loadInvestmentAdvisor` 重写 |
+| 重写 | `tests/test_investment.py` | 10 个测试用例 |
+
+#### 4. 三大功能定位
+
+| 功能 | 利润来源 | 输入 | 输出 |
+|------|---------|------|------|
+| Mod 翻转 | 内融升级差价 | 无 | Mod 列表按利润排序 |
+| 套装利润 | 套装 vs 部件价差 | 无 | 套装列表按利润排序 |
+| **投资顾问** | 套装套利 + 预算分配 | **预算白金数** | **可执行的投资组合** |
+
+**新增文件**:
+| 文件 | 说明 |
+|------|------|
+| `tests/test_investment.py` | 10 个测试（重写） |
+
+**修改文件**:
+| 文件 | 变更 |
+|------|------|
+| `warframes.py` | PARTS 字典 +18 后缀 |
+| `warframe_agent/investment.py` | 完全重写 |
+| `web/app.py` | `/api/investment` + `/api/mod_flipper` 更新 |
+| `js/sidebar.js` | `loadModFlipper` + `loadInvestmentAdvisor` 重写 |
+| `tests/test_investment.py` | 重写为 Prime 套装测试 |
+
+**测试结果**: 10 个投资顾问测试全部通过
+
+**文档版本**：v4.6
 **最后更新**：2026-05-04
+
+---
+
+### Phase 32 — Agent 架构升级：从工具平台到决策智能体
+
+**日期**: 2026-05-05
+**核心目标**: 在现有工具平台上加 4 层决策架构，让 Agent 拥有自主目标、执行计划、主动行为和反馈学习。
+
+#### 1. 架构分析
+
+**升级前**: 带工具的聊天机器人 — 用户问才答，每次交互独立，没有目标、没有主动性、没有学习。
+
+**升级目标**: 4 层决策架构：
+
+| 层级 | 功能 | 对应模块 |
+|------|------|---------|
+| 目标引擎 | 创建/管理/追踪目标 | `goals.py` |
+| 执行计划 | 按目标生成扫描步骤 | `goals.py` → `plan_for_goal()` |
+| 主动行为 | 监控循环自动执行目标 | `monitor.py` Phase 4 |
+| 反馈学习 | 根据交易结果调整评分 | `goals.py` → `calculate_opportunity_score()` |
+
+#### 2. 目标引擎 — `goals.py`（新文件）
+
+**数据结构**:
+
+```python
+@dataclass(frozen=True)
+class AgentGoal:
+    goal_id: str              # UUID 前 12 位
+    goal_type: str            # maximize_profit / flip_mod / build_set / find_bargain
+    description: str          # 人类可读描述
+    target: str               # prime_sets / mod / all
+    criteria: dict            # {"budget": 500, "min_roi": 50}
+    status: str               # active / achieved / abandoned
+    created_at: str           # ISO 时间戳
+    results: list[dict]       # 执行记录
+
+@dataclass(frozen=True)
+class ExecutionStep:
+    step_id: str
+    goal_id: str
+    action: str               # scan_mod_flip / scan_set_profit / scan_investment / rank_results
+    params: dict
+    status: str               # pending / running / done / failed
+    result: dict | None
+
+@dataclass(frozen=True)
+class TradeOutcome:
+    outcome_id: str
+    goal_id: str
+    action: str               # bought / sold / skipped
+    item_id: str
+    price: int
+    expected_profit: int
+    actual_profit: int
+    user_feedback: str        # good / bad / ignored
+    timestamp: str
+```
+
+**核心函数**:
+
+| 函数 | 功能 |
+|------|------|
+| `create_goal(goal_type, description, target, criteria)` | 创建目标，生成 UUID |
+| `plan_for_goal(goal)` | 按类型生成执行步骤（4 种目标类型 × 不同步骤组合） |
+| `execute_plan(plan, items, order_fetcher)` | 按顺序执行步骤，调用三大扫描函数，收集去重结果 |
+| `calculate_opportunity_score(opportunity, trade_outcomes)` | 基于反馈历史调整 ROI 评分 |
+| `record_trade_outcome(goal_id, action, item_id, price, ...)` | 记录交易结果 |
+
+**目标类型 → 执行计划映射**:
+
+| 目标类型 | 步骤 |
+|---------|------|
+| `maximize_profit` | scan_mod_flip → scan_set_profit → scan_investment → rank_results |
+| `flip_mod` | scan_mod_flip |
+| `build_set` | scan_investment |
+| `find_bargain` | scan_investment → scan_mod_flip |
+
+**反馈学习逻辑**:
+```python
+# 统计同类 source 的反馈
+good_rate = good_count / total_count
+if good_rate > 0.7:
+    score *= 1.2   # 正反馈 +20%
+elif good_rate < 0.3:
+    score *= 0.7   # 负反馈 -30%
+```
+
+#### 3. Memory 扩展 — `memory.py`
+
+**新增字段**:
+```python
+@dataclass(frozen=True)
+class AgentMemory:
+    # ... 原有字段 ...
+    active_goals: list[AgentGoal] = field(default_factory=list)
+    trade_outcomes: list[TradeOutcome] = field(default_factory=list)
+```
+
+**新增不可变方法**:
+
+| 方法 | 功能 |
+|------|------|
+| `with_goal(goal)` | 添加目标 |
+| `without_goal(goal_id)` | 移除目标 |
+| `with_goal_result(goal_id, result)` | 追加执行结果 |
+| `active_goals_list()` | 返回 status=="active" 的目标 |
+| `with_trade_outcome(outcome)` | 追加交易结果 |
+
+序列化/反序列化完整支持 JSON 持久化。
+
+#### 4. 监控器扩展 — `monitor.py`
+
+**Phase 4: 目标驱动扫描**（在 `scan_once()` 中新增）:
+
+```python
+# Phase 4: 目标驱动扫描
+for goal in memory.active_goals_list():
+    items = self._load_items()
+    plan = plan_for_goal(goal)
+    goal_results = execute_plan(plan, items, self.order_fetcher)
+    for r in goal_results:
+        if r.get("profit", 0) > 0:
+            result.suggestions.append(ProactiveSuggestion(
+                item_id=r["item_id"],
+                suggestion_type="goal_opportunity",
+                priority=1 if r["roi_pct"] > 100 else 2,
+                message=f"目标「{goal.description}」发现机会: {r['item_name']} +{r['profit']}p",
+            ))
+```
+
+**新增回调**: `on_goal_opportunity` — 目标机会发现时推送到前端 WebSocket。
+
+#### 5. API 端点 — `app.py`
+
+| 端点 | 方法 | 功能 |
+|------|------|------|
+| `/api/goals` | GET | 获取所有目标 |
+| `/api/goals` | POST | 创建新目标 |
+| `/api/goals/{goal_id}` | DELETE | 放弃目标 |
+| `/api/goals/{goal_id}/execute` | POST | 手动触发目标执行 |
+| `/api/goals/{goal_id}/outcome` | POST | 记录交易结果 |
+| `/api/goals/summary` | GET | 目标执行摘要 |
+
+**WebSocket 新增通知类型**: `goal_opportunity` — 目标驱动的机会推送。
+
+#### 6. 前端 — 目标面板 `sidebar.js`
+
+**功能**:
+- "+ 创建新目标" 按钮 → 弹窗（目标类型、描述、预算、最低 ROI）
+- 目标列表分页（5 个/页）
+- 每个目标显示：类型标签、状态、最近发现（可折叠）
+- "执行" / "放弃" 按钮
+- 底部摘要统计：活跃目标数、交易数、采纳率、预期利润
+
+#### 7. 测试
+
+**新增**: `tests/test_goals.py` — 17 个测试用例
+
+| 测试 | 验证 |
+|------|------|
+| test_create_goal_basic | 目标创建、UUID 生成、默认值 |
+| test_plan_for_maximize_profit | 4 步计划生成 |
+| test_plan_for_flip_mod | 1 步计划生成 |
+| test_plan_for_build_set | 1 步计划生成 |
+| test_plan_for_find_bargain | 2 步计划生成 |
+| test_execute_plan_empty | 空结果处理 |
+| test_opportunity_score_* | 反馈加权（无/好/坏/中性） |
+| test_record_trade_outcome | 交易结果记录 |
+| test_goal_memory_persistence | JSON 持久化 |
+| test_active_goals_list | 活跃目标过滤 |
+
+**全部测试**: 229 passed
+
+#### 8. 文件变更汇总
+
+| 操作 | 文件 | 说明 |
+|------|------|------|
+| 新增 | `warframe_agent/goals.py` | 目标引擎核心 |
+| 修改 | `warframe_agent/memory.py` | AgentMemory 扩展 |
+| 修改 | `warframe_agent/monitor.py` | Phase 4 目标驱动扫描 |
+| 修改 | `warframe_agent/web/app.py` | 6 个 API 端点 + WebSocket |
+| 修改 | `web/static/index.html` | 目标引擎菜单按钮 |
+| 修改 | `web/static/js/sidebar.js` | 目标面板前端 |
+| 新增 | `tests/test_goals.py` | 17 个测试 |
+| 修改 | `tests/test_mod_flipper.py` | 修复 roi_pct/is_prime 缺失 |
+
+**文档版本**：v5.0
+**最后更新**：2026-05-05
+
+---
+
+### Phase 33: Agent 深层智能 — 4 层自主决策能力 (v6.0)
+
+**目标**: 从"被动执行模板"升级为具备自主思考能力的智能 Agent。
+
+Phase 32 完成了基础架构（目标引擎 + 执行计划 + 监控集成 + 反馈学习），但系统仍然是被动的——目标由用户手动生成，计划是固定的 if-else 模板，不会从数据中学习。Phase 33 引入 4 层深层智能。
+
+#### 架构概览
+
+```
+Layer 4: 主动推送 ← 综合所有数据，LLM 生成带推理的推送
+Layer 3: 模式学习 ← 从交易历史中发现规律
+Layer 2: 动态执行规划 ← ReAct 风格，根据中间结果调整
+Layer 1: LLM 目标生成 ← 监控器自主分析市场创建目标
+```
+
+实现顺序: L3 → L1 → L2 → L4（因为 L1/L2/L4 的 prompt 都需要注入已学模式）
+
+---
+
+#### Layer 3: 模式学习 — `warframe_agent/patterns.py`
+
+从交易历史和价格历史中提取规律，用 LLM 发现模式，写入记忆。
+
+**数据结构**:
+```python
+@dataclass(frozen=True)
+class LearnedPattern:
+    pattern_id: str
+    category: str       # "time" / "item" / "strategy"
+    description: str    # "Mod翻转周末ROI更高"
+    confidence: float   # 0.0-1.0
+    data_points: int
+    discovered_at: str
+    last_validated: str
+```
+
+**核心函数**:
+
+| 函数 | 功能 |
+|------|------|
+| `extract_time_patterns(trade_db, price_db)` | 按星期/小时聚合交易数据 |
+| `extract_item_patterns(trade_db, price_db)` | 单品交易频率和价格稳定性 |
+| `extract_strategy_patterns(trade_outcomes)` | 策略成功率对比 |
+| `discover_patterns(trade_db, price_db, trade_outcomes, llm_caller)` | 主入口：数据提取 → LLM 分析 → 模式列表 |
+| `build_pattern_discovery_prompt(...)` | 构建模式发现 prompt |
+| `parse_patterns(response)` | 解析 LLM JSON 输出 |
+
+**memory.py 修改**: `AgentMemory` 新增 `learned_patterns: list[dict]` 字段 + `with_patterns()` 方法（去重 + 按 confidence 排序）
+
+**config.py 新增**: `PATTERN_DISCOVERY_INTERVAL = 12`（每 12 次扫描 ≈ 1 小时）
+
+---
+
+#### Layer 1: LLM 驱动目标生成 — `warframe_agent/goals.py` 扩展
+
+监控器自动分析市场数据，用 LLM 生成目标（不需要用户创建）。
+
+**数据结构**:
+```python
+@dataclass
+class MarketContext:
+    top_mod_flips: list[dict]       # scanner top 5
+    top_set_profits: list[dict]
+    top_investments: list[dict]
+    anomalies: list[dict]
+    active_goals: list[AgentGoal]
+    trade_outcomes: list[TradeOutcome]
+    user_profile: UserProfile | None
+    learned_patterns: list[dict]
+```
+
+**核心函数**:
+
+| 函数 | 功能 |
+|------|------|
+| `generate_goals_from_market(context, llm_caller)` | LLM 分析市场 → 1-3 个目标 |
+| `_build_goal_generation_prompt(context)` | 构建 prompt（含市场数据 + 已有目标 + 用户偏好 + 已学模式） |
+| `_parse_generated_goals(response, existing_goals)` | 解析 LLM JSON，去重，加 `[自动]` 前缀 |
+
+**目标类型**: `maximize_profit` / `flip_mod` / `build_set` / `find_bargain`
+
+**config.py 新增**: `GOAL_GENERATION_INTERVAL = 6`（每 6 周期 ≈ 30 分钟）
+
+---
+
+#### Layer 2: 动态执行规划（ReAct 风格）— `warframe_agent/goals.py` 扩展
+
+执行目标时不再用固定模板，而是根据中间结果动态调整下一步。
+
+**核心函数**:
+
+| 函数 | 功能 |
+|------|------|
+| `execute_goal_dynamic(goal, items, order_fetcher, llm_caller, ...)` | ReAct 风格主循环 |
+| `_build_next_step_prompt(goal, results, history, iteration, max_iter)` | 让 LLM 决定下一步 |
+| `_parse_next_step(response)` | 解析 LLM 选择的 action + params |
+| `_execute_single_step(action, items, order_fetcher, params)` | 执行单步扫描器 |
+
+**执行循环**:
+1. 第一步：根据 goal_type 选扫描器
+2. 每步完成后，构建 summary prompt 让 LLM 决定下一步
+3. LLM 可选：`scan_mod_flip` / `scan_set_profit` / `scan_investment` / `stop`
+4. LLM 可调整参数（降低 min_roi_pct、改变 budget 等）
+5. 超时 120s 或达到 max_iterations 则停止
+
+**降级策略**: `llm_caller` 为 None 或 LLM 调用失败 → 回退到静态 `plan_for_goal` + `execute_plan`
+
+**config.py 新增**:
+- `DYNAMIC_PLAN_MAX_ITERATIONS = 3`
+- `DYNAMIC_PLAN_TIMEOUT_SECONDS = 120`
+
+---
+
+#### Layer 4: 主动推送 — `warframe_agent/monitor.py` 扩展
+
+综合所有数据生成带推理的推送消息，尊重用户偏好。
+
+**数据结构**:
+```python
+@dataclass(frozen=True)
+class ProactivePush:
+    item_id: str
+    item_display: str
+    push_type: str       # "opportunity" / "warning" / "recommendation"
+    priority: int        # 1=critical, 2=important
+    message: str         # LLM 生成的推理
+    action_suggestion: str  # "buy now" / "sell now" / "watch"
+    data: dict
+```
+
+**核心逻辑**:
+- `_run_proactive_push(scan_result)` → 筛选 priority ≤ 2 的建议
+- 用户偏好过滤：mod 类机会对只关注 prime_set 的用户降级
+- LLM 生成推送消息（含"为什么推荐" + 操作建议 + 风险提示）
+- LLM 失败时用原始消息降级推送
+
+**app.py 新增**:
+- `broadcast_proactive_push(push)` — WebSocket 广播
+- `on_proactive_push` 回调 → `setup_monitor()` 注册
+- `GET /api/patterns` — 查看已学模式
+
+**前端**: `app.js` WebSocket 处理 `proactive_push` 和 `goal_opportunity` 通知类型
+
+---
+
+#### monitor.py 集成
+
+**PriceMonitor 新增**:
+- `on_proactive_push` 回调参数
+- `_goal_planner_caller()` — 适配 `execute_goal_dynamic` 的 LLM 接口
+- `_run_proactive_push()` — Layer 4 主逻辑
+- Phase 4 改用 `execute_goal_dynamic()` 替代静态 `plan_for_goal()`
+- 周期调用：模式发现（每 12 周期）、目标生成（每 6 周期）
+
+**扫描周期 `_run()` 流程**:
+```
+scan_once() → 机会检测 → LLM 分析增强 → 主动推送 → 保存建议
+→ 周期性模式发现 → 周期性目标生成 → sleep 5min
+```
+
+---
+
+#### 测试
+
+| 测试文件 | 用例数 | 覆盖 |
+|----------|--------|------|
+| `tests/test_patterns.py` | 14 | 时间/物品/策略模式提取、prompt 构建、JSON 解析、discover_patterns 集成 |
+| `tests/test_goal_generation.py` | 10 | MarketContext、prompt 构建、目标解析/去重、LLM 集成/降级 |
+| `tests/test_dynamic_plan.py` | 9 | prompt 构建、step 解析、单步执行、fallback、超时 |
+| `tests/test_proactive_push.py` | 7 | ProactivePush 创建、LLM 推送/降级、用户偏好过滤 |
+
+**全部测试**: 274 passed（229 原有 + 45 新增）
+
+---
+
+#### 关键设计决策
+
+1. **所有 LLM 调用用 `chat_with_ollama`（同步）**: 监控器是 daemon 线程，不能用 async
+2. **优雅降级**: 每个 LLM 调用都有 fallback，失败不影响现有功能
+3. **资源限制**: 自动目标 ≤ 3 个，模式发现每小时 1 次，动态执行超时 120s，推送仅 priority 1-2
+4. **不可变数据**: 所有新结构用 frozen dataclass，AgentMemory 用 replace() 模式
+5. **模式注入**: 已学模式注入到所有 LLM prompt 中，让 Agent 有"经验"
+
+---
+
+#### 文件变更汇总
+
+| 操作 | 文件 | 说明 |
+|------|------|------|
+| 新增 | `warframe_agent/patterns.py` | 模式学习核心（224 行） |
+| 修改 | `warframe_agent/memory.py` | `learned_patterns` 字段 + `with_patterns()` |
+| 修改 | `warframe_agent/goals.py` | MarketContext + 目标生成 + 动态执行 |
+| 修改 | `warframe_agent/monitor.py` | 4 层集成 + 回调 + 周期调度 |
+| 修改 | `warframe_agent/config.py` | 4 个新常量 |
+| 修改 | `warframe_agent/web/app.py` | `/api/patterns` + proactive_push 广播 |
+| 修改 | `web/static/js/app.js` | WebSocket 通知处理 |
+| 新增 | `tests/test_patterns.py` | 14 个测试 |
+| 新增 | `tests/test_goal_generation.py` | 10 个测试 |
+| 新增 | `tests/test_dynamic_plan.py` | 9 个测试 |
+| 新增 | `tests/test_proactive_push.py` | 7 个测试 |
+
+**文档版本**：v6.0
+**最后更新**：2026-05-05
+
+---
+
+### Phase 34: 架构重构 — 从 LLM 驱动到规则引擎 + 知识库 (v7.0)
+
+Phase 33 完成了 4 层深层智能，但存在根本问题：**监控器每 5 分钟扫描周期塞了 4-5 次 LLM 调用**，既慢又不稳定。Phase 34 将监控器从 LLM 依赖中解放出来，改为 100% 规则驱动。LLM 只保留给聊天层。
+
+#### 核心变更
+
+**5 个 LLM 调用点 → 纯规则驱动**:
+
+| # | 原 LLM 调用 | 替代方案 | 位置 |
+|---|------------|----------|------|
+| 1 | `_run` LLM enrichment | 删除（模板已在异常检测中生成） | `monitor._run` |
+| 2 | `_run_proactive_push` | `generate_proactive_message()` 模板 | `rules.py` |
+| 3 | `_run_pattern_discovery` | `knowledge.update_from_scan()` | `knowledge.py` |
+| 4 | `_run_goal_generation` | `generate_auto_goals()` 规则 | `rules.py` |
+| 5 | `execute_goal_dynamic` | `plan_for_goal()` + `execute_plan()` | `goals.py` |
+
+#### Phase 1: 知识库 + 规则引擎
+
+**新增 `warframe_agent/knowledge.py`**:
+- `ItemKnowledge` — 物品级市场智能（滚动均价、波动率、趋势、扫描计数、事件上下文）
+- `CategoryHealth` — 品类健康度（机会数、平均 ROI、趋势）
+- `MarketKnowledge` — 知识库核心：
+  - `update_from_scan()` — 增量更新，用 `price_db` 计算统计量
+  - `get_item_stats()` / `get_category_health()` / `get_market_summary()`
+  - `update_event_context()` — 游戏事件上下文注入
+  - `save()` / `load()` — 持久化到 `data/knowledge_base.json`
+
+**新增 `warframe_agent/rules.py`**:
+- `MarketState` — 市场状态快照（波动率、趋势、活跃度、品类表现）
+- `ProactivePush` — 推送消息结构（从 monitor.py 迁移）
+- `evaluate_market_state()` — 纯计算评估市场，无网络、无 LLM
+- `generate_auto_goals()` — 4 条规则自动生成目标：
+  - mod 平均 ROI > 100% → `flip_mod`
+  - prime_set 机会 > 5 → `build_set`
+  - prime_set 平均 ROI > 30% → `find_bargain`
+  - 有异常 + 市场下行 → 保守 `maximize_profit`
+  - 最多 3 个自动目标，按 `(goal_type, target)` 去重
+- `generate_proactive_message()` — 模板化推送：
+  - 异常 → `"⚠️ {item} 价格{方向}！{recommendation}"`
+  - 机会 → `"💰 {item} 利润{profit}p"`
+  - recommendation 由 `_anomaly_recommendation()` 规则决定
+- `decide_next_step()` — 决策树替代 LLM 动态规划
+
+#### Phase 2: 监控器重构
+
+**重构 `warframe_agent/monitor.py`**:
+- `__init__` 移除 `llm_analyzer`，新增 `knowledge: MarketKnowledge` + `event_tracker: EventTracker`
+- `_run_proactive_push()` — 改用 `generate_proactive_message()`
+- `_run_goal_generation()` — 改用 `evaluate_market_state()` + `generate_auto_goals()`
+- `_run_pattern_discovery()` → `_run_knowledge_update()` — 改用 `knowledge.update_from_scan()`
+- Phase 4 改回 `plan_for_goal()` + `execute_plan()`
+- 删除 `_goal_planner_caller()`、`build_anomaly_analysis_prompt()`
+- `_run()` 扫描周期从 LLM 依赖变为纯规则：
+  ```
+  scan_once() → 机会检测 → 规则推送 → 保存建议
+  → 知识库更新(每3周期) → 目标生成(每6周期) → sleep 5min
+  ```
+
+**重构 `warframe_agent/web/app.py`**:
+- `setup_monitor()` 移除 `llm_analyzer`，改用 `MarketKnowledge.load()`
+
+#### Phase 3: 游戏事件感知
+
+**新增 `warframe_agent/events.py`**:
+- `GameEvent` — 事件结构（类型、影响物品、时间、影响方向、描述）
+- `EventTracker` — 事件追踪器：
+  - `fetch_world_state()` — 从 `api.warframestat.us/pc` 获取
+  - `parse_events()` — 解析 Baro、警报、入侵、虚空风暴
+  - `get_active_events()` — 带 30 分钟缓存
+  - `get_event_impact()` — 检查物品是否受事件影响
+  - `save_cache()` / `load_cache()` — 持久化缓存
+  - 容错：API 失败返回旧缓存
+
+**集成**:
+- `monitor._run_knowledge_update()` — 每次知识更新时刷新事件并注入知识库
+- `chat.py` — 新增 `query_events` 工具处理
+- `tool_router.py` — 新增 `query_events` schema
+- `app.py` — `GET /api/events` 端点
+
+#### Phase 4: 用户目标分解
+
+**扩展 `warframe_agent/goals.py`**:
+- `GoalProgress` — 目标进度追踪（目标量、当前量、剩余、步骤完成数）
+- `decompose_platinum_goal()` — 运行 3 个扫描器 → 按利润降序 → 贪心选取直到达标
+- `track_goal_progress()` — 按 goal_id 过滤交易结果，累加实际利润
+- `plan_for_goal()` 新增 `earn_platinum` 目标类型
+
+**新增 API 端点**:
+- `POST /api/goals/earn` — 创建攒白金目标 + 返回分解步骤
+- `GET /api/goals/{goal_id}/progress` — 获取目标进度
+
+#### 测试
+
+| 测试文件 | 用例数 | 覆盖 |
+|----------|--------|------|
+| `tests/test_knowledge.py` | 17 | 分类、ItemKnowledge、CategoryHealth、MarketKnowledge CRUD、save/load |
+| `tests/test_rules.py` | 21 | MarketState、evaluate_market_state、generate_auto_goals(7场景)、proactive_message(4场景)、decide_next_step(7场景) |
+| `tests/test_events.py` | 12 | GameEvent、_classify_event、parse_events、get_event_impact、缓存、容错 |
+| `tests/test_goal_decompose.py` | 7 | GoalProgress、decompose_platinum_goal、track_goal_progress、earn_platinum 计划 |
+| `tests/test_enriched_monitor.py` | 8 | 机会检测、知识库集成、predict_trend |
+| `tests/test_proactive_push.py` | 5 | ProactivePush 创建、规则推送 |
+
+**全部测试**: 328 passed（309 原有 - 3 删除 + 19 新增）
+
+---
+
+#### 关键设计决策
+
+1. **零 LLM 依赖的监控器**: 扫描周期 < 10s，不依赖 Ollama 进程
+2. **知识库增量积累**: `knowledge.update_from_scan()` 用 `price_db` 计算派生统计，不重建
+3. **模板化推送**: 异常/机会消息由规则模板生成，不调用 LLM
+4. **游戏事件缓存**: 30 分钟 TTL，API 失败返回旧缓存，不崩溃
+5. **贪心目标分解**: 运行全部扫描器后按利润降序选取，简单高效
+6. **不可变数据**: 所有新结构用 frozen dataclass，保持一致性
+
+---
+
+#### 文件变更汇总
+
+| 操作 | 文件 | 说明 |
+|------|------|------|
+| 新增 | `warframe_agent/knowledge.py` | 结构化知识库（233 行） |
+| 新增 | `warframe_agent/rules.py` | 规则引擎（256 行） |
+| 新增 | `warframe_agent/events.py` | 游戏事件追踪（210 行） |
+| 修改 | `warframe_agent/monitor.py` | 删除 5 个 LLM 调用点，改用规则引擎 |
+| 修改 | `warframe_agent/goals.py` | 新增 GoalProgress + decompose_platinum_goal + earn_platinum |
+| 修改 | `warframe_agent/config.py` | 新增 6 个常量 |
+| 修改 | `warframe_agent/chat.py` | 新增 query_events 工具处理 |
+| 修改 | `warframe_agent/tool_router.py` | 新增 query_events schema |
+| 修改 | `warframe_agent/web/app.py` | setup_monitor 重构 + 3 个新端点 |
+| 新增 | `tests/test_knowledge.py` | 17 个测试 |
+| 新增 | `tests/test_rules.py` | 21 个测试 |
+| 新增 | `tests/test_events.py` | 12 个测试 |
+| 新增 | `tests/test_goal_decompose.py` | 7 个测试 |
+| 修改 | `tests/test_enriched_monitor.py` | 移除 LLM 测试，改用规则引擎 |
+| 修改 | `tests/test_proactive_push.py` | 移除 LLM 测试，改用规则引擎 |
+
+**文档版本**：v7.0
+**最后更新**：2026-05-05
+
+---
+
+### Phase 35: 自适应智能体 — 反馈闭环 + 动态阈值 + 上下文增强
+
+> **目标**: 从"有记忆的反应工具"进化为"从经验中学习的自适应智能体"。
+> **核心突破**: 构建 4 个闭环，让智能体越用越聪明。
+
+#### 背景问题
+
+Phase 34 完成了架构重构（LLM → 规则引擎 + 知识库），系统运行稳定，328 测试全通过。但深入审计发现：
+
+| 问题 | 表现 | 影响 |
+|------|------|------|
+| 反馈未消费 | `trade_outcomes` 记录了每笔交易结果，但规则引擎从不读取 | 无法从历史学习 |
+| 静态阈值 | `ROI>100%`、`volatility>50` 全部硬编码 | 不同市场环境下一刀切 |
+| 上下文贫乏 | 聊天层看不到知识库、事件、交易历史 | LLM 回答缺乏深度 |
+| 事件无影响 | 游戏事件已追踪，但不影响价格预测或推送 | 错过 Baro/Prime Access 窗口 |
+
+#### Phase A: 反馈闭环
+
+**新增 `warframe_agent/feedback.py`** — 从 trade_outcomes 提炼策略信号：
+
+```python
+@dataclass(frozen=True)
+class StrategyFeedback:
+    strategy: str              # "mod_flip" / "set_build" / "bargain_hunt"
+    win_rate: float            # 0.0 ~ 1.0
+    avg_profit: float          # 平均利润
+    avg_roi: float             # 平均 ROI
+    sample_size: int           # 样本数
+    confidence: str            # "high" / "medium" / "low"
+    recommended: bool          # 是否推荐继续
+    last_updated: str
+
+@dataclass(frozen=True)
+class ItemFeedback:
+    item_id: str
+    times_traded: int
+    total_profit: float
+    avg_profit: float
+    win_rate: float
+    best_strategy: str
+    last_traded: str
+```
+
+**类 `FeedbackAnalyzer`**:
+- `analyze_strategies(trade_outcomes) -> list[StrategyFeedback]` — 按策略分组计算胜率/利润/ROI
+- `analyze_items(trade_outcomes) -> list[ItemFeedback]` — 按物品分组找最佳策略
+- `get_strategy_ranking(trade_outcomes) -> list[str]` — 按 recommended + avg_profit 排序
+- `get_feedback_for(strategy, outcomes) -> StrategyFeedback | None` — 单策略查询
+
+**置信度规则**: sample_size < 3 → "low", < 10 → "medium", ≥ 10 → "high"
+**推荐条件**: win_rate > 0.5 AND avg_profit > 5
+
+**集成到 `rules.py`**:
+- `generate_auto_goals()` — 新增 `trade_outcomes` 参数，检查 `_is_strategy_blocked()` 跳过表现差的策略
+- `decide_next_step()` — 新增提前终止：win_rate < 20% 且 sample ≥ 3 → 换策略
+
+#### Phase B: 自适应阈值
+
+**新增 `AdaptiveThresholds`** — 根据市场状态动态计算阈值：
+
+```python
+@dataclass(frozen=True)
+class AdaptiveThresholds:
+    roi_good: float        # 市场平均 ROI × 1.2
+    roi_excellent: float   # 市场平均 ROI × 2.0
+    volatility_high: float # 市场平均波动率 × 1.5
+    min_profit: float      # 市场平均利润 × 0.8
+
+def compute_thresholds(knowledge: MarketKnowledge) -> AdaptiveThresholds:
+    summary = knowledge.get_market_summary()
+    avg_roi = summary.get("avg_roi", 30)
+    avg_vol = summary.get("avg_volatility", 30)
+    avg_profit = summary.get("avg_profit", 10)
+    return AdaptiveThresholds(
+        roi_good=max(20, avg_roi * 1.2),
+        roi_excellent=max(50, avg_roi * 2.0),
+        volatility_high=max(30, avg_vol * 1.5),
+        min_profit=max(3, avg_profit * 0.8),
+    )
+```
+
+**效果**: 高 ROI 市场 → 阈值自动提高（不推荐平庸机会）；低 ROI 市场 → 阈值降低（不错过好机会）
+
+**`config.py` 变更**:
+- `VOLATILITY_HIGH_THRESHOLD` → `DEFAULT_VOLATILITY_HIGH = 50`
+- `VOLATILITY_LOW_THRESHOLD` → `DEFAULT_VOLATILITY_LOW = 20`
+- 新增 `DEFAULT_ROI_THRESHOLD = 30`、`DEFAULT_MIN_PROFIT = 5`
+
+#### Phase C: 聊天上下文增强
+
+**新增 `build_system_context()`** — 注入丰富上下文到 LLM system prompt：
+
+```python
+def build_system_context(knowledge, event_tracker, trade_db, memory) -> str:
+    # 1. 市场概况: trend_direction, volatility_index, best_category
+    # 2. 热门物品: mod/prime_set 的 top_items
+    # 3. 游戏事件: Baro/Prime Access/警报
+    # 4. 交易统计: 近期胜率, 盈利笔数
+    # 5. 交易结果: 最近 5 笔详情
+```
+
+**集成**:
+- `chat.py` — `ChatAgent.__init__` 新增 `knowledge` + `event_tracker` 参数
+- `answer()` / `answer_stream()` — 自动调用 `build_system_context()` 注入上下文
+- `app.py` — `setup_monitor()` 中 `chat_agent.knowledge = monitor.knowledge`
+
+#### Phase D: 事件驱动智能
+
+**`knowledge.py` 增强**:
+- `update_from_scan()` — 新增 `events` 参数，构建 item→event 映射，注入 `event_context`
+- `predict_with_events(item_id, events)` — 正面事件 + stable → "rising"，负面 + stable → "falling"
+
+**`monitor.py` 增强**:
+- `_run_knowledge_update()` — 将 `event_tracker.refresh()` 结果传入 `update_from_scan(events=events)`
+- 不再单独调用 `update_event_context()`
+
+**`rules.py` 增强**:
+- `generate_proactive_message()` — 推送消息附加事件上下文（如"Baro 即将到来可能导致进一步下跌"）
+
+#### 测试
+
+| 测试文件 | 新增 | 覆盖 |
+|----------|------|------|
+| `tests/test_feedback.py` | 16 | analyze_strategies(8), analyze_items(3), get_strategy_ranking(2), get_feedback_for(3) |
+| `tests/test_rules.py` | +7 | feedback blocked/not blocked, switch strategy, compute_thresholds, auto_goals_use_adaptive |
+| `tests/test_knowledge.py` | +6 | predict_with_events(5), update_from_scan_with_events(1) |
+| `tests/test_chat.py` | +4 | build_system_context: empty, knowledge, trade_history, trade_outcomes |
+
+**全部测试**: 361 passed（328 + 33 新增）
+
+#### 关键设计决策
+
+1. **反馈闭环**: trade_outcomes → FeedbackAnalyzer → 策略过滤 → 不推荐历史表现差的策略
+2. **自适应阈值**: 知识库数据驱动阈值，无需手动调参
+3. **上下文注入**: LLM 获得市场概况 + 事件 + 交易历史，回答更精准
+4. **事件增强预测**: 游戏事件直接影响价格趋势预测
+5. **不可变数据**: 所有新结构用 frozen dataclass + replace() 模式
+
+---
+
+#### 文件变更汇总
+
+| 操作 | 文件 | 说明 |
+|------|------|------|
+| 新增 | `warframe_agent/feedback.py` | 反馈分析器（~150 行） |
+| 修改 | `warframe_agent/rules.py` | 反馈过滤 + 自适应阈值 |
+| 修改 | `warframe_agent/monitor.py` | 注入 feedback + events |
+| 修改 | `warframe_agent/chat.py` | build_system_context + 上下文注入 |
+| 修改 | `warframe_agent/knowledge.py` | 事件增强预测 |
+| 修改 | `warframe_agent/config.py` | 重命名阈值常量 |
+| 修改 | `warframe_agent/web/app.py` | chat_agent 绑定 knowledge |
+| 新增 | `tests/test_feedback.py` | 16 个测试 |
+| 修改 | `tests/test_rules.py` | +7 个测试 |
+| 修改 | `tests/test_knowledge.py` | +6 个测试 |
+| 修改 | `tests/test_chat.py` | +4 个测试 |
+
+**文档版本**：v8.0
+**最后更新**：2026-05-05
+
+---
+
+### Phase 36: 移动端推送与飞书机器人集成 (v9.0)
+
+**日期**: 2026-05-06
+**重点**: WxPusher 微信推送 + 飞书机器人双向对话，实现手机端与智能体交互
+
+#### 背景
+
+Web UI 功能完善后，用户希望在手机上也能接收通知和与智能体对话。采用两步方案：
+1. **WxPusher** — 免费微信推送服务，实现价格提醒/每日报告推送到微信
+2. **飞书机器人** — 通过飞书 App 实现手机端双向对话
+
+---
+
+#### 1. WxPusher 微信推送
+
+**功能**: 价格提醒、关注通知、主动建议、每日报告推送到微信。
+
+**数据模型** — `warframe_agent/push.py`:
+
+```python
+@dataclass
+class PushConfig:
+    enabled: bool = False
+    app_token: str = ""          # WxPusher 应用 Token
+    uids: list[str] = field(default_factory=list)  # 接收者 UID 列表
+    push_alerts: bool = True     # 推送价格提醒
+    push_watches: bool = True    # 推送关注通知
+    push_proactive: bool = True  # 推送主动建议
+    push_daily_report: bool = True  # 每日报告
+    report_time: str = "09:00"   # 报告时间
+
+class WxPusher:
+    API_URL = "https://wxpusher.zjiecode.com/api/send/message"
+
+    def send(self, title, content, content_type=3) -> bool
+    def send_text(self, title, text) -> bool
+    def send_markdown(self, title, md) -> bool
+
+# 格式化函数（带私聊命令）
+def format_buyers_with_whisper(item_name, market_id, buyers) -> str
+def format_sellers_with_whisper(item_name, market_id, sellers) -> str
+def should_send_daily_report(config) -> bool
+```
+
+**推送触发点** — `app.py`:
+
+| 触发场景 | 函数 | 推送类型 |
+|----------|------|----------|
+| 价格提醒触发 | `broadcast_alert()` | 价格提醒 |
+| 关注扫描完成 | `broadcast_watch()` | 关注通知 |
+| 主动建议生成 | `broadcast_proactive_push()` | 主动建议 |
+| 每日报告时间 | `monitor._check_daily_report()` | 每日报告 |
+
+**每日报告** — `monitor.py`:
+- 在 `_run()` 扫描循环中检查时间窗口（±6 分钟）
+- 获取收藏物品当前价格（top 3 买家 + top 3 卖家）
+- 使用 `format_buyers_with_whisper()` / `format_sellers_with_whisper()` 生成报告
+- 报告自动包含 `/w 玩家名 Hi! I want to buy/sell: ...` 私聊命令
+- 纯文本格式发送（微信显示效果优于 Markdown 表格）
+- 通过 WxPusher + 飞书双通道推送（`on_daily_report` 回调）
+
+**私聊命令格式化** — `push.py`:
+```python
+def format_buyers_with_whisper(item_name, market_id, buyers) -> str
+def format_sellers_with_whisper(item_name, market_id, sellers) -> str
+```
+- 每个买家/卖家附带游戏内 `/w` 私聊命令，可直接复制粘贴
+- 支持 `MarketOrder` 对象和字典两种格式
+
+**API 端点**:
+
+| 端点 | 方法 | 功能 |
+|------|------|------|
+| `GET /api/push/config` | GET | 获取推送配置（隐藏 token） |
+| `POST /api/push/config` | POST | 更新推送配置 |
+| `POST /api/push/test` | POST | 测试推送 |
+| `GET /api/push/qrcode` | GET | 获取 WxPusher 关注二维码 |
+| `POST /api/push/callback` | POST | WxPusher 事件回调 |
+
+**前端设置** — 设置模态框新增"微信推送"区域：
+- 启用开关
+- UID 输入框 + 保存/测试按钮
+- 子开关：价格提醒/关注通知/主动建议/每日报告
+- 报告时间选择
+- 关注二维码显示
+
+---
+
+#### 2. 飞书机器人（WebSocket 长连接模式）
+
+**功能**: 在飞书中与智能体双向对话，无需公网 IP。
+
+**技术方案**: 飞书 SDK WebSocket 长连接模式
+- 使用 `lark_oapi` SDK 的 `lark.ws.Client` 建立 WebSocket 连接
+- 通过 `subprocess.Popen` 运行独立子进程（避免与 FastAPI 事件循环冲突）
+- 子进程收到消息后调用本地 `http://127.0.0.1:8000/api/chat` 获取智能体回复
+- 通过飞书消息 API 回复用户
+
+**数据模型** — `warframe_agent/feishu.py`:
+
+```python
+@dataclass
+class FeishuConfig:
+    enabled: bool = False
+    app_id: str = ""
+    app_secret: str = ""
+
+class FeishuBot:
+    def __init__(self, cfg: FeishuConfig, on_message=None)
+    def start(self) -> None    # 启动 WebSocket 子进程
+    def stop(self) -> None     # 停止子进程
+    def reply(self, message_id, text) -> bool
+    def send(self, chat_id, text) -> bool
+```
+
+**子进程架构**:
+
+```
+主进程 (FastAPI)
+  ├── Web 服务器 (uvicorn)
+  └── FeishuBot.start()
+        └── subprocess.Popen (独立 Python 进程)
+              ├── lark.ws.Client (WebSocket 长连接)
+              ├── EventDispatcherHandler (消息事件处理)
+              └── 调用 /api/chat 获取回复 → 飞书 API 回复
+```
+
+**消息处理流程**:
+
+```
+飞书用户发消息
+    ↓
+飞书服务器 → WebSocket 推送
+    ↓
+子进程 on_message() 接收
+    ↓
+提取文本（去掉 @机器人 前缀）
+    ↓
+POST http://127.0.0.1:8000/api/chat
+    ↓
+ChatAgent.answer() 处理
+    ↓
+飞书 ReplyMessageRequest 回复
+```
+
+**关键实现细节**:
+
+1. **回复 API**: 使用 `ReplyMessageRequest` + `ReplyMessageRequestBody`（不是 `CreateMessageRequest`）
+2. **客户端复用**: 子进程内全局 `_client` 单例，避免每次回复重新创建
+3. **日志输出**: stdout/stderr 重定向到 `data/feishu_worker.log`，便于调试
+4. **自动重连**: SDK 内置 `auto_reconnect=True`，断线自动重连
+
+**API 端点**:
+
+| 端点 | 方法 | 功能 |
+|------|------|------|
+| `GET /api/feishu/config` | GET | 获取飞书配置（隐藏 secret） |
+| `POST /api/feishu/config` | POST | 更新飞书配置（自动重启子进程） |
+| `POST /api/feishu/test` | POST | 测试连接状态 |
+
+**前端设置** — 设置模态框新增"飞书机器人"区域：
+- 启用开关
+- App ID 输入框
+- App Secret 输入框
+- 保存/测试连接按钮
+
+**飞书开发者后台配置**:
+1. 创建企业自建应用
+2. 添加"机器人"能力
+3. 权限管理 → 开通 `im:message`、`im:message.create_v1`、`im:message.receive_v1`
+4. 事件订阅 → 添加 `im.message.receive_v1`，勾选"使用长连接接收事件"
+5. 创建版本并发布
+
+---
+
+#### 3. 配置存储
+
+| 文件 | 格式 | 说明 |
+|------|------|------|
+| `data/push_config.json` | JSON | WxPusher 推送配置 |
+| `data/feishu_config.json` | JSON | 飞书机器人配置 |
+
+`config.py` 新增:
+```python
+PUSH_CONFIG_PATH = DATA_DIR / "push_config.json"
+FEISHU_CONFIG_PATH = DATA_DIR / "feishu_config.json"
+```
+
+---
+
+#### 4. 测试
+
+| 测试文件 | 用例数 | 覆盖 |
+|----------|--------|------|
+| `tests/test_push.py` | 21 | PushConfig 存取、WxPusher 发送/错误/截断、should_send_daily_report |
+| `tests/test_feishu.py` | 6 | FeishuConfig 存取、FeishuBot 可用状态、回调、stop |
+
+---
+
+#### 5. 文件变更汇总
+
+| 操作 | 文件 | 说明 |
+|------|------|------|
+| 新增 | `warframe_agent/push.py` | WxPusher 推送模块 + `format_buyers_with_whisper()` / `format_sellers_with_whisper()` 格式化函数 |
+| 新增 | `warframe_agent/feishu.py` | 飞书机器人模块（WebSocket + 子进程） |
+| 修改 | `warframe_agent/config.py` | 新增 PUSH_CONFIG_PATH、FEISHU_CONFIG_PATH |
+| 修改 | `warframe_agent/web/app.py` | 推送/飞书 API 端点、广播集成、`on_daily_report` 回调、lifespan |
+| 修改 | `warframe_agent/monitor.py` | 每日报告：私聊命令 + 纯文本格式 + 双通道推送（WxPusher + 飞书） |
+| 修改 | `warframe_agent/web/static/index.html` | WxPusher/飞书设置 UI |
+| 修改 | `warframe_agent/web/static/js/app.js` | 推送/飞书设置交互 |
+| 新增 | `tests/test_push.py` | 21 个测试 |
+| 新增 | `tests/test_feishu.py` | 6 个测试 |
+
+---
+
+#### 6. 常见问题
+
+| 问题 | 原因 | 解决 |
+|------|------|------|
+| 飞书消息已读但无回复 | 事件订阅未添加 `im.message.receive_v1` | 开发者后台添加事件 |
+| 飞书回复失败: field validation failed | 使用了 `CreateMessageRequest` 而非 `ReplyMessageRequest` | 改用 `ReplyMessageRequest` |
+| 飞书 WebSocket 事件不触发 | 事件订阅后未重新发布版本 | 创建新版本并发布 |
+| WxPusher UID 收不到消息 | 未关注 WxPusher 公众号 | 扫码重新关注 |
+| Ollama 超时导致飞书无回复 | 模型卡住或加载中 | 重启 Ollama (`ollama serve`) |
+| 子进程事件循环冲突 | `lark.ws.Client.start()` 与 FastAPI 事件循环冲突 | 使用 `subprocess.Popen` 隔离 |
+
+---
+
+#### 7. 三大通信渠道总结
+
+| 渠道 | 方向 | 协议 | 用途 |
+|------|------|------|------|
+| **Web UI** | 双向 | HTTP + WebSocket | 浏览器完整交互 |
+| **WxPusher** | 单向（推送） | HTTPS | 微信通知推送 |
+| **飞书机器人** | 双向 | WebSocket 长连接 | 手机端对话 |
+
+**文档版本**：v9.1
+**最后更新**：2026-05-07
+
+---
+
+### Phase 37: 智能体增强 — 不换模型，从 Prompt/知识/上下文/自检 四维度提升 (v10.0)
+
+**日期**: 2026-05-10
+**核心目标**: 在不升级本地模型（qwen3:8b）的前提下，通过 Prompt 工程、游戏知识注入、上下文智能组装、自检机制、反馈注入五个维度提升智能体回答质量。
+
+#### 背景
+
+本地 Ollama qwen3:8b 模型受硬件限制无法升级。瓶颈不在模型大小，而在：
+- **Prompt 质量差**：硬编码 4 行指令，无 few-shot、无 CoT 引导
+- **游戏知识未利用**：Export 数据（Mod 效果、战甲技能）完全未注入 LLM
+- **上下文组装粗糙**：历史对话按时间截取、记忆平铺无优先级
+- **无自检机制**：LLM 编造价格、遗漏私聊命令时无人纠正
+
+改进思路：**让 8B 模型在更好的输入下工作**。
+
+---
+
+#### Phase 1: Prompt 工程优化
+
+**目标**: 通过 CoT 引导 + Few-shot 示例 + 结构化模板，直接提升 LLM 输出质量。
+
+**1.1 重写 `build_system_prompt()`**
+
+| 项目 | 说明 |
+|------|------|
+| 行为准则 | 不编造价格、提供私聊命令、数据不足时说明 |
+| CoT 回答策略 | 价格查询 4 步、投资类 4 步 |
+| Few-shot 示例 | 价格查询 + 套装比较，教模型输出格式 |
+| 结构化分段 | `## 角色` / `## 回答策略` / `## 示例` / `## 用户画像` / `## 市场智能` |
+
+**1.2 重写 ReAct system prompt**
+
+从 2 句话扩展为 10 条决策规则（每个工具一条触发条件），加注意事项（中文别名映射、多物品用 plan、不确定时走 general_chat）。
+
+**1.3 重写 `_memory_prompt()`**
+
+按优先级分层：触发的提醒 > 用户偏好 > 相关建议 > 高置信度已学模式。只注入与当前查询物品相关的建议。
+
+---
+
+#### Phase 2: 游戏知识深度注入
+
+**目标**: 让 LLM 能引用具体游戏数据（Mod 效果、战甲技能、遗物封存状态）。
+
+**2.1 新增 `warframe_agent/game_data.py`**
+
+`GameDataStore` 类，懒加载以下数据：
+
+| 数据源 | 内容 |
+|--------|------|
+| `ExportUpgrades_zh.json` | Mod 效果描述、满级属性、稀有度 |
+| `ExportRelicArcane_zh.json` | 赋能效果、满级属性 |
+| `ExportWarframes_zh.json` | 战甲技能描述、基础属性 |
+| `ducat_values.json` | 杜卡特值 |
+| `relic_vault_status.json` | 遗物封存状态 |
+| `relic_sources.json` | 遗物获取途径 |
+
+关键方法：
+- `get_mod_info(name) -> str | None` — 返回 Mod/Arcane 效果文本
+- `get_warframe_info(name) -> str | None` — 返回战甲技能文本
+- `get_ducat_value(item_id) -> int | None`
+- `is_vaulted(relic_name) -> bool | None`
+
+**2.2 上下文注入**
+
+- `ChatAgent.__init__` 新增 `self.game_data = GameDataStore()`
+- `build_system_context()` 新增 `game_data` 和 `current_item_ids` 参数
+- 新增 `_build_item_knowledge_block()` — 为当前查询物品构建详细知识块（知识库统计 + Mod 效果 + 杜卡特值）
+- `answer()` / `answer_stream()` 传递 `game_data` 和 `current_item_ids`
+
+---
+
+#### Phase 3: 上下文智能组装
+
+**目标**: 让注入 LLM 的信息更精准，减少干扰。
+
+**3.1 历史对话按相关性排序**
+
+`session.py` 的 `to_messages()` 新增 `current_query` 参数：
+- 有 query 时：按关键词重叠评分 + 时间衰减排序，取 top-N
+- 无 query 时：回退到原有时间截取
+
+`_relevance_score()` — 简单子串匹配评分（不依赖 embedding，零开销）
+
+**3.2 结构化 `build_system_context()`**
+
+按层拼接：
+1. `[物品情报: xxx]` — 当前查询物品的详细知识
+2. `[市场概况]` — 趋势、跟踪物品数
+3. `[游戏事件]` — 最多 3 条
+4. `[交易统计]` — 胜率、累计利润
+5. `[策略表现]` — 样本 >= 3 时注入
+
+---
+
+#### Phase 4: Self-Reflection 机制
+
+**目标**: 用规则化自检捕获 LLM 的严重错误，不增加额外 LLM 调用。
+
+**`_self_check()` 函数** — LLM 返回后调用：
+
+| 检查项 | 规则 |
+|--------|------|
+| 价格编造检测 | 回答中出现的 `Np` 价格必须在 contexts 中存在（允许 ±5 范围） |
+| 私聊命令检测 | 有推荐卖家/买家时必须包含 `/w ` |
+| 回答截断检测 | 长度 < 20 字符则追加警告 |
+
+发现问题时追加 `[注意] ...` 后缀，不重新生成。
+
+**调用点**: `answer()` 和 `answer_stream()` 中 LLM 返回成功后。
+
+---
+
+#### Phase 5: 反馈与模式注入
+
+**目标**: 让 LLM 利用积累的交易经验和规律。
+
+**5.1 策略反馈注入**
+
+`build_system_context()` 新增策略表现摘要：
+- 调用 `FeedbackAnalyzer.analyze_strategies()` 生成
+- sample_size >= 3 才显示
+- 格式：`[策略表现] Mod翻转: 胜率=80%, 平均利润=15p, 样本=5`
+
+**5.2 已学模式注入**
+
+`_memory_prompt()` 注入 `memory.learned_patterns` 中 confidence >= 0.7 的模式，最多 3 条。
+
+---
+
+#### 文件变更汇总
+
+| 操作 | 文件 | 说明 |
+|------|------|------|
+| 新增 | `warframe_agent/game_data.py` | 游戏知识查询模块（202 行） |
+| 修改 | `warframe_agent/chat.py` | build_system_prompt + _memory_prompt + build_system_context 重写，game_data 注入，_self_check |
+| 修改 | `warframe_agent/tool_router.py` | ReAct system prompt 重写（10 条规则） |
+| 修改 | `warframe_agent/session.py` | to_messages() 相关性排序 + _relevance_score() |
+| 修改 | `tests/test_chat.py` | 断言适配新格式 |
+| 修改 | `tests/test_chat_alias_priority.py` | 断言适配新 prompt |
+| 修改 | `tests/test_chat_memory_integration.py` | 断言适配新记忆格式 |
+| 修改 | `tests/test_phase35_e2e.py` | 断言适配新上下文格式 |
+
+**全部测试**: 409 passed
+
+---
+
+### Phase 38: 混合模型架构 — 本地 + 云端智能路由 (v11.0)
+
+**日期**: 2026-05-11
+**核心目标**: 接入外部云端模型（gpt-5.5），实现简单查询走本地、复杂推理走云端的智能路由。
+
+#### 背景
+
+本地 qwen3:8b 模型在复杂分析（多物品对比、投资策略、趋势推理）上能力不足。引入外部云端模型作为"大脑升级"，但保留本地模型处理简单查询以节省成本。
+
+#### 模型路由策略
+
+| 路由模式 | 说明 |
+|----------|------|
+| `auto`（默认） | 根据查询复杂度自动选择：简单 → 本地，复杂 → 云端 |
+| `local` | 强制使用本地 qwen3:8b |
+| `cloud` | 强制使用云端 gpt-5.5 |
+
+**复杂度评估规则** (`estimate_complexity()`)：
+- 长度 > 50 字符: +1
+- 包含对比/分析关键词（对比、比较、划算、推荐、分析、投资等）: +2
+- 包含投资/策略关键词（预算、ROI、翻转、利润等）: +2
+- 多物品名（>2 个）: +1 per extra
+- 阈值 >= 3 自动切换云端
+
+#### 新增功能
+
+**1. 统一 LLM 接口** (`warframe_agent/llm.py`)
+
+| 函数 | 说明 |
+|------|------|
+| `chat_with_model(messages, model)` | 统一同步调用，支持 `model="local"\|"cloud"\|None(自动)` |
+| `stream_chat_model(messages, model)` | 统一流式调用 |
+| `_cloud_chat_sync(messages)` | 云端同步调用（OpenAI 兼容 API） |
+| `_cloud_chat_stream(messages)` | 云端流式调用 |
+| `estimate_complexity(message)` | 查询复杂度评估 |
+| `should_use_cloud(message)` | 是否应使用云端模型 |
+
+**2. 配置** (`warframe_agent/config.py`)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `CLOUD_API_BASE` | `https://gpt-agent.cc/v1` | 云端 API 地址 |
+| `CLOUD_API_KEY` | 环境变量 | API 密钥 |
+| `CLOUD_MODEL` | `gpt-5.5` | 云端模型名 |
+| `MODEL_ROUTING` | `auto` | 路由策略 |
+| `COMPLEXITY_THRESHOLD` | 3 | 复杂度阈值 |
+
+**3. ChatAgent 集成**
+
+- `_call_llm_messages()` 改用 `chat_with_model()` 自动路由
+- `answer_stream()` 改用 `stream_chat_model()` 流式路由
+- 云端调用失败时自动回退到本地模型
+
+**4. 安全**
+
+- API 密钥通过环境变量注入，`.env` 文件已加入 `.gitignore`
+- 云端调用超时 60s（同步）/ 120s（流式）
+
+#### 文件变更汇总
+
+| 操作 | 文件 | 说明 |
+|------|------|------|
+| 修改 | `warframe_agent/config.py` | 新增云端模型配置（6 个配置项） |
+| 修改 | `warframe_agent/llm.py` | 新增云端调用、复杂度评估、统一接口（~120 行） |
+| 修改 | `warframe_agent/chat.py` | _call_llm_messages 和 stream 改用统一接口 |
+| 新增 | `.env` | API 密钥（不入 git） |
+| 修改 | `.gitignore` | 新增 .env |
+
+**全部测试**: 409 passed
+
+---
+
+### Phase 39: 从领域助手到个人智能体 — 目标/扫描/深度分析/自学习 (v12.0)
+
+**日期**: 2026-05-11
+**核心目标**: 实施 P2-P5，让智能体具备自主目标管理、主动机会发现、深度分析、自学习闭环能力。
+
+#### P2: 自主目标管理
+
+**新增功能**：
+
+| 功能 | 说明 |
+|------|------|
+| `/goal` | 查看当前所有活跃目标和进度 |
+| `/goal set 描述` | 创建新交易目标（如"一周内赚500p"） |
+| `/goal done ID` | 标记目标完成，自动生成复盘报告 |
+| `/goal drop ID` | 放弃目标 |
+| `/goal review ID` | 查看目标复盘（胜率、利润、最佳/最差交易） |
+| `/goal rm ID` | 删除目标 |
+
+**`GoalTracker` 类** (`warframe_agent/goals.py`)：
+- 持久化存储到 `data/goals.json`
+- 自动从 `trade_outcomes` 计算进度
+- 生成复盘报告（胜率、累计利润、最佳/最差交易）
+
+#### P3: 主动机会发现
+
+**新增 `warframe_agent/scanner.py`**：
+
+`OpportunityScanner` 类，检测以下异常：
+
+| 检测类型 | 规则 | 严重程度 |
+|----------|------|----------|
+| 高价差 | 价差 > 30% | high/medium |
+| 低挂单 | 卖价 < 均价 70% | high |
+| 趋势反转 | 从下跌转上涨 + 高波动 | medium |
+| 价格暴跌 | 当前价 < 7日均价 60% | high |
+
+- `scan_item()` — 扫描单个物品
+- `scan_batch()` — 批量扫描，按严重程度排序
+- `format_opportunities()` — 格式化推送文本
+- `generate_opportunity_push_text()` — WxPusher 推送文本
+
+#### P4: 深度分析能力
+
+**新增 `deep_analysis` 工具**：
+
+- 用户说"深度分析XX"或"详细分析XX"时触发
+- 收集多维度数据：当前价格、知识库统计、游戏数据、价格历史
+- 调用云端 gpt-5.5 模型进行分析
+- 输出 5 个维度：价格评估、趋势判断、风险评估、投资建议、操作建议
+- 云端失败时自动回退本地模型
+
+**工具路由** (`tool_router.py`)：
+- `TOOL_SCHEMAS` 新增 `deep_analysis` schema
+- `TOOLS` 新增 `deep_analysis` 条目
+
+#### P5: 自学习闭环
+
+**扩展 `warframe_agent/feedback.py`**：
+
+| 函数 | 说明 |
+|------|------|
+| `discover_patterns()` | 用云端 LLM 从交易数据中发现新规律 |
+| `update_pattern_confidence()` | 根据最新交易结果更新已有规律置信度 |
+| `run_self_learning_cycle()` | 一轮完整闭环：发现新规律 + 更新置信度 |
+
+**置信度机制**：
+- 连续成功（胜率 > 70%）→ 提升置信度 +0.05
+- 连续失败（胜率 < 30%）→ 降级置信度 -0.1
+- 置信度 < 0.2 → 自动删除（不再注入 LLM）
+
+**监控集成** (`warframe_agent/monitor.py`)：
+- 每 `PATTERN_DISCOVERY_INTERVAL`（12）次扫描触发一轮自学习
+- 使用云端模型分析，新规律自动存入 `memory.learned_patterns`
+
+#### 文件变更汇总
+
+| 操作 | 文件 | 说明 |
+|------|------|------|
+| 修改 | `warframe_agent/goals.py` | 新增 GoalTracker 类（持久化 + 复盘 + 进度追踪） |
+| 修改 | `warframe_agent/chat.py` | 新增 /goal 命令 + deep_analysis 工具 + _deep_analysis 方法 |
+| 新增 | `warframe_agent/scanner.py` | OpportunityScanner（价格异常检测） |
+| 修改 | `warframe_agent/tool_router.py` | 新增 deep_analysis 工具 |
+| 修改 | `warframe_agent/feedback.py` | 新增自学习闭环（模式提取 + 置信度更新） |
+| 修改 | `warframe_agent/monitor.py` | 集成自学习周期 |
+
+**全部测试**: 409 passed
+
+---
+
+### Phase 31: 虚空裂缝订阅 + Baro 购买推荐 + ReAct 修复
+
+**日期**: 2026-05-11
+**目标**: 新增事件订阅推送能力，修复 ReAct 工具调用链路。
+
+#### 31.1 虚空裂缝订阅
+
+**数据层** (`memory.py`)：
+- 新增 `FissureAlert` dataclass（`node_pattern`, `mission_type`, `tier`, `hard`, `note`）
+- `AgentMemory` 新增 `fissure_alerts` 字段 + `with_fissure_alert()` / `without_fissure_alert()` 方法
+
+**解析层** (`events.py`)：
+- 新增 `VoidFissure` dataclass（结构化数据：node, mission_type, tier, hard, activation, expiry）
+- 新增 `parse_fissures(world_state)` 方法，从 `ActiveMissions` 数组解析
+- 修复 MongoDB 日期格式 `{$date: {$numberLong: ...}}` 的解析
+- `EventTracker` 存储 `_world_state`，新增 `get_active_fissures()` 方法
+
+**命令层** (`chat.py`)：
+- 新增 `/fissure add [过滤条件]` — 支持中文节点/任务类型/等级/钢铁模式
+- `/fissure remove [序号]` / `/fissure list`
+- 中文映射表：`_TIER_CHINESE`, `_MISSION_CHINESE`, `_NODE_CHINESE`
+
+**监控层** (`monitor.py`)：
+- `PriceMonitor._run()` 中新增 `_check_fissure_alerts()`
+- 匹配逻辑：`FissureAlert.matches_fissure()` 子串匹配 + 精确匹配
+- 去重：`_fissure_notified: dict[str, float]`，key = `(node, mission_type, tier, expiry)`
+- 回调：`on_fissure(notification)` 推送到飞书/WebSocket
+
+#### 31.2 Baro 购买推荐
+
+**解析层** (`events.py`)：
+- 修复 `VoidTraders`（复数，数组）vs `VoidTrader`（单数）兼容
+- 解析 `PrimePrice`（杜卡特）和 `Price`（现金）字段
+- 新增 `BaroItem` dataclass（`item_type`, `market_id`, `ducat_cost`, `credit_cost`）
+- `GameEvent` 新增 `baro_items: list[BaroItem]` 字段
+- 新增 `_build_item_type_map()` 映射 Baro ItemType → market_id
+
+**分析器** (`baro.py`，新建)：
+- `BaroRecommendation` dataclass
+- `analyze_baro_inventory(baro_event)` — 推荐规则：`market_plat_price > ducat_cost / 3` → 值得买
+- `format_baro_report()` — 格式化推送文本
+
+**监控层** (`monitor.py`)：
+- `_check_baro_recommendation()` — 检测 Baro 活跃时自动分析
+- 去重：`_baro_recommendation_sent: str | None`（按 `start_time` 去重）
+
+#### 31.3 ReAct 工具调用修复（3 个 Bug）
+
+**Bug 1: `_react_model_call` 不传 tools 参数**
+- `chat.py` 的 `_react_model_call` 调用 `chat_with_ollama`，后者不传 `tools=TOOL_SCHEMAS`
+- 修复：改为调用 `tool_router._default_model_call`，该函数传递完整的工具 schema
+
+**Bug 2: Ollama 原生 tool_calls 被丢弃**
+- `_default_model_call` 只返回 `message.content`，Ollama 返回的 `message.tool_calls` 被丢弃
+- 修复：将 `tool_calls` 序列化为 JSON 追加到 content 末尾，供 `_extract_tool_calls` 解析
+
+**Bug 3: 交易查询被物品匹配拦截**
+- "有什么 Mod 可以翻转赚钱" 中的 "Mod" 被 `_contexts_for_message` 匹配为物品，绕过路由器
+- 修复：新增 `_is_trading_tool_query()` 关键词检测（翻转/投资/套装利润等），与 `_is_event_query` 同级处理
+- 路由失败时返回提示而非 fallthrough 到物品匹配
+
+#### 31.4 事件查询去污染
+
+**问题**：查询"有没有钢铁的虚空裂缝歼灭"时，`_contexts_for_message("虚空")` 匹配到 `baro_void_signal`、`corpus_void_key` 等交易物品，导致回复中混入私聊命令。
+
+**修复**：
+- 新增 `_EVENT_KEYWORDS` 集合 + `_is_event_query()` 函数
+- 事件类查询在 `answer()` 入口直接走路由器，跳过物品匹配
+- `query_events` 工具新增 `type` 参数过滤（`void_fissure` / `baro_visit` / `invasion` / `void_storm`）
+- ReAct 系统 prompt 增加约束：`query_events 结果只展示事件信息，不要混入交易数据`
+
+#### 31.5 飞书去重
+
+**问题**：多个飞书 worker 子进程同时运行，导致消息无限循环。
+
+**修复** (`feishu.py`)：
+- `start()` 方法新增 `_kill_old_workers()` 调用
+- 通过 `wmic` 查找含 `lark_oapi` + `P2ImMessageReceiveV1` 的进程并杀掉
+
+#### 文件变更汇总
+
+| 操作 | 文件 | 说明 |
+|------|------|------|
+| 修改 | `warframe_agent/memory.py` | 新增 FissureAlert + 裂缝订阅 CRUD |
+| 修改 | `warframe_agent/events.py` | VoidFissure + BaroItem + parse_fissures + Baro 修复 |
+| 新增 | `warframe_agent/baro.py` | Baro 购买推荐分析器 |
+| 修改 | `warframe_agent/chat.py` | /fissure 命令 + _is_trading_tool_query + _is_event_query + 修复 investment_advisor 导入 |
+| 修改 | `warframe_agent/tool_router.py` | 修复 _default_model_call 保留 tool_calls + query_events type 参数 |
+| 修改 | `warframe_agent/monitor.py` | 裂缝检查 + Baro 推荐 + 回调 |
+| 修改 | `warframe_agent/feishu.py` | _kill_old_workers 去重 |
+| 修改 | `warframe_agent/web/app.py` | on_fissure / on_baro_recommendation 回调接线 |
+| 修改 | `md/FeishuUserGuide.md` | 新增裂缝订阅 + Baro 购买推荐文档 |
+
+**全部测试**: 409 passed
+
+---
+
+### Phase 32: Agent 能力补全 — 5 阶段系统性升级 (v14.0)
+
+按计划分 5 个阶段系统性补全 Agent 缺失能力，每阶段独立可交付。
+
+#### Phase 1: API 缓存优化
+
+**目标**：交易工具响应时间从 120s+ 降到 10s 以内。
+
+| 文件 | 变更 |
+|------|------|
+| `config.py` | 新增 `ORDER_CACHE_TTL=60`, `STATS_CACHE_TTL=300`, `CACHE_MAX_SIZE=200` |
+| `market.py` | `fetch_item_statistics` 新增 LRU 缓存（300s TTL）|
+| `mod_flipper.py` | `scan_all_mod_flips` 并行化（`ThreadPoolExecutor(max_workers=8)`）|
+| `set_profit.py` | `scan_all_set_profits` 并行化（`ThreadPoolExecutor(max_workers=6)`）|
+
+**效果**：`set_profit` 冷启动 38.8s → 热缓存 0.0s
+
+#### Phase 2: 交易记录自动追踪
+
+**目标**：用户说"我刚买了充沛 80p"自动记录，支持盈亏统计。
+
+| 文件 | 变更 |
+|------|------|
+| `trade_intent.py` | 新增 `detect_completed_trade()` + 已完成交易关键词 |
+| `chat.py` | `/trade list/stats/add/undo` 命令 + `_auto_record_trade()` 自动检测 |
+
+#### Phase 3: 遗物查询 + 裂缝智能推荐
+
+**目标**：用户问"哪里掉犀牛 Prime 蓝图"能回答，并关联当前裂缝。
+
+| 文件 | 变更 |
+|------|------|
+| `relics.py`（新建）| `RelicDB` 遗物掉落数据库，加载 ExportRelicArcane_en.json，构建 part→relic 索引 |
+| `chat.py` | `/relic` 命令（部件查找 + 遗物查找 + 裂缝关联）|
+| `events.py` | `get_vault_status()` + `get_vaulted_item_ids()` |
+
+**关键修复**：原始数据同一遗物有 4 条记录（不同精炼等级），通过 `seen_relics` 去重。
+
+#### Phase 4: 主动推送增强 + 价格预测
+
+| 文件 | 变更 |
+|------|------|
+| `monitor.py` | `_check_price_spikes()` 3h 内涨跌>20% 预警 + `_check_event_driven_push()` Vault/PA 推送 |
+| `price_history.py` | `predict_trend()` 增强：R² 置信度 + 价格区间 + 事件修正因子 |
+| `strategies.py`（新建）| 3 个预设策略（低风险赋能翻转/中风险 Prime 拆件/高风险 Vault 投机）|
+| `chat.py` | 趋势查询确定性回答 + `/strategy` 命令 |
+
+#### Phase 5: 多物品对比 + 飞书卡片 + 错误处理
+
+| 文件 | 变更 |
+|------|------|
+| `trade_intent.py` | `detect_compare_query()` 对比查询检测 |
+| `chat.py` | `_render_comparison_table()` 多物品对比表格 + `/vault` 命令 |
+| `feishu.py` | `send_card()` + `reply_card()` + `build_price_card()` 飞书卡片消息 |
+| `set_profit.py` | silent exceptions → `logger.debug()` |
+| `mod_flipper.py` | 同上 |
+| `investment.py` | 同上 |
+| `monitor.py` | 修复 `import time` 缺失 |
+
+#### 文件变更汇总
+
+| 操作 | 文件 | 说明 |
+|------|------|------|
+| 修改 | `warframe_agent/config.py` | 缓存 TTL 常量 |
+| 修改 | `warframe_agent/market.py` | fetch_item_statistics 缓存 |
+| 修改 | `warframe_agent/mod_flipper.py` | 并行化 + 日志 |
+| 修改 | `warframe_agent/set_profit.py` | 并行化 + 日志 |
+| 修改 | `warframe_agent/trade_intent.py` | 已完成交易 + 趋势 + 对比检测 |
+| 修改 | `warframe_agent/chat.py` | /trade /relic /strategy /vault + 趋势预测 + 对比表格 |
+| 修改 | `warframe_agent/price_history.py` | predict_trend 增强 |
+| 修改 | `warframe_agent/monitor.py` | 价格突变 + 事件推送 + import time 修复 |
+| 修改 | `warframe_agent/events.py` | Vault 解析 + get_vault_status |
+| 修改 | `warframe_agent/investment.py` | 日志 |
+| 修改 | `warframe_agent/feishu.py` | 卡片消息 + ReplyMessageRequest 导入 |
+| 新增 | `warframe_agent/relics.py` | 遗物掉落数据库 |
+| 新增 | `warframe_agent/strategies.py` | 交易策略模板 |
+| 新增 | `tests/test_relics.py` | 遗物模块测试（30 个）|
+
+**全部测试**: 439 passed（+30 新增）
+
+---
+
+### Phase 33: 多模型协作 — 降低 API 封禁风险 (v15.0)
+
+**背景**：三大扫描工具每次全量扫描产生 ~350 次 warframe.market API 调用，8 线程并发 + 无锁速率限制器 = 实际请求率可能突破 3 req/s 上限，长期运行存在 IP 封禁风险。
+
+**核心思路**：利用云端 LLM 的"世界知识"做智能预筛选，大幅减少实际 API 调用量。
+
+#### Phase 1: 速率限制器修复
+
+| 文件 | 变更 |
+|------|------|
+| `market.py` | `threading.Lock()` 保护全局时间戳 + 随机抖动 `0.34 + random(0, 0.1)` + HTTP 429 指数退避（最大 30s）|
+| `tests/test_market_client.py` | mock Response 添加 `status_code = 200` |
+
+#### Phase 2: 多模型智能预筛选
+
+| 文件 | 变更 |
+|------|------|
+| `scout.py`（新建）| Scout 预筛选模块：三模型并行分工 |
+| `config.py` | `SCOUT_MODELS` 模型分配 + `SCOUT_CACHE_TTL=600` + `SCOUT_MAX_CANDIDATES` |
+| `mod_flipper.py` | `scan_all_mod_flips` 新增 `scout_fn` 参数 |
+| `set_profit.py` | `scan_all_set_profits` 新增 `scout_fn` 参数 |
+| `investment.py` | `scan_prime_investments` 新增 `scout_fn` 参数 |
+| `chat.py` | 三处扫描调用点传入对应 scout 函数 |
+| `goals.py` | 9 处扫描调用点传入 scout 函数 |
+| `web/app.py` | 3 个 API endpoint 传入 scout 函数 |
+| `tests/test_scout.py`（新建）| 23 个测试：JSON 解析、摘要构建、缓存、模型路由 |
+
+**模型分配**：
+| 扫描类型 | 云端模型 | 原始候选 | 预筛选后 | API 调用减少 |
+|---|---|---|---|---|
+| Mod 翻转 | kimi-k2.6 | 40 | 10 | 80 → 20 |
+| 套装利润 | glm-5.1 | 15 | 5 | 90 → 30 |
+| 投资顾问 | gpt-5.5 | 30 | 8 | 180 → 48 |
+| **合计** | | | | **350 → ~98**（-72%）|
+
+#### Phase 3: SQLite 持久化缓存
+
+| 文件 | 变更 |
+|------|------|
+| `market.py` | `data/price_cache.db` SQLite 持久化 + `warm_persistent_cache()` 启动预热 + `_persistent_get/set` 二级缓存 |
+
+**效果**：跨会话共享缓存，重启不丢失。内存缓存 → SQLite 缓存 → API 调用，三级回退。
+
+#### Phase 4: 推理增强
+
+| 文件 | 变更 |
+|------|------|
+| `scout.py` | `get_event_context()` 事件感知（Baro/Vault/PA）+ `get_user_preferences()` 用户偏好注入 + `get_price_trends()` 价格趋势 + `record_scout_feedback()` 反馈追踪 |
+
+**关键修复**：
+- `_detect_base_id` 中 COMMON_WARFRAME_ALIASES 分支添加价格查询关键词检测（"一套"/"多少钱"等），修复 "毒妈一套多少钱" 返回 None
+- `_summarize_orders` 添加离线最低价兜底，修复无在线卖家时显示"暂无"
+
+**全部测试**: 462 passed（+23 新增）
+
+**文档版本**：v14.0
+**最后更新**：2026-05-11

@@ -10,6 +10,8 @@ class MarketClientTests(unittest.TestCase):
 
     def test_fetch_orders_sends_market_headers(self):
         class Response:
+            status_code = 200
+
             def raise_for_status(self):
                 pass
 
@@ -29,6 +31,8 @@ class MarketClientTests(unittest.TestCase):
 
     def test_fetch_orders_reads_v2_data_wrapper(self):
         class Response:
+            status_code = 200
+
             def raise_for_status(self):
                 pass
 

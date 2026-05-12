@@ -121,9 +121,10 @@ class MonitorScanTests(unittest.TestCase):
             )
             monitor.scan_once()
             snapshots = db.recent("arcane_energize")
+            db.close()
 
-        self.assertEqual(len(snapshots), 1)
-        self.assertEqual(snapshots[0].sell_price, 40)
+            self.assertEqual(len(snapshots), 1)
+            self.assertEqual(snapshots[0].sell_price, 40)
 
     def test_scan_once_detects_watchlist_items(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -32,7 +32,7 @@ class ChatAliasPriorityTests(unittest.TestCase):
 
         self.assertIn("arcane_energize", prompts[0])
         self.assertNotIn("energizing_shot", prompts[0])
-        self.assertIn("所有价格单位都是 Warframe 白金 platinum，绝不是美元", prompts[0])
+        self.assertIn("所有价格单位都是白金(platinum)，不是现实货币", prompts[0])
 
 
 if __name__ == "__main__":

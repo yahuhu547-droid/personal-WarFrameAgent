@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace, field
 from pathlib import Path
 
 from . import config
+from .goals import AgentGoal, TradeOutcome
 
 MEMORY_PATH = config.DATA_DIR / "agent_memory.json"
 
@@ -105,6 +106,27 @@ class WatchItem:
 
 
 @dataclass(frozen=True)
+class FissureAlert:
+    node_pattern: str = ""        # 子串匹配，如 "虚空" 或 "SolNode742"
+    mission_type: str = ""        # 如 "MT_EXTERMINATION" 或中文 "歼灭"
+    tier: str = ""                # 如 "VoidT4" 或中文 "后纪"
+    hard: bool | None = None      # None=不过滤, True=仅钢铁, False=仅普通
+    note: str = ""                # 用户可读描述
+
+    def matches_fissure(self, node: str, node_display: str, mission_type: str,
+                        mission_display: str, tier: str, tier_display: str, hard: bool) -> bool:
+        if self.node_pattern and self.node_pattern not in node and self.node_pattern not in node_display:
+            return False
+        if self.mission_type and self.mission_type != mission_type and self.mission_type != mission_display:
+            return False
+        if self.tier and self.tier != tier and self.tier not in tier_display:
+            return False
+        if self.hard is not None and self.hard != hard:
+            return False
+        return True
+
+
+@dataclass(frozen=True)
 class AgentMemory:
     preferences: TradingPreferences
     price_alerts: list[PriceAlert]
@@ -113,6 +135,10 @@ class AgentMemory:
     watchlist: list[WatchItem]
     user_profile: UserProfile | None = None
     recent_suggestions: list[ProactiveSuggestion] = field(default_factory=list)
+    active_goals: list[AgentGoal] = field(default_factory=list)
+    trade_outcomes: list[TradeOutcome] = field(default_factory=list)
+    learned_patterns: list[dict] = field(default_factory=list)
+    fissure_alerts: list[FissureAlert] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path = MEMORY_PATH) -> "AgentMemory":
@@ -126,6 +152,9 @@ class AgentMemory:
         profile_data = data.get("user_profile")
         profile = UserProfile(**profile_data) if profile_data else None
         suggestions = [ProactiveSuggestion(**s) for s in data.get("recent_suggestions", [])]
+        goals = [AgentGoal(**g) for g in data.get("active_goals", [])]
+        outcomes = [TradeOutcome(**o) for o in data.get("trade_outcomes", [])]
+        fissure_alerts = [FissureAlert(**a) for a in data.get("fissure_alerts", [])]
         return cls(
             preferences=preferences,
             price_alerts=alerts,
@@ -134,6 +163,10 @@ class AgentMemory:
             watchlist=watchlist,
             user_profile=profile,
             recent_suggestions=suggestions,
+            active_goals=goals,
+            trade_outcomes=outcomes,
+            learned_patterns=list(data.get("learned_patterns", [])),
+            fissure_alerts=fissure_alerts,
         )
 
     @classmethod
@@ -197,6 +230,48 @@ class AgentMemory:
                     "timestamp": s.timestamp,
                 }
                 for s in self.recent_suggestions
+            ]
+        if self.active_goals:
+            result["active_goals"] = [
+                {
+                    "goal_id": g.goal_id,
+                    "goal_type": g.goal_type,
+                    "description": g.description,
+                    "target": g.target,
+                    "criteria": g.criteria,
+                    "status": g.status,
+                    "created_at": g.created_at,
+                    "results": g.results,
+                }
+                for g in self.active_goals
+            ]
+        if self.trade_outcomes:
+            result["trade_outcomes"] = [
+                {
+                    "outcome_id": o.outcome_id,
+                    "goal_id": o.goal_id,
+                    "action": o.action,
+                    "item_id": o.item_id,
+                    "price": o.price,
+                    "expected_profit": o.expected_profit,
+                    "actual_profit": o.actual_profit,
+                    "user_feedback": o.user_feedback,
+                    "timestamp": o.timestamp,
+                }
+                for o in self.trade_outcomes
+            ]
+        if self.learned_patterns:
+            result["learned_patterns"] = self.learned_patterns
+        if self.fissure_alerts:
+            result["fissure_alerts"] = [
+                {
+                    "node_pattern": a.node_pattern,
+                    "mission_type": a.mission_type,
+                    "tier": a.tier,
+                    "hard": a.hard,
+                    "note": a.note,
+                }
+                for a in self.fissure_alerts
             ]
         return result
 
@@ -294,3 +369,48 @@ class AgentMemory:
             else:
                 watchlist.append(item)
         return replace(self, watchlist=watchlist)
+
+    # ── 目标管理 ──────────────────────────────────────────
+
+    def with_goal(self, goal: AgentGoal) -> "AgentMemory":
+        return replace(self, active_goals=[*self.active_goals, goal])
+
+    def without_goal(self, goal_id: str) -> "AgentMemory":
+        return replace(self, active_goals=[g for g in self.active_goals if g.goal_id != goal_id])
+
+    def with_goal_result(self, goal_id: str, result: dict) -> "AgentMemory":
+        goals = []
+        for g in self.active_goals:
+            if g.goal_id == goal_id:
+                goals.append(replace(g, results=[*g.results, result]))
+            else:
+                goals.append(g)
+        return replace(self, active_goals=goals)
+
+    def active_goals_list(self) -> list[AgentGoal]:
+        return [g for g in self.active_goals if g.status == "active"]
+
+    def with_trade_outcome(self, outcome: TradeOutcome) -> "AgentMemory":
+        return replace(self, trade_outcomes=[*self.trade_outcomes, outcome])
+
+    def with_patterns(self, patterns: list[dict], limit: int = 20) -> "AgentMemory":
+        existing_descs = {p["description"] for p in self.learned_patterns}
+        new_patterns = [p for p in patterns if p.get("description") not in existing_descs]
+        all_patterns = [*self.learned_patterns, *new_patterns]
+        all_patterns.sort(key=lambda p: p.get("confidence", 0), reverse=True)
+        return replace(self, learned_patterns=all_patterns[:limit])
+
+    # ── 裂缝订阅 ──────────────────────────────────────────
+
+    def with_fissure_alert(self, alert: FissureAlert) -> "AgentMemory":
+        key = (alert.node_pattern, alert.mission_type, alert.tier, alert.hard)
+        for existing in self.fissure_alerts:
+            if (existing.node_pattern, existing.mission_type, existing.tier, existing.hard) == key:
+                return self
+        return replace(self, fissure_alerts=[*self.fissure_alerts, alert])
+
+    def without_fissure_alert(self, index: int) -> "AgentMemory":
+        if 0 <= index < len(self.fissure_alerts):
+            alerts = [a for i, a in enumerate(self.fissure_alerts) if i != index]
+            return replace(self, fissure_alerts=alerts)
+        return self

@@ -161,6 +161,28 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_events",
+            "description": "查询当前游戏活动和事件（Baro 来访、警报、入侵、虚空风暴等）",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deep_analysis",
+            "description": "深度分析单个物品的多维度数据（价格趋势、风险评估、投资建议），使用云端大模型推理",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "item_name": {"type": "string", "description": "物品名称（中文、英文或 market_id）"},
+                },
+                "required": ["item_name"],
+            },
+        },
+    },
 ]
 
 
@@ -219,6 +241,16 @@ TOOLS = [
         "name": "plan",
         "description": "将复杂请求分解为多个子任务并按顺序执行",
         "parameters": {"goal": "用户目标", "steps": "子任务列表"},
+    },
+    {
+        "name": "query_events",
+        "description": "查询当前游戏活动和事件（Baro 来访、虚空裂缝、入侵、虚空风暴等）。可选 type 参数过滤：void_fissure=虚空裂缝, baro_visit=虚空商人, invasion=入侵, void_storm=虚空风暴",
+        "parameters": {"type": "事件类型过滤（可选）：void_fissure / baro_visit / invasion / void_storm，不传则返回全部"},
+    },
+    {
+        "name": "deep_analysis",
+        "description": "深度分析单个物品的多维度数据，使用云端大模型推理",
+        "parameters": {"item_name": "物品名称"},
     },
 ]
 
@@ -334,7 +366,11 @@ def parse_tool_call(response: str) -> ToolCall | None:
     valid_names = {t["name"] for t in TOOLS}
     if tool_name not in valid_names:
         return None
-    return ToolCall(name=tool_name, arguments=data.get("args", {}))
+    # 提取参数：优先 args 字段，否则取除 tool 外的所有顶层字段
+    args = data.get("args", {})
+    if not args:
+        args = {k: v for k, v in data.items() if k != "tool"}
+    return ToolCall(name=tool_name, arguments=args)
 
 
 def react_loop(
@@ -363,9 +399,30 @@ def react_loop(
         {
             "role": "system",
             "content": (
-                "你是 Warframe 交易助手的工具路由器。根据用户消息选择合适的工具调用。"
-                "如果用户需要对比多个物品、做投资分析、或需要多步骤查询，请使用 plan 工具。"
-                "如果不需要工具，直接回答用户问题。"
+                "你是 Warframe 交易助手的工具路由器。根据用户消息选择最合适的工具。\n\n"
+                "## 决策规则\n"
+                "1. 用户问单个物品价格 → query_price\n"
+                "2. 用户问 Prime 套装、整套vs拆件 → query_set\n"
+                "3. 用户说\"还差/缺/补齐\"某套装 → query_missing_parts\n"
+                "4. 用户问 Mod 翻转/升级赚钱/内融 → mod_flipper\n"
+                "5. 用户问套装利润/拆件赚差价 → set_profit\n"
+                "6. 用户问投资/预算/ROI → investment_advisor\n"
+                "7. 用户问游戏活动/Baro/警报 → query_events\n"
+                "   - 用户问虚空裂缝/裂隙/开核桃 → query_events(type='void_fissure')\n"
+                "   - 用户问Baro/虚空商人 → query_events(type='baro_visit')\n"
+                "8. 用户要对比多个物品或复杂分析 → plan（分解子任务）\n"
+                "9. 用户问价格趋势/涨跌 → price_trend\n"
+                "10. 一般闲聊或无法确定 → 直接回答，不调用工具\n\n"
+                "## 注意事项\n"
+                "- 中文别名需映射到英文（如\"电男\"=\"volt\"）再调用工具\n"
+                "- 用户同时提到多个物品时，使用 plan 工具分别查询\n"
+                "- 不确定用哪个工具时，直接回答让主模型处理\n"
+                "- query_events 的结果只展示事件信息，不要混入交易数据、私聊命令或价格信息\n"
+                "- 只用用户明确要求交易相关内容时才使用 query_price 等工具\n\n"
+                "## 工具结果处理\n"
+                "- 收到工具返回结果后，直接基于结果生成最终回答，不要再次调用工具\n"
+                "- 用中文组织回答，简洁明了\n"
+                "- 如果工具返回了数据列表，完整展示，不要只挑一条"
             ),
         },
         {"role": "user", "content": message},
@@ -443,4 +500,17 @@ def _default_model_call(messages: list[dict]) -> str:
     except ImportError as exc:
         raise RuntimeError("Ollama Python package is not installed") from exc
     response = ollama.chat(model=config.REACT_MODEL, messages=messages, tools=TOOL_SCHEMAS)
-    return response.get("message", {}).get("content", "")
+    msg = response.get("message", {})
+    content = msg.get("content", "")
+    # Ollama 原生 tool calls — 序列化为 JSON 格式供 _extract_tool_calls 解析
+    tool_calls = msg.get("tool_calls", [])
+    if tool_calls:
+        calls_json = []
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            calls_json.append({
+                "tool": fn.get("name", ""),
+                "args": fn.get("arguments", {}),
+            })
+        content += "\n" + json.dumps(calls_json, ensure_ascii=False)
+    return content

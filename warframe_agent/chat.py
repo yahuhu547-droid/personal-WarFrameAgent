@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, replace
 from typing import AsyncIterator, Callable, Iterable
 
@@ -8,7 +9,10 @@ import requests
 
 from . import config
 from .dictionary import ItemResolver, normalize_lookup_key
+from .events import EventTracker
 from .formatter import build_whisper
+from .game_data import GameDataStore
+from .knowledge import MarketKnowledge
 from .market import MarketOrder, best_buyers, best_sellers, fetch_orders
 from .memory import AgentMemory
 from .names import display_item_name
@@ -16,11 +20,142 @@ from .price_history import PriceHistoryDB
 from .rag import smart_search_rag
 from .session import SessionContext, is_followup
 from .tool_router import build_router_prompt, parse_tool_call
-from .trade_intent import detect_trade_intent
+from .trade_history import TradeHistoryDB
+from .trade_intent import detect_trade_intent, detect_completed_trade, detect_trend_query, detect_compare_query
 from .warframes import price_warframe_query
+
+logger = logging.getLogger(__name__)
 
 
 EXIT_COMMANDS = {"q", "quit", "exit", "退出", "关闭"}
+
+
+def build_system_context(
+    knowledge: MarketKnowledge | None = None,
+    event_tracker: EventTracker | None = None,
+    trade_db: TradeHistoryDB | None = None,
+    memory: AgentMemory | None = None,
+    game_data: GameDataStore | None = None,
+    current_item_ids: list[str] | None = None,
+) -> str:
+    """构建富上下文注入 system prompt，让 LLM 拥有市场知识、事件、交易历史、游戏数据。"""
+    parts = []
+
+    # 1. 当前查询物品的详细情报
+    if current_item_ids and game_data:
+        for item_id in current_item_ids[:3]:
+            block = _build_item_knowledge_block(item_id, knowledge, game_data)
+            if block:
+                parts.append(block)
+
+    # 2. 市场概况
+    if knowledge:
+        summary = knowledge.get_market_summary()
+        trend = summary.get("trend_direction", "unknown")
+        total = summary.get("total_items", 0)
+        if total > 0:
+            parts.append(f"[市场概况] 趋势={trend}，跟踪物品={total}")
+            best = summary.get("best_category", "")
+            if best:
+                parts.append(f"最佳品类: {best}")
+        # 热门物品（带扫描置信度）
+        for cat in ("mod", "prime_set"):
+            health = knowledge.get_category_health(cat)
+            if health and health.top_items:
+                item_labels = []
+                for iid in health.top_items[:3]:
+                    stats = knowledge.get_item_stats(iid)
+                    name = display_item_name(iid)
+                    if stats and stats.scan_count >= 5:
+                        item_labels.append(f"{name}[高置信]")
+                    elif stats and stats.scan_count >= 3:
+                        item_labels.append(name)
+                    else:
+                        item_labels.append(f"{name}[低样本]")
+                parts.append(f"{cat} 热门: {', '.join(item_labels)}")
+        # 事件影响的物品
+        event_items = [
+            (iid, ik.event_context)
+            for iid, ik in knowledge._items.items()
+            if ik.event_context
+        ]
+        if event_items:
+            labels = [f"{display_item_name(iid)}({ctx})" for iid, ctx in event_items[:3]]
+            parts.append(f"事件影响: {', '.join(labels)}")
+
+    # 3. 游戏事件
+    if event_tracker:
+        events = event_tracker.get_active_events()
+        if events:
+            event_descs = [f"{e.event_type}: {e.description[:40]}" for e in events[:3]]
+            parts.append(f"[游戏事件] {'; '.join(event_descs)}")
+
+    # 4. 交易历史摘要
+    if trade_db:
+        trades = trade_db.get_recent_trades(limit=20)
+        if trades:
+            total = len(trades)
+            parts.append(f"近期 {total} 笔交易记录")
+
+    # 5. 交易胜率
+    if memory and memory.trade_outcomes:
+        outcomes = memory.trade_outcomes
+        wins = sum(1 for o in outcomes if o.actual_profit > 0)
+        total_profit = sum(o.actual_profit for o in outcomes)
+        parts.append(f"[交易统计] 胜率={wins}/{len(outcomes)}，累计利润={total_profit}p")
+
+    # 6. 策略反馈（样本 >= 3 才显示）
+    if memory and memory.trade_outcomes and len(memory.trade_outcomes) >= 3:
+        try:
+            from .feedback import FeedbackAnalyzer
+            analyzer = FeedbackAnalyzer()
+            strategy_feedback = analyzer.analyze_strategies(memory.trade_outcomes)
+            if strategy_feedback:
+                fb_lines = []
+                for sf in strategy_feedback[:3]:
+                    label = {"mod_flip": "Mod翻转", "set_profit": "套装利润", "investment": "投资翻转"}.get(sf.strategy, sf.strategy)
+                    fb_lines.append(f"{label}: 胜率={sf.win_rate:.0%}, 平均利润={sf.avg_profit:.0f}p, 样本={sf.sample_size}")
+                if fb_lines:
+                    parts.append("[策略表现]\n" + "\n".join(fb_lines))
+        except Exception:
+            pass
+
+    return "\n".join(parts) if parts else ""
+
+
+def _build_item_knowledge_block(
+    item_id: str,
+    knowledge: MarketKnowledge | None,
+    game_data: GameDataStore,
+) -> str | None:
+    """为单个物品构建详细知识块，注入 LLM 上下文。"""
+    lines = []
+    name = display_item_name(item_id)
+
+    # 知识库统计
+    if knowledge:
+        stats = knowledge.get_item_stats(item_id)
+        if stats:
+            if stats.trend != "stable":
+                lines.append(f"趋势={stats.trend}")
+            if stats.event_context:
+                lines.append(f"事件影响={stats.event_context}")
+            if stats.volatility > 30:
+                lines.append(f"波动率={stats.volatility:.0f}(高)")
+
+    # Mod/Arcane 效果描述
+    mod_info = game_data.get_mod_info(name)
+    if mod_info:
+        lines.append(mod_info)
+
+    # 杜卡特值
+    ducat = game_data.get_ducat_value(item_id)
+    if ducat:
+        lines.append(f"杜卡特值={ducat}")
+
+    if not lines:
+        return None
+    return f"[物品情报: {name}]\n" + "\n".join(lines)
 WATCHLIST_COMMANDS = {"watchlist", "关注列表", "扫描关注", "每日关注"}
 
 
@@ -110,6 +245,8 @@ class ChatAgent:
         warframe_items: list[dict] | None = None,
         price_db: PriceHistoryDB | None = None,
         router_call: Callable[[str], str] | None = None,
+        knowledge: MarketKnowledge | None = None,
+        event_tracker: EventTracker | None = None,
     ):
         self.resolver = resolver or ItemResolver()
         self.order_fetcher = order_fetcher
@@ -118,13 +255,55 @@ class ChatAgent:
         self.memory_path = memory_path or config.AGENT_MEMORY_PATH
         self.memory = memory or AgentMemory.load(self.memory_path)
         self.rag_search = rag_search or self._default_rag_search
-        self.warframe_items = warframe_items
+        self.warframe_items = warframe_items or self._load_items_full()
         self.price_db = price_db
         self.session = SessionContext()
         self.router_call = router_call
+        self.knowledge = knowledge
+        self.event_tracker = event_tracker
+        self.game_data = GameDataStore()
+
+    @staticmethod
+    def _load_items_full() -> list[dict]:
+        """懒加载 items_full.json 并合并 tradable/fusionLimit 字段。"""
+        import json
+        from pathlib import Path
+        path = config.ITEMS_FULL_PATH
+        if not path.exists():
+            return []
+        try:
+            items = json.loads(path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            return []
+
+        # 从 warframe-items Mods.json 合并 tradable 和 fusionLimit
+        mods_path = Path(__file__).resolve().parent.parent / "githubProduct" / "warframe-items" / "data" / "json" / "Mods.json"
+        if mods_path.exists():
+            try:
+                mods_lookup: dict[str, dict] = {}
+                for mod in json.loads(mods_path.read_text(encoding="utf-8")):
+                    key = mod.get("name", "").lower().replace(" ", "_").replace("'", "")
+                    mods_lookup[key] = mod
+                for item in items:
+                    if "mod" not in item.get("tags", []):
+                        item.setdefault("tradable", True)
+                        continue
+                    item_id = item.get("item_id", "")
+                    mod_data = mods_lookup.get(item_id, {})
+                    if not mod_data:
+                        en_key = item.get("en_name", "").lower().replace(" ", "_").replace("'", "")
+                        mod_data = mods_lookup.get(en_key, {})
+                    if mod_data:
+                        item.setdefault("tradable", mod_data.get("tradable", False))
+                        item.setdefault("modMaxRank", mod_data.get("fusionLimit", 0))
+                        item.setdefault("rarity", mod_data.get("rarity", "RARE"))
+            except Exception:
+                pass
+
+        return items
 
     def _call_llm_messages(self, messages: list[dict[str, str]]) -> str:
-        """使用 messages 格式调用 LLM，失败时回退到旧 model_call"""
+        """使用 messages 格式调用 LLM，自动路由本地/云端模型"""
         # 如果 model_call 是注入的（非默认），直接用旧方式
         if self.model_call is not call_ollama_chat:
             parts = []
@@ -135,6 +314,10 @@ class ChatAgent:
                     parts.append(msg["content"])
             return self.model_call("\n\n".join(parts))
         try:
+            from .llm import chat_with_model
+            return chat_with_model(messages)
+        except Exception as exc:
+            logger.debug("LLM 调用失败: %s", exc)
             from .llm import chat_with_ollama
             return chat_with_ollama(messages)
         except Exception:
@@ -154,6 +337,35 @@ class ChatAgent:
         if is_watchlist_command(message):
             return self.scan_watchlist()
         self._remember_common_question(message)
+        # 事件类/交易工具类查询直接走路由器，避免物品匹配误触发交易流程
+        if _is_event_query(message) or _is_trading_tool_query(message):
+            routed = self._try_router(message)
+            if routed:
+                self.session.add_exchange(message, routed)
+                self._log_answer(message, routed)
+                return routed
+            # 路由失败时不要 fallthrough 到物品匹配，返回通用提示
+            if _is_trading_tool_query(message):
+                fallback = "交易工具暂时无法使用，请稍后重试。你也可以直接输入物品名称查询价格。"
+                self._log_answer(message, fallback)
+                return fallback
+            if _is_event_query(message):
+                # 事件查询路由失败时，尝试直接查询事件
+                try:
+                    from .events import EventTracker
+                    tracker = EventTracker()
+                    tracker.load_cache()
+                    events = tracker.get_active_events()
+                    if events:
+                        fallback = "当前活动:\n" + "\n".join(
+                            f"- {e.description}" for e in events[:10]
+                        )
+                    else:
+                        fallback = "当前没有检测到活跃的游戏活动。"
+                except Exception:
+                    fallback = "游戏活动查询暂时不可用，请稍后重试。"
+                self._log_answer(message, fallback)
+                return fallback
         warframe_answer = price_warframe_query(message, self.warframe_items, self.order_fetcher)
         if warframe_answer:
             self.session.add_exchange(message, warframe_answer)
@@ -173,19 +385,29 @@ class ChatAgent:
             self._log_answer(message, result)
             return result
         self.session.update([ctx.item_id for ctx in contexts])
+        # 自动记录已完成的交易
+        auto_trade_note = self._auto_record_trade(message, contexts)
         deterministic_answer = _deterministic_trade_intent_answer(message, contexts)
         if deterministic_answer:
+            if auto_trade_note:
+                deterministic_answer += "\n\n" + auto_trade_note
             self.session.add_exchange(message, deterministic_answer)
             self._log_answer(message, deterministic_answer, contexts)
             return deterministic_answer
-        prompt_messages = build_chat_messages(message, contexts, self.memory, self.session.to_messages())
+        current_ids = [ctx.item_id for ctx in contexts]
+        market_ctx = build_system_context(self.knowledge, self.event_tracker, trade_db=None, memory=self.memory, game_data=self.game_data, current_item_ids=current_ids)
+        prompt_messages = build_chat_messages(message, contexts, self.memory, self.session.to_messages(current_query=message), market_ctx or None)
         try:
             answer = self._call_llm_messages(prompt_messages).strip()
             if answer:
+                checked = _self_check(answer, contexts)
+                if checked:
+                    answer = checked
                 self.session.add_exchange(message, answer)
                 self._log_answer(message, answer, contexts)
                 return answer
-        except Exception:
+        except Exception as exc:
+            logger.debug("LLM 调用失败，使用回退: %s", exc)
             result = fallback_answer(message, contexts, llm_failed=True)
             self.session.add_exchange(message, result)
             self._log_answer(message, result, contexts)
@@ -203,8 +425,8 @@ class ChatAgent:
                 assistant_reply=reply,
                 contexts=[ctx.item_id for ctx in contexts] if contexts else None,
             ))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("对话日志记录失败: %s", exc)
 
     async def answer_stream(self, message: str) -> AsyncIterator[str]:
         """流式版本的 answer，逐 token yield。对于不需要 LLM 的路径，一次性 yield 全文。"""
@@ -249,15 +471,18 @@ class ChatAgent:
             self._log_answer(message, deterministic_answer, contexts)
             yield deterministic_answer
             return
-        prompt_messages = build_chat_messages(message, contexts, self.memory, self.session.to_messages())
+        current_ids = [ctx.item_id for ctx in contexts]
+        market_ctx = build_system_context(self.knowledge, self.event_tracker, trade_db=None, memory=self.memory, game_data=self.game_data, current_item_ids=current_ids)
+        prompt_messages = build_chat_messages(message, contexts, self.memory, self.session.to_messages(current_query=message), market_ctx or None)
         # 流式调用 LLM
         full_reply = []
         try:
-            from .llm import stream_chat_ollama
-            async for token in stream_chat_ollama(prompt_messages):
+            from .llm import stream_chat_model
+            async for token in stream_chat_model(prompt_messages):
                 full_reply.append(token)
                 yield token
-        except Exception:
+        except Exception as exc:
+            logger.debug("流式 LLM 失败，使用回退: %s", exc)
             result = fallback_answer(message, contexts, llm_failed=True)
             self.session.add_exchange(message, result)
             self._log_answer(message, result, contexts)
@@ -265,6 +490,9 @@ class ChatAgent:
             return
         reply_text = "".join(full_reply).strip()
         if reply_text:
+            checked = _self_check(reply_text, contexts)
+            if checked:
+                reply_text = checked
             self.session.add_exchange(message, reply_text)
             self._log_answer(message, reply_text, contexts)
         else:
@@ -301,6 +529,18 @@ class ChatAgent:
             return self._handle_preference_command(tokens[1:])
         if command == "/scan":
             return self._handle_scan_command()
+        if command == "/goal":
+            return self._handle_goal_command(tokens[1:])
+        if command == "/fissure":
+            return self._handle_fissure_command(tokens[1:])
+        if command == "/trade":
+            return self._handle_trade_command(tokens[1:])
+        if command == "/relic":
+            return self._handle_relic_command(tokens[1:])
+        if command == "/strategy":
+            return self._handle_strategy_command(tokens[1:])
+        if command == "/vault":
+            return self._handle_vault_command()
         return "未知的 Agent 命令，输入 /help 查看可用命令"
 
     def _command_help(self) -> str:
@@ -315,6 +555,22 @@ class ChatAgent:
             "/pref platform pc",
             "/pref crossplay on",
             "/pref max 5",
+            "/goal              查看当前目标",
+            "/goal set 目标描述   创建新目标",
+            "/goal done ID      标记目标完成",
+            "/goal drop ID      放弃目标",
+            "/goal review ID    目标复盘",
+            "/fissure add 过滤条件  订阅裂缝通知",
+            "/fissure remove 序号  取消订阅",
+            "/fissure list       查看订阅列表",
+            "/trade list         查看最近交易记录",
+            "/trade stats        交易盈亏统计",
+            "/trade add 物品名 buy 80  手动添加交易",
+            "/relic 物品名       查询哪些遗物掉落该部件",
+            "/relic 遗物名       查询遗物掉落物",
+            "/strategy list      查看可用策略",
+            "/strategy run 策略名  执行策略扫描",
+            "/vault              查看 Vault 状态",
         ])
 
     def _render_memory_summary(self) -> str:
@@ -341,6 +597,9 @@ class ChatAgent:
             lines.append("最近智能建议：")
             for s in self.memory.recent_suggestions[-5:]:
                 lines.append(f"  {s.message}")
+        if self.memory.fissure_alerts:
+            fissure_str = "、".join(a.note or "全部" for a in self.memory.fissure_alerts[:5])
+            lines.append(f"裂缝订阅: {fissure_str}")
         return "\n".join(lines)
 
     def _handle_favorite_command(self, args: list[str]) -> str:
@@ -442,7 +701,8 @@ class ChatAgent:
                 ctx = build_item_context_result(alert.item_id, self.order_fetcher(alert.item_id))
                 if ctx.best_sell_price is not None and alert.matches(ctx.best_sell_price):
                     triggered.append((alert, ctx.best_sell_price))
-            except Exception:
+            except Exception as exc:
+                logger.debug("价格提醒检查失败 %s: %s", alert.item_id, exc)
                 continue
         if triggered:
             lines.append("\n触发的提醒：")
@@ -453,6 +713,384 @@ class ChatAgent:
         if not self.memory.favorite_items and not self.memory.price_alerts:
             lines.append("关注列表和提醒均为空，请先使用 /fav 和 /alert 添加。")
         return "\n".join(lines)
+
+    def _handle_goal_command(self, args: list[str]) -> str:
+        from .goals import GoalTracker, create_goal
+        tracker = GoalTracker()
+        if not args:
+            return tracker.format_goals_status()
+        sub = args[0].lower()
+        if sub == "set":
+            desc = " ".join(args[1:]) if len(args) > 1 else ""
+            if not desc:
+                return "请指定目标描述，例如: /goal set 一周内赚500p"
+            goal = create_goal(
+                goal_type="maximize_profit",
+                description=desc,
+                target="all",
+                criteria={"budget": 500, "min_roi": 10},
+            )
+            tracker.add_goal(goal)
+            return f"已创建目标: {desc}\n目标 ID: {goal.goal_id[:6]}\n使用 /goal 查看进度"
+        if sub in ("done", "完成"):
+            gid = args[1] if len(args) > 1 else ""
+            if not gid:
+                return "请指定目标 ID，例如: /goal done abc123"
+            matches = [g for g in tracker.goals if g.goal_id.startswith(gid)]
+            if not matches:
+                return f"未找到 ID 为 {gid} 的目标"
+            tracker.update_goal_status(matches[0].goal_id, "achieved")
+            review = tracker.generate_review(matches[0].goal_id)
+            return f"目标已标记为完成！\n\n{review}"
+        if sub in ("drop", "放弃"):
+            gid = args[1] if len(args) > 1 else ""
+            if not gid:
+                return "请指定目标 ID，例如: /goal drop abc123"
+            matches = [g for g in tracker.goals if g.goal_id.startswith(gid)]
+            if not matches:
+                return f"未找到 ID 为 {gid} 的目标"
+            tracker.update_goal_status(matches[0].goal_id, "abandoned")
+            return f"已放弃目标: {matches[0].description}"
+        if sub in ("review", "复盘"):
+            gid = args[1] if len(args) > 1 else ""
+            if not gid:
+                done = [g for g in tracker.goals if g.status in ("achieved", "abandoned")]
+                if not done:
+                    return "没有已完成的目标可复盘。"
+                reviews = [tracker.generate_review(g.goal_id) for g in done[-3:]]
+                return "\n\n---\n\n".join(reviews)
+            matches = [g for g in tracker.goals if g.goal_id.startswith(gid)]
+            if not matches:
+                return f"未找到 ID 为 {gid} 的目标"
+            return tracker.generate_review(matches[0].goal_id)
+        if sub in ("rm", "delete", "删除"):
+            gid = args[1] if len(args) > 1 else ""
+            if not gid:
+                return "请指定目标 ID"
+            matches = [g for g in tracker.goals if g.goal_id.startswith(gid)]
+            if not matches:
+                return f"未找到 ID 为 {gid} 的目标"
+            tracker.remove_goal(matches[0].goal_id)
+            return f"已删除目标: {matches[0].description}"
+        return "未知的 /goal 子命令。可用: set, done, drop, review, rm"
+
+    # ── 裂缝订阅命令 ────────────────────────────────────────
+
+    _TIER_CHINESE = {
+        "古纪": "VoidT1", "前纪": "VoidT2", "中纪": "VoidT3",
+        "后纪": "VoidT4", "遗珍": "VoidT5", "仲裁": "VoidT6",
+        "lith": "VoidT1", "meso": "VoidT2", "neo": "VoidT3",
+        "axi": "VoidT4", "requiem": "VoidT5", "arbitration": "VoidT6",
+    }
+    _MISSION_CHINESE = {
+        "歼灭": "MT_EXTERMINATION", "捕获": "MT_CAPTURE", "防御": "MT_DEFENSE",
+        "生存": "MT_SURVIVAL", "救援": "MT_RESCUE", "破坏": "MT_SABOTAGE",
+        "移动防御": "MT_MOBILE_DEFENSE", "间谍": "MT_INTEL", "拦截": "MT_TERRITORY",
+        "挖掘": "MT_ARTIFACT", "炼金": "MT_ALCHEMY", "中断": "MT_DISRUPTION",
+        "刺杀": "MT_ASSASSINATION",
+    }
+    _NODE_CHINESE = {
+        "虚空": "虚空", "地球": "地球", "火星": "火星", "金星": "金星",
+        "水星": "水星", "木星": "木星", "土星": "土星", "天王星": "天王星",
+        "海王星": "海王星", "冥王星": "冥王星", "塞德娜": "塞德娜",
+        "火卫一": "火卫一", "谷神星": "谷神星", "欧罗巴": "欧罗巴",
+    }
+
+    def _handle_fissure_command(self, args: list[str]) -> str:
+        from .memory import FissureAlert
+        if not args:
+            return "用法: /fissure add [过滤条件] | /fissure remove 序号 | /fissure list"
+        sub = args[0].lower()
+        if sub == "list" or sub == "列表":
+            return self._list_fissure_alerts()
+        if sub == "remove" or sub == "删除":
+            return self._remove_fissure_alert(args[1:])
+        if sub == "add" or sub == "添加":
+            return self._add_fissure_alert(args[1:])
+        return "未知的 /fissure 子命令。可用: add, remove, list"
+
+    def _add_fissure_alert(self, args: list[str]) -> str:
+        from .memory import FissureAlert
+        node_pattern = ""
+        mission_type = ""
+        tier = ""
+        hard = None
+        note_parts = []
+
+        for arg in args:
+            lower = arg.lower()
+            # 检查等级
+            if lower in self._TIER_CHINESE:
+                tier = self._TIER_CHINESE[lower]
+                note_parts.append(f"等级={arg}")
+                continue
+            # 检查任务类型
+            if lower in self._MISSION_CHINESE:
+                mission_type = self._MISSION_CHINESE[lower]
+                note_parts.append(f"任务={arg}")
+                continue
+            # 检查节点/星球
+            if lower in self._NODE_CHINESE:
+                node_pattern = self._NODE_CHINESE[lower]
+                note_parts.append(f"地点={arg}")
+                continue
+            # 检查钢铁模式
+            if lower in ("钢铁", "steelpath", "steel", "钢铁之路"):
+                hard = True
+                note_parts.append("仅钢铁")
+                continue
+            if lower in ("普通", "normal"):
+                hard = False
+                note_parts.append("仅普通")
+                continue
+            # 其他参数当作节点名子串
+            node_pattern = arg
+            note_parts.append(f"地点={arg}")
+
+        note = "、".join(note_parts) if note_parts else "全部裂缝"
+        alert = FissureAlert(
+            node_pattern=node_pattern,
+            mission_type=mission_type,
+            tier=tier,
+            hard=hard,
+            note=note,
+        )
+        self.memory = self.memory.with_fissure_alert(alert)
+        self._persist_memory()
+        return f"已订阅裂缝通知: {note}\n当匹配的裂缝出现时会推送通知。"
+
+    def _remove_fissure_alert(self, args: list[str]) -> str:
+        if not args:
+            return "请指定序号，例如: /fissure remove 1"
+        try:
+            index = int(args[0]) - 1
+        except ValueError:
+            return "序号必须是数字，例如: /fissure remove 1"
+        if 0 <= index < len(self.memory.fissure_alerts):
+            removed = self.memory.fissure_alerts[index]
+            self.memory = self.memory.without_fissure_alert(index)
+            self._persist_memory()
+            return f"已取消订阅: {removed.note or '全部裂缝'}"
+        return f"序号超出范围，当前共 {len(self.memory.fissure_alerts)} 条订阅"
+
+    def _list_fissure_alerts(self) -> str:
+        alerts = self.memory.fissure_alerts
+        if not alerts:
+            return "当前没有裂缝订阅。使用 /fissure add 添加订阅。\n示例: /fissure add 虚空 歼灭"
+        lines = ["当前裂缝订阅:"]
+        for i, a in enumerate(alerts, 1):
+            desc = a.note or "全部裂缝"
+            lines.append(f"  {i}. {desc}")
+        lines.append("\n使用 /fissure remove 序号 取消订阅")
+        return "\n".join(lines)
+
+    # ---- /trade 命令 ----
+
+    def _handle_trade_command(self, args: list[str]) -> str:
+        if not args:
+            return "用法: /trade list [N] | /trade stats | /trade add 物品名 buy/sell 价格 | /trade undo"
+        sub = args[0].lower()
+        if sub == "list" or sub == "列表":
+            limit = int(args[1]) if len(args) > 1 and args[1].isdigit() else 10
+            return self._list_trades(limit)
+        if sub == "stats" or sub == "统计":
+            return self._trade_stats()
+        if sub == "add" or sub == "添加":
+            return self._add_trade(args[1:])
+        if sub == "undo" or sub == "撤销":
+            return self._undo_trade()
+        return "未知的 /trade 子命令。可用: list, stats, add, undo"
+
+    def _list_trades(self, limit: int = 10) -> str:
+        from .trade_history import TradeHistoryDB
+        db = TradeHistoryDB()
+        trades = db.get_recent_trades(limit)
+        if not trades:
+            return "暂无交易记录。使用 /trade add 物品名 buy/sell 价格 手动添加。"
+        lines = ["最近交易记录："]
+        for t in trades:
+            action = "买入" if t.trade_type == "buy" else "卖出"
+            lines.append(f"  [{t.id}] {t.item_name} {action} {t.price}p ({t.timestamp[:16]})")
+        return "\n".join(lines)
+
+    def _trade_stats(self) -> str:
+        from .trade_history import TradeHistoryDB
+        db = TradeHistoryDB()
+        stats = db.get_trade_stats()
+        if stats["total_trades"] == 0:
+            return "暂无交易记录。"
+        lines = [
+            "交易统计：",
+            f"  总交易: {stats['total_trades']} 笔 (买入 {stats['buy_count']} / 卖出 {stats['sell_count']})",
+            f"  总花费: {stats['total_spent']}p | 总收入: {stats['total_earned']}p",
+            f"  净利润: {stats['net_profit']}p",
+        ]
+        if stats["most_traded"]:
+            lines.append("  常交易: " + "、".join(f"{m['name']}({m['count']}次)" for m in stats["most_traded"]))
+        return "\n".join(lines)
+
+    def _add_trade(self, args: list[str]) -> str:
+        if len(args) < 3:
+            return "用法: /trade add 物品名 buy/sell 价格"
+        item_name = args[0]
+        trade_type = args[1].lower()
+        if trade_type not in ("buy", "sell", "买", "卖"):
+            return "交易类型必须是 buy/sell/买/卖"
+        if trade_type == "买":
+            trade_type = "buy"
+        elif trade_type == "卖":
+            trade_type = "sell"
+        try:
+            price = int(args[2])
+        except ValueError:
+            return "价格必须是数字"
+        item_id = self._resolve_item_id_for_command(item_name)
+        if not item_id:
+            return f"未找到物品: {item_name}"
+        from .trade_history import TradeHistoryDB
+        db = TradeHistoryDB()
+        db.add_trade(item_id, display_item_name(item_id), trade_type, price)
+        action = "买入" if trade_type == "buy" else "卖出"
+        return f"已记录: {display_item_name(item_id)} {action} {price}p"
+
+    def _undo_trade(self) -> str:
+        from .trade_history import TradeHistoryDB
+        db = TradeHistoryDB()
+        trades = db.get_recent_trades(1)
+        if not trades:
+            return "没有可撤销的交易记录。"
+        t = trades[0]
+        db.delete_trade(t.id)
+        return f"已撤销: {t.item_name} {'买入' if t.trade_type == 'buy' else '卖出'} {t.price}p"
+
+    # ---- /relic 命令 ----
+
+    def _handle_relic_command(self, args: list[str]) -> str:
+        if not args:
+            return "用法: /relic 物品名 | /relic 遗物名\n示例: /relic 犀牛 Prime 蓝图 | /relic Lith B1"
+        query = " ".join(args)
+        from .relics import get_relic_db, TIER_MAP
+        db = get_relic_db()
+        db.load(self.warframe_items or None)
+
+        # 先尝试按部件查找
+        drops = db.find_by_part(query)
+        if not drops:
+            # 尝试用 resolver 解析物品名
+            item_id = self._resolve_item_id_for_command(query)
+            if item_id:
+                drops = db.find_by_part(item_id)
+
+        if drops:
+            # 按遗物分组
+            by_relic: dict[str, list] = {}
+            for d in drops:
+                by_relic.setdefault(d.relic_name, []).append(d)
+
+            lines = [f"## {query} 的掉落遗物\n"]
+            for relic_name, relic_drops in sorted(by_relic.items()):
+                info = db.find_by_relic(relic_name)
+                vaulted = " (已Vault)" if info and info.is_vaulted else ""
+                tier_cn = TIER_MAP.get(relic_drops[0].relic_tier, relic_drops[0].relic_tier)
+                lines.append(f"**{relic_name}** [{tier_cn}]{vaulted}")
+                for d in relic_drops:
+                    rate = f"{d.drop_rate*100:.1f}%"
+                    lines.append(f"  - {d.part_name} ({d.rarity}, {rate})")
+
+            # 关联当前裂缝
+            from .events import EventTracker
+            tracker = EventTracker()
+            tracker.load_cache()
+            fissures = tracker.get_active_fissures()
+            if fissures:
+                matching = []
+                for f in fissures:
+                    for relic_name in by_relic:
+                        if f.tier_display and f.tier_display.lower() in relic_name.lower():
+                            matching.append(f)
+                            break
+                if matching:
+                    lines.append("\n**当前可刷裂缝：**")
+                    for f in matching[:5]:
+                        hard = " 钢铁" if f.hard else ""
+                        lines.append(f"  - {f.tier_display} {f.mission_display}{hard} @ {f.node_display}")
+
+            return "\n".join(lines)
+
+        # 尝试按遗物名查找
+        info = db.find_by_relic(query)
+        if info:
+            tier_cn = TIER_MAP.get(info.tier, info.tier)
+            vaulted = " (已Vault)" if info.is_vaulted else ""
+            lines = [f"## {info.name} [{tier_cn}]{vaulted}\n"]
+            for d in info.drops:
+                rate = f"{d.drop_rate*100:.1f}%"
+                market = f" ({d.market_id})" if d.market_id else ""
+                lines.append(f"  - {d.part_name} ({d.rarity}, {rate}){market}")
+            return "\n".join(lines)
+
+        return f"未找到与 '{query}' 相关的遗物或部件。"
+
+    def _handle_strategy_command(self, args: list[str]) -> str:
+        from .strategies import (
+            list_strategies, get_strategy, run_strategy, format_strategy_result,
+        )
+        if not args or args[0] == "list":
+            strategies = list_strategies()
+            lines = ["可用交易策略:"]
+            for s in strategies:
+                lines.append(f"  [{s.risk_level}] {s.name} — {s.description}")
+            lines.append("\n使用 /strategy run 策略名 执行扫描")
+            return "\n".join(lines)
+
+        if args[0] == "run":
+            if len(args) < 2:
+                return "用法: /strategy run 策略名\n示例: /strategy run 低风险"
+            query = " ".join(args[1:])
+            strategy = get_strategy(query)
+            if not strategy:
+                return f"未找到策略 '{query}'，使用 /strategy list 查看可用策略"
+            result = run_strategy(strategy, self.order_fetcher)
+            return format_strategy_result(result)
+
+        return "用法: /strategy list | /strategy run 策略名"
+
+    def _handle_vault_command(self) -> str:
+        """显示当前 Vault 状态。"""
+        from .events import EventTracker
+        tracker = EventTracker()
+        tracker.load_cache()
+        vault_events = tracker.get_vault_status()
+        if not vault_events:
+            return "当前没有 Prime Vault 回归活动。"
+        lines = ["**Prime Vault 状态**\n"]
+        for event in vault_events:
+            items = ", ".join(
+                display_item_name(item_id) for item_id in event.items_affected[:5]
+            ) if event.items_affected else "未知物品"
+            lines.append(f"回归物品: {items}")
+            if event.start_time:
+                lines.append(f"开始时间: {event.start_time}")
+            if event.end_time:
+                lines.append(f"结束时间: {event.end_time}")
+            lines.append("")
+        lines.append("Vault 回归期间，相关遗物和部件价格通常会有波动。")
+        return "\n".join(lines)
+
+    def _auto_record_trade(self, message: str, contexts: list) -> str | None:
+        """检测已完成的交易语句并自动记录。返回确认消息或 None。"""
+        if len(contexts) != 1:
+            return None
+        completed = detect_completed_trade(message)
+        if not completed:
+            return None
+        trade_type, price = completed
+        ctx = contexts[0]
+        from .trade_history import TradeHistoryDB
+        db = TradeHistoryDB()
+        db.add_trade(ctx.item_id, display_item_name(ctx.item_id), trade_type, price)
+        action = "买入" if trade_type == "buy" else "卖出"
+        return f"已自动记录交易: {display_item_name(ctx.item_id)} {action} {price}p (使用 /trade list 查看)"
 
     def _resolve_item_id_for_command(self, item_name: str) -> str | None:
         try:
@@ -475,7 +1113,8 @@ class ChatAgent:
                 tool_executor=self._execute_tool_call,
                 model_call=self._react_model_call,
             )
-        except Exception:
+        except Exception as exc:
+            logger.debug("ReAct 循环失败: %s", exc)
             return None
 
     def _react_model_call(self, messages: list[dict]) -> str:
@@ -485,8 +1124,8 @@ class ChatAgent:
         if self.model_call is not call_ollama_chat:
             parts = [m.get("content", "") for m in messages if m.get("role") != "system"]
             return self.model_call("\n".join(parts))
-        from .llm import chat_with_ollama
-        return chat_with_ollama(messages, model=config.REACT_MODEL)
+        from .tool_router import _default_model_call
+        return _default_model_call(messages)
 
     def _try_router_legacy(self, message: str) -> str | None:
         caller = self.router_call or self.model_call
@@ -497,7 +1136,8 @@ class ChatAgent:
             if not tool_call:
                 return None
             return self._execute_tool_call(tool_call, message)
-        except Exception:
+        except Exception as exc:
+            logger.debug("工具路由失败: %s", exc)
             return None
 
     def _execute_tool_call(self, tool_call, message: str = "") -> str | None:
@@ -555,6 +1195,7 @@ class ChatAgent:
             return None
         if tool_call.name == "mod_flipper":
             from .mod_flipper import scan_all_mod_flips
+            from .scout import scout_mod_candidates
             min_profit = int(args.get("min_profit", 5))
             limit = int(args.get("limit", 20))
             results = scan_all_mod_flips(
@@ -562,6 +1203,7 @@ class ChatAgent:
                 self.order_fetcher,
                 min_profit=min_profit,
                 limit=limit,
+                scout_fn=scout_mod_candidates,
             )
             if not results:
                 return "没有找到符合条件的 Mod 翻转机会"
@@ -573,6 +1215,7 @@ class ChatAgent:
             return "\n".join(lines)
         if tool_call.name == "set_profit":
             from .set_profit import scan_all_set_profits
+            from .scout import scout_set_candidates
             min_profit = int(args.get("min_profit", 5))
             limit = int(args.get("limit", 20))
             results = scan_all_set_profits(
@@ -580,6 +1223,7 @@ class ChatAgent:
                 self.order_fetcher,
                 min_profit=min_profit,
                 limit=limit,
+                scout_fn=scout_set_candidates,
             )
             if not results:
                 return "没有找到符合条件的套装利润机会"
@@ -592,27 +1236,156 @@ class ChatAgent:
                     lines.append(f"   48h成交: {r.volume_48h}笔")
             return "\n".join(lines)
         if tool_call.name == "investment_advisor":
-            from .investment import scan_investments, InvestmentFilter
-            filters = InvestmentFilter(
-                budget=int(args.get("budget", 1000)),
-                min_roi_pct=float(args.get("min_roi", 10)),
-                limit=int(args.get("limit", 15)),
-            )
-            results = scan_investments(
+            from .investment import scan_prime_investments
+            from .scout import scout_investment_candidates
+            budget = int(args.get("budget", 1000))
+            min_roi = float(args.get("min_roi", 10))
+            limit = int(args.get("limit", 15))
+            results = scan_prime_investments(
                 self.warframe_items or [],
                 self.order_fetcher,
-                filters=filters,
+                budget=budget,
+                min_roi_pct=min_roi,
+                limit=limit,
+                scout_fn=lambda groups: scout_investment_candidates(groups, budget=budget),
             )
             if not results:
                 return "没有找到符合条件的投资机会"
-            lines = [f"## 投资顾问 (预算 {filters.budget}p, ROI >= {filters.min_roi_pct}%)\n"]
+            lines = [f"## 投资顾问 (预算 {budget}p, ROI >= {min_roi}%)\n"]
             for i, r in enumerate(results, 1):
                 risk_icon = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(r.risk_level, "⚪")
                 lines.append(f"{i}. **{r.display_name}** {risk_icon}")
-                lines.append(f"   买入: {r.buy_price}p → 卖出: {r.sell_price}p | 利润: +{r.profit}p")
-                lines.append(f"   ROI: {r.roi_pct:.1f}% | 日均成交: {r.daily_volume or '未知'}笔 | 风险: {r.risk_level}")
+                lines.append(f"   买入成本: {r.buy_cost}p → 卖出: {r.sell_price}p | 每套利润: +{r.profit_per_set}p")
+                lines.append(f"   ROI: {r.roi_pct:.1f}% | 可购 {r.sets_affordable} 套 | 总利润: +{r.total_profit}p")
+                lines.append(f"   48h成交: {r.volume_48h or '未知'}笔 | 风险: {r.risk_level}")
             return "\n".join(lines)
+        if tool_call.name == "query_events":
+            from .events import EventTracker
+            tracker = EventTracker()
+            tracker.load_cache()
+            events = tracker.get_active_events()
+            if not events:
+                return "当前没有活跃的游戏事件"
+            # 按类型过滤
+            filter_type = args.get("type", "").strip()
+            if filter_type:
+                events = [e for e in events if e.event_type == filter_type]
+                if not events:
+                    return f"当前没有 {filter_type} 类型的事件"
+            # 按类型分组展示
+            from collections import Counter
+            type_counts = Counter(e.event_type for e in events)
+            type_names = {
+                "void_fissure": "虚空裂缝", "void_storm": "虚空风暴",
+                "invasion": "入侵", "baro_visit": "虚空商人", "alert": "警报",
+            }
+            lines = [f"## 当前游戏事件（共 {len(events)} 条）\n"]
+            # 概览
+            overview = "、".join(f"{type_names.get(t, t)} {c}条" for t, c in type_counts.most_common())
+            lines.append(f"概览: {overview}\n")
+            # 逐条展示
+            for e in events:
+                icon = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(e.impact, "⚪")
+                tname = type_names.get(e.event_type, e.event_type)
+                lines.append(f"- {icon} [{tname}] {e.description}")
+            return "\n".join(lines)
+        if tool_call.name == "deep_analysis":
+            item_name = args.get("item_name", message)
+            return self._deep_analysis(item_name)
         return None
+
+    def _deep_analysis(self, item_name: str) -> str | None:
+        """使用云端大模型对物品进行多维度深度分析。"""
+        item_id = self._resolve_item_id_for_command(item_name)
+        if not item_id:
+            return f"未找到物品: {item_name}"
+
+        # 收集数据
+        from .market import best_buyers, best_sellers
+        try:
+            orders = self.order_fetcher(item_id)
+        except Exception:
+            orders = []
+
+        sellers = best_sellers(orders) if orders else []
+        buyers = best_buyers(orders) if orders else []
+        sell_price = sellers[0]["platinum"] if sellers else None
+        buy_price = buyers[0]["platinum"] if buyers else None
+
+        # 知识库数据
+        stats_text = ""
+        if self.knowledge:
+            stats = self.knowledge.get_item_stats(item_id)
+            if stats:
+                stats_text = (
+                    f"趋势: {stats.trend}, 波动率: {stats.volatility:.1f}%, "
+                    f"滚动均价(卖): {stats.rolling_avg_sell:.0f}p, 滚动均价(收): {stats.rolling_avg_buy:.0f}p, "
+                    f"扫描次数: {stats.scan_count}"
+                )
+
+        # 游戏数据
+        game_text = ""
+        if self.game_data:
+            name = display_item_name(item_id)
+            mod_info = self.game_data.get_mod_info(name)
+            if mod_info:
+                game_text = mod_info
+            ducat = self.game_data.get_ducat_value(item_id)
+            if ducat:
+                game_text += f"\n杜卡特值: {ducat}"
+
+        # 价格历史
+        history_text = ""
+        if self.price_db:
+            trend = self.price_db.trend_summary(item_id)
+            if trend:
+                history_text = trend
+
+        # 构建分析 prompt
+        analysis_prompt = (
+            f"你是资深 Warframe 交易分析师。请对以下物品进行多维度深度分析。\n\n"
+            f"## 物品: {display_item_name(item_id)} ({item_id})\n\n"
+            f"## 当前市场\n"
+            f"- 最低卖价: {sell_price}p\n"
+            f"- 最高收价: {buy_price}p\n"
+            f"- 价差: {(sell_price - buy_price) if sell_price and buy_price else '未知'}p\n\n"
+        )
+        if stats_text:
+            analysis_prompt += f"## 知识库数据\n{stats_text}\n\n"
+        if game_text:
+            analysis_prompt += f"## 游戏数据\n{game_text}\n\n"
+        if history_text:
+            analysis_prompt += f"## 价格趋势\n{history_text}\n\n"
+
+        analysis_prompt += (
+            "请从以下维度分析：\n"
+            "1. **价格评估**: 当前价格是否合理？偏高还是偏低？\n"
+            "2. **趋势判断**: 短期内会涨还是跌？\n"
+            "3. **风险评估**: 波动率、流动性、封存风险\n"
+            "4. **投资建议**: 现在买入/卖出/观望？理由是什么？\n"
+            "5. **操作建议**: 如果要交易，推荐价格和话术\n\n"
+            "用中文回答，简洁有力，附带具体数字。"
+        )
+
+        try:
+            from .llm import _cloud_chat_sync
+            result = _cloud_chat_sync([
+                {"role": "system", "content": "你是 Warframe 交易分析师，擅长多维度市场分析。"},
+                {"role": "user", "content": analysis_prompt},
+            ])
+            return f"## 深度分析: {display_item_name(item_id)}\n\n{result}"
+        except Exception as exc:
+            logger.warning("云端深度分析失败，回退本地: %s", exc)
+            # 回退到本地模型
+            try:
+                from .llm import chat_with_ollama
+                result = chat_with_ollama([
+                    {"role": "system", "content": "你是 Warframe 交易分析师。"},
+                    {"role": "user", "content": analysis_prompt},
+                ])
+                return f"## 深度分析: {display_item_name(item_id)}\n\n{result}"
+            except Exception:
+                return f"深度分析失败: {item_name}。请稍后重试。"
 
     def _query_missing_parts(self, warframe_name: str, owned_parts: list[str]) -> str | None:
         from .warframes import find_warframe, build_set_price_info
@@ -744,16 +1517,61 @@ def build_chat_prompt(message: str, contexts: list[ItemContext], memory: AgentMe
     )
 
 
-def build_system_prompt(memory: AgentMemory, contexts: list[ItemContext] | None = None) -> str:
-    """构建 system 消息（persona + 记忆 + 告警）"""
-    memory_text = _memory_prompt(contexts or [], memory)
-    return (
-        "你是资深星际战甲玩家和中文交易助手。请用老玩家视角回答，重点说明能不能买、能不能卖、价差和注意事项。"
-        "所有识别出的商品名必须尽量使用 `中文名 / English Name / market_id` 格式。"
-        "所有价格单位都是 Warframe 白金 platinum，绝不是美元、人民币或其他现实货币。"
-        "不要编造没有提供的实时价格。\n\n"
-        f"长期记忆与偏好:\n{memory_text}"
+def build_system_prompt(
+    memory: AgentMemory,
+    contexts: list[ItemContext] | None = None,
+    market_context: str | None = None,
+) -> str:
+    """构建 system 消息（persona + CoT 引导 + Few-shot + 记忆 + 市场上下文）"""
+    parts = []
+
+    # 1. 角色定义 + 行为准则
+    parts.append(
+        "你是资深星际战甲玩家和中文交易助手。\n\n"
+        "## 行为准则\n"
+        "- 所有商品名使用 `中文名 / English Name / market_id` 格式\n"
+        "- 所有价格单位都是白金(platinum)，不是现实货币\n"
+        "- 绝不编造未提供的实时价格，数据不足时明确说明\n"
+        "- 有推荐交易对象时必须提供 /w 私聊命令\n\n"
+        "## 回答策略\n"
+        "价格查询类问题，按以下步骤思考：\n"
+        "1. 识别物品类型（Mod/战甲/赋能/遗物等）\n"
+        "2. 分析当前市场数据（卖价、收价、价差）\n"
+        "3. 结合趋势和事件给出建议\n"
+        "4. 提供可执行的操作（私聊命令等）\n\n"
+        "投资/利润类问题，按以下步骤思考：\n"
+        "1. 计算成本和预期收益\n"
+        "2. 评估流动性（成交量）\n"
+        "3. 考虑风险因素（波动率、事件影响）\n"
+        "4. 给出明确建议（买/卖/观望）"
     )
+
+    # 2. Few-shot 示例
+    parts.append(
+        "\n## 示例\n\n"
+        "玩家问题: 充沛赋能多少钱\n"
+        "回答:\n"
+        "充沛赋能 / Arcane Energize / arcane_energize\n"
+        "最低卖价: 45p，最高收价: 35p，价差: 10p\n"
+        "推荐购买: /w seller Hi! I want to buy: \"Arcane Energize\" for 45 platinum.\n"
+        "建议: 价差适中，适合直接购买。满级赋能流动性好，48h 成交量充足。\n\n"
+        "玩家问题: 犀牛 Prime 一套多少钱，拆件买还是一套买\n"
+        "回答:\n"
+        "Rhino Prime / rhino_prime_set\n"
+        "整套最低卖: 120p | 拆件买合计: 95p\n"
+        "拆件比整套便宜 25p，建议拆件收。\n"
+        "各部件: 蓝图 20p / 机体 30p / 头部 25p / 系统 20p"
+    )
+
+    # 3. 记忆注入（结构化）
+    memory_text = _memory_prompt(contexts or [], memory)
+    parts.append(f"\n## 用户画像与偏好\n{memory_text}")
+
+    # 4. 市场智能注入
+    if market_context:
+        parts.append(f"\n## 市场智能\n{market_context}")
+
+    return "\n".join(parts)
 
 
 def build_chat_messages(
@@ -761,9 +1579,10 @@ def build_chat_messages(
     contexts: list[ItemContext],
     memory: AgentMemory,
     history: list[dict[str, str]] | None = None,
+    market_context: str | None = None,
 ) -> list[dict[str, str]]:
     """构建 Ollama chat messages 数组（支持多轮对话）"""
-    messages = [{"role": "system", "content": build_system_prompt(memory, contexts)}]
+    messages = [{"role": "system", "content": build_system_prompt(memory, contexts, market_context)}]
     if history:
         messages.extend(history)
     if contexts:
@@ -775,6 +1594,12 @@ def build_chat_messages(
 
 
 def _deterministic_trade_intent_answer(message: str, contexts: list[ItemContext]) -> str | None:
+    # 多物品对比查询
+    if detect_compare_query(message) and len(contexts) >= 2:
+        return _render_comparison_table(contexts)
+    # 趋势预测类查询
+    if detect_trend_query(message) and len(contexts) == 1:
+        return _render_trend_prediction(contexts[0])
     intent = detect_trade_intent(message)
     if intent == "overview" or len(contexts) != 1:
         return None
@@ -801,6 +1626,77 @@ def _render_trade_intent_context(context: ItemContext, intent: str) -> str:
             lines.append(f"当前价差: {context.best_sell_price - context.best_buy_price}p")
     else:
         return None
+    return "\n".join(lines)
+
+
+def _render_trend_prediction(context: ItemContext) -> str | None:
+    """使用 price_history 预测趋势，返回确定性回答。"""
+    try:
+        price_db = PriceHistoryDB()
+        # 获取事件上下文
+        event_ctx = {}
+        try:
+            tracker = EventTracker()
+            events = tracker.get_active_events()
+            for e in events:
+                if e.event_type == "baro_visit":
+                    event_ctx["baro_active"] = True
+        except Exception:
+            pass
+        prediction = price_db.predict_trend(context.item_id, event_context=event_ctx)
+        if not prediction:
+            return None
+        lines = [f"**{display_item_name(context.item_id)}** 价格趋势分析"]
+        direction_map = {"rising": "上涨 ↑", "falling": "下跌 ↓", "stable": "持平 →"}
+        dir_text = direction_map.get(prediction["direction"], prediction["direction"])
+        lines.append(f"趋势方向: {dir_text}")
+        lines.append(f"当前价格: {prediction['current']}p")
+        lines.append(f"预测价格: {prediction['predicted_next']}p")
+        low, high = prediction["price_range"]
+        lines.append(f"预测区间: {low}p ~ {high}p")
+        lines.append(f"置信度: {prediction['confidence']:.0f}%")
+        if prediction.get("event_factor"):
+            lines.append(f"事件修正: {prediction['event_factor']}")
+        lines.append(f"数据点: {prediction['data_points']} 个")
+        if prediction["confidence"] < 30:
+            lines.append("⚠ 数据量较少，预测仅供参考")
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.debug("趋势预测失败: %s", exc)
+        return None
+
+
+def _render_comparison_table(contexts: list[ItemContext]) -> str:
+    """生成多物品对比表格。"""
+    lines = ["物品对比"]
+    header = "| 物品 | 最低卖价 | 最高价 | 价差 | 建议 |"
+    separator = "|------|---------|--------|------|------|"
+    lines.append(header)
+    lines.append(separator)
+
+    for ctx in contexts:
+        sell = f"{ctx.best_sell_price}p" if ctx.best_sell_price else "-"
+        buy = f"{ctx.best_buy_price}p" if ctx.best_buy_price else "-"
+        spread = ""
+        advice = ""
+        if ctx.best_sell_price and ctx.best_buy_price:
+            s = ctx.best_sell_price - ctx.best_buy_price
+            spread = f"{s}p"
+            if s > 20:
+                advice = "价差大，适合倒货"
+            elif s < 5:
+                advice = "价差小，直接买"
+            else:
+                advice = "价差适中"
+        name = display_item_name(ctx.item_id)
+        lines.append(f"| {name} | {sell} | {buy} | {spread} | {advice} |")
+
+    # 推荐最优
+    valid = [c for c in contexts if c.best_sell_price and c.best_buy_price]
+    if valid:
+        best = max(valid, key=lambda c: c.best_sell_price - c.best_buy_price)
+        lines.append(f"\n推荐: **{display_item_name(best.item_id)}** 价差最大，适合交易")
+
     return "\n".join(lines)
 
 
@@ -835,25 +1731,48 @@ def call_ollama_router(prompt: str) -> str:
 
 
 def _memory_prompt(contexts: list[ItemContext], memory: AgentMemory) -> str:
-    lines = [
-        f"偏好: platform={memory.preferences.platform}, crossplay={memory.preferences.crossplay}, max_results={memory.preferences.max_results}",
-    ]
-    if memory.favorite_items:
-        lines.append(f"常看物品: {', '.join(memory.favorite_items)}")
+    sections = []
+
+    # 1. 触发的价格提醒（最高优先级）
+    triggered_alerts = []
+    for context in contexts:
+        if context.best_sell_price is not None:
+            for alert in memory.alerts_for(context.item_id, context.best_sell_price):
+                triggered_alerts.append(alert)
+    if triggered_alerts:
+        alert_lines = [f"- {a.note or a.item_id}" for a in triggered_alerts]
+        sections.append("[触发的提醒]\n" + "\n".join(alert_lines))
+
+    # 2. 用户偏好
+    pref_parts = [f"平台={memory.preferences.platform}"]
     if memory.user_profile:
         profile = memory.user_profile
-        trade_text = {"buy": "偏好购买", "sell": "偏好出售"}.get(profile.preferred_trade_type, "买卖均衡")
-        cats = "、".join(profile.favorite_categories) if profile.favorite_categories else "无"
-        lines.append(f"用户画像: {trade_text}，偏好分类: {cats}，累计查询 {profile.total_queries} 次")
-    for context in contexts:
-        if context.best_sell_price is None:
-            continue
-        for alert in memory.alerts_for(context.item_id, context.best_sell_price):
-            lines.append(f"记忆提醒: {alert.note or context.item_id}")
-    if memory.recent_suggestions:
+        trade_text = {"buy": "偏好购买", "sell": "偏好出售"}.get(profile.preferred_trade_type, "均衡")
+        pref_parts.append(f"交易风格={trade_text}")
+        if profile.favorite_categories:
+            pref_parts.append(f"偏好分类={','.join(profile.favorite_categories[:3])}")
+        pref_parts.append(f"累计查询={profile.total_queries}次")
+    if memory.favorite_items:
+        pref_parts.append(f"常看={','.join(memory.favorite_items[:5])}")
+    sections.append("[用户偏好]\n" + " | ".join(pref_parts))
+
+    # 3. 相关智能建议（只注入与当前物品相关的）
+    if memory.recent_suggestions and contexts:
+        relevant = []
         for s in memory.recent_suggestions[-config.PROACTIVE_SUGGESTION_LIMIT:]:
-            lines.append(f"智能建议: {s.message}")
-    return "\n".join(lines)
+            if any(s.item_id == ctx.item_id for ctx in contexts):
+                relevant.append(s.message)
+        if relevant:
+            sections.append("[相关建议]\n" + "\n".join(f"- {m}" for m in relevant))
+
+    # 4. 高置信度已学模式
+    if memory.learned_patterns:
+        high_conf = [p for p in memory.learned_patterns if p.get("confidence", 0) >= 0.7]
+        if high_conf:
+            pattern_lines = [f"- {p['description']}" for p in high_conf[:3]]
+            sections.append("[已发现的规律]\n" + "\n".join(pattern_lines))
+
+    return "\n\n".join(sections) if sections else "（无历史记忆）"
 
 
 
@@ -871,6 +1790,85 @@ def _message_tokens(message: str) -> list[str]:
     for separator in separators:
         normalized = normalized.replace(separator, " ")
     return [token for token in normalized.split() if token]
+
+
+_EVENT_KEYWORDS = {
+    "活动", "事件", "裂缝", "裂隙", "fissure", "虚空裂缝", "虚空裂隙",
+    "baro", "虚空商人", "入侵", "invasion", "警报", "alert", "虚空风暴",
+    "钢铁歼灭", "钢铁防御", "钢铁生存", "开核桃", "遗物", "核桃",
+    "刷什么", "现在刷", "当前刷", "可以刷", "有什么活动",
+}
+
+
+def _is_event_query(message: str) -> bool:
+    """判断消息是否为游戏事件查询（应直接走路由器，跳过物品匹配）。"""
+    lower = message.lower()
+    return any(kw in lower for kw in _EVENT_KEYWORDS)
+
+
+_TRADING_TOOL_KEYWORDS = {
+    "翻转", "mod翻转", "mod flip", "内融利润", "升级赚钱",
+    "套装利润", "拆件赚", "拆件利润", "整套vs拆件",
+    "投资", "投资推荐", "投资建议", "roi", "预算",
+    "有什么mod", "哪些mod", "什么mod可以",
+}
+
+
+def _is_trading_tool_query(message: str) -> bool:
+    """判断消息是否为交易工具查询（应直接走路由器，跳过物品匹配）。"""
+    lower = message.lower()
+    return any(kw in lower for kw in _TRADING_TOOL_KEYWORDS)
+
+
+def _self_check(answer: str, contexts: list[ItemContext]) -> str | None:
+    """规则化自检：捕获 LLM 的严重错误，不增加额外 LLM 调用。
+
+    发现问题时返回追加 [注意] 后缀的修正版本，无问题返回 None。
+    """
+    warnings = []
+
+    # 1. 价格编造检测：回答中出现的 Np 价格必须在 contexts 中存在
+    import re
+    price_pattern = re.compile(r'(\d+)\s*[pP铂]')
+    mentioned_prices = {int(m.group(1)) for m in price_pattern.finditer(answer)}
+    if mentioned_prices and contexts:
+        valid_prices = set()
+        for ctx in contexts:
+            if ctx.best_sell_price:
+                valid_prices.add(ctx.best_sell_price)
+            if ctx.best_buy_price:
+                valid_prices.add(ctx.best_buy_price)
+            # 允许价差计算结果（±5 范围内）
+            for vp in list(valid_prices):
+                for delta in range(-5, 6):
+                    valid_prices.add(vp + delta)
+        fabricated = mentioned_prices - valid_prices
+        # 过滤掉明显不是交易价格的数字（如版本号、百分比）
+        fabricated = {p for p in fabricated if 5 < p < 100000}
+        if fabricated and len(fabricated) > len(mentioned_prices) * 0.5:
+            warnings.append(f"回答中包含未在数据中出现的价格: {fabricated}p，可能不准确")
+
+    # 2. 私聊命令检测：有推荐卖家/买家时必须包含 /w
+    has_recommendation = any(
+        kw in answer for kw in ["推荐购买", "推荐出售", "推荐卖家", "推荐买家", "最低卖", "最高收"]
+    )
+    has_whisper = "/w " in answer or "/W " in answer
+    # 2b. 无交易上下文时出现私聊命令 = LLM 混入了无关数据
+    if has_whisper and not contexts:
+        warnings.append("回答中包含私聊命令但查询与交易无关，可能混入了不相关数据")
+    if has_recommendation and not has_whisper and contexts:
+        for ctx in contexts:
+            if ctx.best_sell_price or ctx.best_buy_price:
+                warnings.append("有推荐交易对象但缺少 /w 私聊命令")
+                break
+
+    # 3. 回答截断检测
+    if len(answer.strip()) < 20:
+        warnings.append("回答过短，可能被截断")
+
+    if warnings:
+        return answer + "\n\n[注意] " + "；".join(warnings)
+    return None
 
 
 def _load_watchlist() -> dict[str, list[str]]:

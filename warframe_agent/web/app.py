@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
+import requests
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,17 +20,25 @@ from .. import config
 from ..chat import ChatAgent, build_item_context_result
 from ..dictionary import normalize_lookup_key, normalize_market_id
 from ..market import fetch_orders, fetch_orders_async, best_sellers, best_buyers, get_max_rank_from_orders
+from ..goals import create_goal, plan_for_goal, execute_plan, record_trade_outcome
 from ..memory import AgentMemory, PriceAlert, MEMORY_PATH
-from ..monitor import PriceMonitor, AlertNotification, WatchNotification, EnrichedNotification
+from ..monitor import PriceMonitor, AlertNotification, WatchNotification, EnrichedNotification, ProactivePush
 from ..names import display_item_name
 from ..price_history import PriceHistoryDB
 from ..trade_history import TradeHistoryDB
 from ..formatter import build_whisper
+from ..push import WxPusher, PushConfig, should_send_daily_report, WXPUSHER_QR_API
+from ..feishu import FeishuBot, FeishuConfig
+
+logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     inject_custom_aliases()
     setup_monitor()
+    # 启动飞书 WebSocket 连接
+    if feishu_bot.available:
+        feishu_bot.start()
     # 预热缓存（在线程池中执行避免阻塞启动）
     await asyncio.gather(
         asyncio.to_thread(_load_export_file, "ExportRelicArcane_en.json"),
@@ -45,12 +55,19 @@ async def lifespan(app: FastAPI):
     )
     yield
     try:
+        feishu_bot.stop()
+    except Exception:
+        pass
+    try:
         monitor.stop()
     except Exception:
         pass
 
 
 app = FastAPI(title="Warframe Trading Agent API", lifespan=lifespan)
+
+# 后台任务跟踪
+_bg_tasks: dict[str, dict] = {}  # task_id -> {"status": "running"|"done"|"error", "result": ..., "error": ...}
 
 
 class NoCacheAPIMiddleware(BaseHTTPMiddleware):
@@ -69,6 +86,19 @@ monitor = PriceMonitor()
 price_db = PriceHistoryDB()
 trade_db = TradeHistoryDB()
 ws_connections: list[WebSocket] = []
+
+# WxPusher 微信推送
+push_config = PushConfig.load()
+push_client = WxPusher(push_config)
+
+# 飞书机器人（WebSocket 长连接模式）
+feishu_config = FeishuConfig.load()
+
+def _feishu_on_message(user_text: str, message_id: str) -> str:
+    """飞书消息回调：同步调用智能体"""
+    return chat_agent.answer(user_text)
+
+feishu_bot = FeishuBot(feishu_config, on_message=_feishu_on_message)
 
 # 自定义别名存储
 CUSTOM_ALIASES_PATH = Path(__file__).parent.parent.parent / "data" / "custom_aliases.json"
@@ -636,6 +666,149 @@ async def remove_alert(request: AlertRequest) -> JSONResponse:
     memory = memory.without_price_alert(request.item_id, request.direction, request.price)
     await _save_memory_async(memory)
     return JSONResponse({"status": "ok"})
+
+
+# ===== 微信推送 API =====
+
+class PushConfigRequest(BaseModel):
+    enabled: bool | None = None
+    app_token: str | None = None
+    uids: list[str] | None = None
+    push_alerts: bool | None = None
+    push_watches: bool | None = None
+    push_proactive: bool | None = None
+    push_daily_report: bool | None = None
+    report_time: str | None = None
+
+
+@app.get("/api/push/config")
+async def get_push_config() -> JSONResponse:
+    cfg = PushConfig.load()
+    data = cfg.__dict__.copy()
+    # 隐藏 token 中间部分
+    if data.get("app_token"):
+        t = data["app_token"]
+        data["app_token_masked"] = t[:5] + "***" + t[-4:] if len(t) > 9 else "***"
+    return JSONResponse(data)
+
+
+@app.post("/api/push/config")
+async def update_push_config(req: PushConfigRequest) -> JSONResponse:
+    global push_config, push_client
+    cfg = PushConfig.load()
+    for key, val in req.__dict__.items():
+        if val is not None:
+            setattr(cfg, key, val)
+    cfg.save()
+    push_config = cfg
+    push_client = WxPusher(push_config)
+    return JSONResponse({"status": "ok"})
+
+
+@app.post("/api/push/test")
+async def test_push() -> JSONResponse:
+    if not push_client.available:
+        return JSONResponse({"status": "error", "message": "推送未配置或未启用"}, status_code=400)
+    ok = await asyncio.to_thread(push_client.send_text, "测试推送", "Warframe 交易助手推送测试成功！")
+    if ok:
+        return JSONResponse({"status": "ok", "message": "测试消息已发送"})
+    return JSONResponse({"status": "error", "message": "推送失败，请检查配置"}, status_code=500)
+
+
+@app.get("/api/push/qrcode")
+async def get_push_qrcode() -> JSONResponse:
+    """获取 WxPusher 关注二维码 URL。"""
+    if not push_config.app_token:
+        return JSONResponse({"status": "error", "message": "未配置 appToken"}, status_code=400)
+    try:
+        resp = await asyncio.to_thread(
+            requests.post,
+            WXPUSHER_QR_API,
+            json={"appToken": push_config.app_token, "extra": "warframe"},
+            timeout=10,
+        )
+        data = resp.json()
+        if data.get("code") == 1000:
+            return JSONResponse({"status": "ok", "url": data["data"]})
+        return JSONResponse({"status": "error", "message": data.get("msg", "获取二维码失败")}, status_code=500)
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/push/callback")
+async def push_callback(request: Request) -> JSONResponse:
+    """WxPusher 事件回调：用户关注/取关时自动更新 UID。"""
+    global push_config, push_client
+    try:
+        body = await request.json()
+        action = body.get("action")
+        uid = body.get("uid")
+        logger.info("WxPusher 回调: action=%s uid=%s", action, uid)
+        if action == "subscribe" and uid:
+            cfg = PushConfig.load()
+            if uid not in cfg.uids:
+                cfg.uids.append(uid)
+                cfg.enabled = True
+                cfg.save()
+                push_config = cfg
+                push_client = WxPusher(push_config)
+                logger.info("自动添加 UID: %s", uid)
+        elif action == "unsubscribe" and uid:
+            cfg = PushConfig.load()
+            if uid in cfg.uids:
+                cfg.uids.remove(uid)
+                cfg.save()
+                push_config = cfg
+                push_client = WxPusher(push_config)
+                logger.info("自动移除 UID: %s", uid)
+    except Exception as exc:
+        logger.warning("回调处理异常: %s", exc)
+    return JSONResponse({"code": 1000})
+
+
+# ===== 飞书机器人 API =====
+
+class FeishuConfigRequest(BaseModel):
+    enabled: bool | None = None
+    app_id: str | None = None
+    app_secret: str | None = None
+
+
+@app.get("/api/feishu/config")
+async def get_feishu_config() -> JSONResponse:
+    cfg = FeishuConfig.load()
+    data = cfg.__dict__.copy()
+    if data.get("app_secret"):
+        data["app_secret_masked"] = "***" + data["app_secret"][-4:] if len(data["app_secret"]) > 4 else "***"
+    return JSONResponse(data)
+
+
+@app.post("/api/feishu/config")
+async def update_feishu_config(req: FeishuConfigRequest) -> JSONResponse:
+    global feishu_config, feishu_bot
+    cfg = FeishuConfig.load()
+    for key, val in req.__dict__.items():
+        if val is not None:
+            setattr(cfg, key, val)
+    cfg.save()
+    feishu_config = cfg
+    # 重启飞书 WebSocket 连接
+    feishu_bot.stop()
+    feishu_bot = FeishuBot(feishu_config, on_message=_feishu_on_message)
+    if feishu_bot.available:
+        feishu_bot.start()
+    return JSONResponse({"status": "ok"})
+
+
+@app.post("/api/feishu/test")
+async def test_feishu() -> JSONResponse:
+    if not feishu_bot.available:
+        return JSONResponse({"status": "error", "message": "飞书机器人未配置或未启用"}, status_code=400)
+    try:
+        client = feishu_bot._ensure_client()
+        return JSONResponse({"status": "ok", "message": "客户端初始化成功，WebSocket 连接将在后台建立"})
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
 # ===== 关注列表 API =====
@@ -1318,117 +1491,425 @@ def _set_scan_cache(key: str, data: list) -> None:
 
 
 @app.get("/api/mod_flipper")
-async def mod_flipper_endpoint(min_profit: int = 5, limit: int = 20) -> JSONResponse:
-    """扫描 Mod 翻转利润。"""
+async def mod_flipper_endpoint(min_profit: int = 5, min_roi_pct: float = 100, limit: int = 50) -> JSONResponse:
+    """扫描 Mod 翻转利润（异步）。"""
+    import uuid
     from ..mod_flipper import scan_all_mod_flips
-    try:
-        cache_key = f"mod_flipper_{min_profit}_{limit}"
-        cached = _get_scan_cache(cache_key)
-        if cached is not None:
-            return JSONResponse({"results": cached, "total": len(cached), "min_profit": min_profit, "cached": True})
+    from ..scout import scout_mod_candidates
+    cache_key = f"mod_flipper_{min_profit}_{min_roi_pct}_{limit}"
+    cached = _get_scan_cache(cache_key)
+    if cached is not None:
+        return JSONResponse({"status": "done", "results": cached, "total": len(cached)})
 
-        items = await asyncio.to_thread(_load_items_full)
-        results = await asyncio.to_thread(
-            scan_all_mod_flips, items, fetch_orders, min_profit=min_profit, limit=limit
-        )
-        formatted = [
-            {
-                "item_id": r.item_id,
-                "display_name": r.display_name,
-                "r0_buy_price": r.r0_buy_price,
-                "r10_sell_price": r.r10_sell_price,
-                "flip_profit": r.flip_profit,
-                "endo_cost": r.endo_cost,
-                "plat_per_1k_endo": round(r.plat_per_1k_endo, 2),
-                "value_score": round(r.value_score, 2),
-                "volume_48h": r.volume_48h,
-                "max_rank": r.max_rank,
-                "rarity": r.rarity,
-            }
-            for r in results
-        ]
-        _set_scan_cache(cache_key, formatted)
-        return JSONResponse({"results": formatted, "total": len(formatted), "min_profit": min_profit})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    task_id = uuid.uuid4().hex[:12]
+    _bg_tasks[task_id] = {"status": "running", "result": None, "error": None}
+
+    async def _run():
+        try:
+            items = await asyncio.to_thread(_load_items_full)
+            results = await asyncio.to_thread(
+                scan_all_mod_flips, items, fetch_orders,
+                min_profit=min_profit, min_roi_pct=min_roi_pct, limit=limit,
+                scout_fn=scout_mod_candidates,
+            )
+            formatted = [
+                {
+                    "item_id": r.item_id, "display_name": r.display_name,
+                    "r0_buy_price": r.r0_buy_price, "r10_sell_price": r.r10_sell_price,
+                    "flip_profit": r.flip_profit, "roi_pct": round(r.roi_pct, 1),
+                    "endo_cost": r.endo_cost, "plat_per_1k_endo": round(r.plat_per_1k_endo, 2),
+                    "value_score": round(r.value_score, 2), "volume_48h": r.volume_48h,
+                    "max_rank": r.max_rank, "rarity": r.rarity, "is_prime": r.is_prime,
+                }
+                for r in results
+            ]
+            _set_scan_cache(cache_key, formatted)
+            _bg_tasks[task_id]["status"] = "done"
+            _bg_tasks[task_id]["result"] = {"results": formatted, "total": len(formatted)}
+        except Exception as exc:
+            _bg_tasks[task_id]["status"] = "error"
+            _bg_tasks[task_id]["error"] = str(exc)
+
+    asyncio.create_task(_run())
+    return JSONResponse({"status": "running", "task_id": task_id})
 
 
 @app.get("/api/set_profit")
 async def set_profit_endpoint(min_profit: int = 5, limit: int = 20) -> JSONResponse:
-    """分析 Prime 套装利润。"""
+    """分析 Prime 套装利润（异步）。"""
+    import uuid
     from ..set_profit import scan_all_set_profits
-    try:
-        cache_key = f"set_profit_{min_profit}_{limit}"
-        cached = _get_scan_cache(cache_key)
-        if cached is not None:
-            return JSONResponse({"results": cached, "total": len(cached), "cached": True})
+    from ..scout import scout_set_candidates
+    cache_key = f"set_profit_{min_profit}_{limit}"
+    cached = _get_scan_cache(cache_key)
+    if cached is not None:
+        return JSONResponse({"status": "done", "results": cached, "total": len(cached)})
 
-        items = await asyncio.to_thread(_load_items_full)
-        results = await asyncio.to_thread(
-            scan_all_set_profits, items, fetch_orders, min_profit=min_profit, limit=limit
-        )
-        formatted = [
-            {
-                "base_id": r.base_id,
-                "display_name": r.display_name,
-                "set_buy_price": r.set_buy_price,
-                "parts_sell_total": r.parts_sell_total,
-                "set_sell_price": r.set_sell_price,
-                "parts_buy_total": r.parts_buy_total,
-                "profit_buy_parts_sell_set": r.profit_buy_parts_sell_set,
-                "profit_buy_set_sell_parts": r.profit_buy_set_sell_parts,
-                "best_strategy": r.best_strategy,
-                "best_profit": r.best_profit,
-                "volume_48h": r.volume_48h,
-                "part_count": r.part_count,
-            }
-            for r in results
-        ]
-        _set_scan_cache(cache_key, formatted)
-        return JSONResponse({"results": formatted, "total": len(formatted)})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    task_id = uuid.uuid4().hex[:12]
+    _bg_tasks[task_id] = {"status": "running", "result": None, "error": None}
+
+    async def _run():
+        try:
+            items = await asyncio.to_thread(_load_items_full)
+            results = await asyncio.to_thread(
+                scan_all_set_profits, items, fetch_orders,
+                min_profit=min_profit, limit=limit,
+                scout_fn=scout_set_candidates,
+            )
+            formatted = [
+                {
+                    "base_id": r.base_id, "display_name": r.display_name,
+                    "set_buy_price": r.set_buy_price, "parts_sell_total": r.parts_sell_total,
+                    "set_sell_price": r.set_sell_price, "parts_buy_total": r.parts_buy_total,
+                    "profit_buy_parts_sell_set": r.profit_buy_parts_sell_set,
+                    "profit_buy_set_sell_parts": r.profit_buy_set_sell_parts,
+                    "best_strategy": r.best_strategy, "best_profit": r.best_profit,
+                    "volume_48h": r.volume_48h, "part_count": r.part_count,
+                }
+                for r in results
+            ]
+            _set_scan_cache(cache_key, formatted)
+            _bg_tasks[task_id]["status"] = "done"
+            _bg_tasks[task_id]["result"] = {"results": formatted, "total": len(formatted)}
+        except Exception as exc:
+            _bg_tasks[task_id]["status"] = "error"
+            _bg_tasks[task_id]["error"] = str(exc)
+
+    asyncio.create_task(_run())
+    return JSONResponse({"status": "running", "task_id": task_id})
 
 
 @app.get("/api/investment")
-async def investment_endpoint(
-    budget: int = 1000,
-    min_roi: float = 10.0,
-    limit: int = 15,
-) -> JSONResponse:
-    """投资顾问 API。"""
-    from ..investment import scan_investments, InvestmentFilter
-    filters = InvestmentFilter(budget=budget, min_roi_pct=min_roi, limit=limit)
-    try:
-        cache_key = f"investment_{budget}_{min_roi}_{limit}"
-        cached = _get_scan_cache(cache_key)
-        if cached is not None:
-            return JSONResponse({"results": cached, "total": len(cached), "filters": {"budget": budget, "min_roi": min_roi}, "cached": True})
+async def investment_endpoint(budget: int = 500, min_roi_pct: float = 10.0, limit: int = 30) -> JSONResponse:
+    """Prime 套装套利顾问 API（异步）。"""
+    import uuid
+    from ..investment import scan_prime_investments
+    from ..scout import scout_investment_candidates
+    cache_key = f"investment_{budget}_{min_roi_pct}_{limit}"
+    cached = _get_scan_cache(cache_key)
+    if cached is not None:
+        return JSONResponse({"status": "done", "results": cached, "total": len(cached)})
 
-        items = await asyncio.to_thread(_load_items_full)
-        results = await asyncio.to_thread(
-            scan_investments, items, fetch_orders, filters=filters
-        )
-        formatted = [
+    task_id = uuid.uuid4().hex[:12]
+    _bg_tasks[task_id] = {"status": "running", "result": None, "error": None}
+
+    async def _run():
+        try:
+            items = await asyncio.to_thread(_load_items_full)
+            results = await asyncio.to_thread(
+                scan_prime_investments, items, fetch_orders,
+                budget=budget, min_roi_pct=min_roi_pct, limit=limit,
+                scout_fn=lambda groups: scout_investment_candidates(groups, budget=budget),
+            )
+            formatted = [
+                {
+                    "base_id": r.base_id, "display_name": r.display_name,
+                    "strategy": r.strategy, "buy_cost": r.buy_cost,
+                    "sell_price": r.sell_price, "profit_per_set": r.profit_per_set,
+                    "roi_pct": r.roi_pct, "sets_affordable": r.sets_affordable,
+                    "total_profit": r.total_profit, "volume_48h": r.volume_48h,
+                    "risk_level": r.risk_level, "part_details": r.part_details,
+                    "set_item_id": r.set_item_id,
+                }
+                for r in results
+            ]
+            _set_scan_cache(cache_key, formatted)
+            _bg_tasks[task_id]["status"] = "done"
+            _bg_tasks[task_id]["result"] = {"results": formatted, "total": len(formatted)}
+        except Exception as exc:
+            _bg_tasks[task_id]["status"] = "error"
+            _bg_tasks[task_id]["error"] = str(exc)
+
+    asyncio.create_task(_run())
+    return JSONResponse({"status": "running", "task_id": task_id})
+
+
+@app.get("/api/scan_status/{task_id}")
+async def scan_status(task_id: str) -> JSONResponse:
+    """通用扫描状态查询。"""
+    task = _bg_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    resp: dict[str, Any] = {"status": task["status"]}
+    if task["status"] == "done":
+        resp.update(task["result"])
+    elif task["status"] == "error":
+        resp["error"] = task["error"]
+    return JSONResponse(resp)
+
+
+# ===== 目标引擎 API =====
+
+class GoalRequest(BaseModel):
+    goal_type: str
+    description: str
+    target: str = "all"
+    criteria: dict = {}
+
+
+class GoalOutcomeRequest(BaseModel):
+    action: str
+    item_id: str
+    price: int
+    expected_profit: int = 0
+    actual_profit: int = 0
+    user_feedback: str = "ignored"
+
+
+@app.get("/api/goals")
+async def get_goals() -> JSONResponse:
+    """获取所有目标。"""
+    memory = await _load_memory_async()
+    goals = []
+    for g in memory.active_goals:
+        goals.append({
+            "goal_id": g.goal_id,
+            "goal_type": g.goal_type,
+            "description": g.description,
+            "target": g.target,
+            "criteria": g.criteria,
+            "status": g.status,
+            "created_at": g.created_at,
+            "results": g.results[-5:],  # 最近 5 条结果
+            "result_count": len(g.results),
+        })
+    return JSONResponse({"goals": goals, "total": len(goals)})
+
+
+@app.post("/api/goals")
+async def create_goal_endpoint(request: GoalRequest) -> JSONResponse:
+    """创建新目标。"""
+    memory = await _load_memory_async()
+    goal = create_goal(request.goal_type, request.description, request.target, request.criteria)
+    memory = memory.with_goal(goal)
+    await _save_memory_async(memory)
+    return JSONResponse({
+        "status": "ok",
+        "goal_id": goal.goal_id,
+        "goal_type": goal.goal_type,
+        "description": goal.description,
+    })
+
+
+@app.delete("/api/goals/{goal_id}")
+async def abandon_goal(goal_id: str) -> JSONResponse:
+    """放弃目标。"""
+    memory = await _load_memory_async()
+    found = False
+    for g in memory.active_goals:
+        if g.goal_id == goal_id:
+            found = True
+            break
+    if not found:
+        raise HTTPException(status_code=404, detail="目标不存在")
+    # 标记为 abandoned（通过替换）
+    from dataclasses import replace
+    goals = [replace(g, status="abandoned") if g.goal_id == goal_id else g for g in memory.active_goals]
+    memory = replace(memory, active_goals=goals)
+    await _save_memory_async(memory)
+    return JSONResponse({"status": "ok", "goal_id": goal_id})
+
+
+@app.post("/api/goals/{goal_id}/execute")
+async def execute_goal(goal_id: str) -> JSONResponse:
+    """手动触发目标执行（后台异步）。"""
+    import uuid
+    memory = await _load_memory_async()
+    goal = None
+    for g in memory.active_goals:
+        if g.goal_id == goal_id and g.status == "active":
+            goal = g
+            break
+    if not goal:
+        raise HTTPException(status_code=404, detail="活跃目标不存在")
+
+    task_id = uuid.uuid4().hex[:12]
+    _bg_tasks[task_id] = {"status": "running", "goal_id": goal_id, "result": None, "error": None}
+
+    async def _run():
+        try:
+            items = await asyncio.to_thread(_load_items_full)
+            plan = plan_for_goal(goal)
+            results = await asyncio.to_thread(execute_plan, plan, items, fetch_orders)
+            mem = await _load_memory_async()
+            for r in results[:10]:
+                mem = mem.with_goal_result(goal_id, {
+                    "item_id": r.get("item_id", ""),
+                    "item_name": r.get("item_name", ""),
+                    "profit": r.get("profit", 0),
+                    "roi_pct": r.get("roi_pct", 0),
+                    "source": r.get("source", ""),
+                })
+            await _save_memory_async(mem)
+            _bg_tasks[task_id]["status"] = "done"
+            _bg_tasks[task_id]["result"] = {"goal_id": goal_id, "results": results[:20], "total": len(results)}
+        except Exception as exc:
+            _bg_tasks[task_id]["status"] = "error"
+            _bg_tasks[task_id]["error"] = str(exc)
+
+    asyncio.create_task(_run())
+    return JSONResponse({"task_id": task_id, "status": "running"})
+
+
+@app.get("/api/goals/execute_status/{task_id}")
+async def execute_status(task_id: str) -> JSONResponse:
+    """查询目标执行状态。"""
+    task = _bg_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    resp = {"status": task["status"]}
+    if task["status"] == "done":
+        resp["result"] = task["result"]
+    elif task["status"] == "error":
+        resp["error"] = task["error"]
+    return JSONResponse(resp)
+
+
+@app.post("/api/goals/{goal_id}/outcome")
+async def record_outcome(goal_id: str, request: GoalOutcomeRequest) -> JSONResponse:
+    """记录交易结果。"""
+    memory = await _load_memory_async()
+    outcome = record_trade_outcome(
+        goal_id=goal_id,
+        action=request.action,
+        item_id=request.item_id,
+        price=request.price,
+        expected_profit=request.expected_profit,
+        actual_profit=request.actual_profit,
+        user_feedback=request.user_feedback,
+    )
+    memory = memory.with_trade_outcome(outcome)
+    await _save_memory_async(memory)
+    return JSONResponse({"status": "ok", "outcome_id": outcome.outcome_id})
+
+
+@app.get("/api/goals/summary")
+async def goals_summary() -> JSONResponse:
+    """目标执行摘要。"""
+    memory = await _load_memory_async()
+    total_goals = len(memory.active_goals)
+    active = sum(1 for g in memory.active_goals if g.status == "active")
+    abandoned = sum(1 for g in memory.active_goals if g.status == "abandoned")
+    total_outcomes = len(memory.trade_outcomes)
+    good_outcomes = sum(1 for o in memory.trade_outcomes if o.user_feedback == "good")
+    bad_outcomes = sum(1 for o in memory.trade_outcomes if o.user_feedback == "bad")
+    total_expected = sum(o.expected_profit for o in memory.trade_outcomes)
+    total_actual = sum(o.actual_profit for o in memory.trade_outcomes)
+
+    return JSONResponse({
+        "total_goals": total_goals,
+        "active_goals": active,
+        "abandoned_goals": abandoned,
+        "total_outcomes": total_outcomes,
+        "good_outcomes": good_outcomes,
+        "bad_outcomes": bad_outcomes,
+        "adoption_rate": round(good_outcomes / max(total_outcomes, 1) * 100, 1),
+        "total_expected_profit": total_expected,
+        "total_actual_profit": total_actual,
+    })
+
+
+class EarnPlatinumRequest(BaseModel):
+    target_amount: int = 100
+    budget: int = 500
+
+
+@app.post("/api/goals/earn")
+async def create_earn_goal(request: EarnPlatinumRequest) -> JSONResponse:
+    """创建攒白金目标 + 返回分解步骤。"""
+    from ..goals import create_goal, decompose_platinum_goal
+    memory = await _load_memory_async()
+
+    goal = create_goal(
+        goal_type="earn_platinum",
+        description=f"攒 {request.target_amount} 白金",
+        target="all",
+        criteria={"target_amount": request.target_amount, "budget": request.budget},
+    )
+    memory = memory.with_goal(goal)
+    await _save_memory_async(memory)
+
+    items = _load_items_static()
+    steps = decompose_platinum_goal(request.target_amount, request.budget, items)
+
+    return JSONResponse({
+        "goal_id": goal.goal_id,
+        "target_amount": request.target_amount,
+        "steps": steps,
+        "total_steps": len(steps),
+        "estimated_profit": sum(s.get("estimated_profit", 0) for s in steps),
+    })
+
+
+@app.get("/api/goals/{goal_id}/progress")
+async def get_goal_progress(goal_id: str) -> JSONResponse:
+    """获取目标进度。"""
+    from ..goals import track_goal_progress
+    memory = await _load_memory_async()
+
+    goal = next((g for g in memory.active_goals if g.goal_id == goal_id), None)
+    if not goal:
+        return JSONResponse({"error": "目标不存在"}, status_code=404)
+
+    target = goal.criteria.get("target_amount", 0)
+    progress = track_goal_progress(goal_id, target, memory.trade_outcomes)
+
+    return JSONResponse({
+        "goal_id": progress.goal_id,
+        "target_amount": progress.target_amount,
+        "current_amount": progress.current_amount,
+        "remaining": progress.remaining,
+        "steps_completed": progress.steps_completed,
+        "steps_total": progress.steps_total,
+        "estimated_completion": progress.estimated_completion,
+    })
+
+
+def _load_items_static() -> list[dict]:
+    """同步加载物品数据。"""
+    import json as _json
+    items_path = config.DATA_DIR / "items_full.json"
+    if items_path.exists():
+        with items_path.open("r", encoding="utf-8") as f:
+            return _json.load(f)
+    return []
+
+
+# ===== 模式学习 API =====
+
+@app.get("/api/patterns")
+async def get_patterns() -> JSONResponse:
+    """获取已学习的交易模式。"""
+    memory = await _load_memory_async()
+    return JSONResponse({
+        "patterns": memory.learned_patterns,
+        "total": len(memory.learned_patterns),
+    })
+
+
+# ===== 游戏事件 API =====
+
+@app.get("/api/events")
+async def get_events() -> JSONResponse:
+    """获取当前游戏事件。"""
+    from ..events import EventTracker
+    tracker = EventTracker()
+    tracker.load_cache()
+    events = tracker.get_active_events()
+    return JSONResponse({
+        "events": [
             {
-                "item_id": r.item_id,
-                "display_name": r.display_name,
-                "buy_price": r.buy_price,
-                "sell_price": r.sell_price,
-                "profit": r.profit,
-                "roi_pct": round(r.roi_pct, 2),
-                "volume_48h": r.volume_48h,
-                "daily_volume": round(r.daily_volume, 1) if r.daily_volume else None,
-                "supply_count": r.supply_count,
-                "demand_count": r.demand_count,
-                "risk_level": r.risk_level,
+                "event_type": e.event_type,
+                "description": e.description,
+                "impact": e.impact,
+                "start_time": e.start_time,
+                "end_time": e.end_time,
+                "items_affected": e.items_affected,
             }
-            for r in results
-        ]
-        _set_scan_cache(cache_key, formatted)
-        return JSONResponse({"results": formatted, "total": len(formatted), "filters": {"budget": budget, "min_roi": min_roi}})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+            for e in events
+        ],
+        "total": len(events),
+    })
 
 
 # ===== 利润计算器 API =====
@@ -1776,6 +2257,14 @@ async def broadcast_alert(notification: AlertNotification):
             await ws.send_json(message)
         except Exception:
             pass
+    # 微信推送
+    if push_client.available and push_config.push_alerts:
+        direction_zh = "低于" if notification.alert.direction == "below" else "高于"
+        await asyncio.to_thread(
+            push_client.send_text,
+            f"价格提醒: {notification.item_display}",
+            f"{notification.item_display} {direction_zh} {notification.alert.price}p，当前 {notification.current_price}p",
+        )
 
 
 async def broadcast_watch(notification: WatchNotification):
@@ -1800,6 +2289,13 @@ async def broadcast_watch(notification: WatchNotification):
             await ws.send_json(message)
         except Exception:
             pass
+    # 微信推送
+    if push_client.available and push_config.push_watches:
+        await asyncio.to_thread(
+            push_client.send_text,
+            f"关注通知: {notification.item_name}",
+            f"{notification.item_name} {price_info.strip()}",
+        )
 
 
 async def broadcast_enriched(notification: EnrichedNotification):
@@ -1812,6 +2308,63 @@ async def broadcast_enriched(notification: EnrichedNotification):
         "priority": notification.priority,
         "raw_data": notification.raw_data,
     }
+    for ws in list(ws_connections):
+        try:
+            await ws.send_json(message)
+        except Exception:
+            pass
+
+
+async def broadcast_goal_opportunity(opportunity: dict):
+    message = {
+        "type": "goal_opportunity",
+        "item_id": opportunity.get("item_id", ""),
+        "message": opportunity.get("message", ""),
+        "priority": opportunity.get("priority", 2),
+    }
+    for ws in list(ws_connections):
+        try:
+            await ws.send_json(message)
+        except Exception:
+            pass
+
+
+async def broadcast_proactive_push(push: ProactivePush):
+    message = {
+        "type": "proactive_push",
+        "item_id": push.item_id,
+        "item_display": push.item_display,
+        "push_type": push.push_type,
+        "priority": push.priority,
+        "message": push.message,
+        "action_suggestion": push.action_suggestion,
+        "data": push.data,
+    }
+    for ws in list(ws_connections):
+        try:
+            await ws.send_json(message)
+        except Exception:
+            pass
+    # 微信推送（仅高优先级）
+    if push_client.available and push_config.push_proactive and push.priority <= 2:
+        await asyncio.to_thread(
+            push_client.send_text,
+            f"交易机会: {push.item_display}",
+            f"{push.message}\n建议: {push.action_suggestion}",
+        )
+
+
+async def broadcast_fissure_alert(msg: str):
+    message = {"type": "fissure_alert", "message": msg}
+    for ws in list(ws_connections):
+        try:
+            await ws.send_json(message)
+        except Exception:
+            pass
+
+
+async def broadcast_baro_report(report_text: str):
+    message = {"type": "baro_recommendation", "message": report_text}
     for ws in list(ws_connections):
         try:
             await ws.send_json(message)
@@ -1836,16 +2389,101 @@ def setup_monitor():
         except Exception:
             pass
 
-    def llm_analyzer(prompt: str) -> str:
-        from ..llm import chat_with_ollama
-        return chat_with_ollama([
-            {"role": "system", "content": "你是 Warframe 交易分析师，用简洁中文回答。"},
-            {"role": "user", "content": prompt},
-        ])
+    def on_goal_opportunity_callback(opportunity: dict):
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(broadcast_goal_opportunity(opportunity), loop)
+        except Exception:
+            pass
+
+    def on_proactive_push_callback(push: ProactivePush):
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(broadcast_proactive_push(push), loop)
+        except Exception:
+            pass
+
+    def on_daily_report_callback(report_text: str):
+        """每日报告同时推送到飞书"""
+        try:
+            if feishu_bot.available:
+                feishu_cfg = FeishuConfig.load()
+                if feishu_cfg.enabled:
+                    # 获取飞书 chat_id（从配置或缓存中）
+                    chat_id_path = config.DATA_DIR / "feishu_chat_id.txt"
+                    if chat_id_path.exists():
+                        chat_id = chat_id_path.read_text(encoding="utf-8").strip()
+                        if chat_id:
+                            feishu_bot.send(chat_id, report_text)
+                            logger.info("每日报告已推送到飞书")
+        except Exception as exc:
+            logger.warning("飞书每日报告推送失败: %s", exc)
+            pass
+
+    def on_fissure_callback(msg: str, fissure, alert):
+        """裂缝匹配时推送到飞书和微信"""
+        try:
+            # WebSocket 广播
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(broadcast_fissure_alert(msg), loop)
+        except Exception:
+            pass
+        # 飞书推送
+        try:
+            if feishu_bot.available:
+                feishu_cfg = FeishuConfig.load()
+                if feishu_cfg.enabled:
+                    chat_id_path = config.DATA_DIR / "feishu_chat_id.txt"
+                    if chat_id_path.exists():
+                        chat_id = chat_id_path.read_text(encoding="utf-8").strip()
+                        if chat_id:
+                            feishu_bot.send(chat_id, msg)
+        except Exception as exc:
+            logger.debug("飞书裂缝推送失败: %s", exc)
+
+    def on_baro_recommendation_callback(report_text: str):
+        """Baro 推荐报告推送到飞书和微信"""
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(broadcast_baro_report(report_text), loop)
+        except Exception:
+            pass
+        # 飞书推送
+        try:
+            if feishu_bot.available:
+                feishu_cfg = FeishuConfig.load()
+                if feishu_cfg.enabled:
+                    chat_id_path = config.DATA_DIR / "feishu_chat_id.txt"
+                    if chat_id_path.exists():
+                        chat_id = chat_id_path.read_text(encoding="utf-8").strip()
+                        if chat_id:
+                            feishu_bot.send(chat_id, report_text)
+        except Exception as exc:
+            logger.debug("飞书 Baro 推荐推送失败: %s", exc)
+
+    from ..knowledge import MarketKnowledge
+    knowledge = MarketKnowledge.load()
 
     global monitor
-    monitor = PriceMonitor(on_alert=on_alert_callback, on_watch=on_watch_callback, llm_analyzer=llm_analyzer)
+    monitor = PriceMonitor(
+        on_alert=on_alert_callback,
+        on_watch=on_watch_callback,
+        on_goal_opportunity=on_goal_opportunity_callback,
+        on_proactive_push=on_proactive_push_callback,
+        on_daily_report=on_daily_report_callback,
+        on_fissure=on_fissure_callback,
+        on_baro_recommendation=on_baro_recommendation_callback,
+        knowledge=knowledge,
+    )
     monitor.start()
+
+    # 注入知识库和事件追踪到聊天层
+    chat_agent.knowledge = monitor.knowledge
+    chat_agent.event_tracker = monitor.event_tracker
 
 
 

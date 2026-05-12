@@ -97,3 +97,61 @@ class ChatTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── build_system_context tests ──
+
+from warframe_agent.chat import build_system_context
+from warframe_agent.knowledge import MarketKnowledge, ItemKnowledge, CategoryHealth
+from warframe_agent.memory import AgentMemory, TradingPreferences
+
+
+def test_build_system_context_empty():
+    """所有数据为空时不崩溃。"""
+    ctx = build_system_context()
+    assert ctx == ""
+
+
+def test_build_system_context_includes_knowledge():
+    """知识库摘要出现。"""
+    items = {
+        "serration": ItemKnowledge(
+            item_id="serration", category="mod", subcategory="common",
+            rolling_avg_sell=10, rolling_avg_buy=5, volatility=20,
+            trend="rising", volume_trend="stable", last_updated="", scan_count=5,
+        ),
+    }
+    knowledge = MarketKnowledge(items=items)
+    ctx = build_system_context(knowledge=knowledge)
+    assert "市场概况" in ctx
+    assert "跟踪物品=1" in ctx
+
+
+def test_build_system_context_includes_trade_history():
+    """交易统计出现。"""
+    memory = AgentMemory(
+        preferences=TradingPreferences(),
+        price_alerts=[], favorite_items=[], common_questions=[], watchlist=[],
+    )
+    ctx = build_system_context(memory=memory)
+    # 无交易结果时不应出现交易统计
+    assert "交易统计" not in ctx
+
+
+def test_build_system_context_includes_trade_outcomes():
+    """交易胜率出现。"""
+    from warframe_agent.goals import TradeOutcome
+    memory = AgentMemory(
+        preferences=TradingPreferences(),
+        price_alerts=[], favorite_items=[], common_questions=[], watchlist=[],
+        trade_outcomes=[
+            TradeOutcome(
+                outcome_id="o1", goal_id="g1", action="bought", item_id="x",
+                price=100, expected_profit=20, actual_profit=10,
+                user_feedback="good", timestamp="2025-01-01T00:00:00",
+            ),
+        ],
+    )
+    ctx = build_system_context(memory=memory)
+    assert "交易统计" in ctx
+    assert "1/1" in ctx
