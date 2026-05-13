@@ -10,12 +10,24 @@
       "direction": "below",
       "price": 45,
       "note": "充沛低于45提醒"
+    },
+    {
+      "item_id": "arcane_hot_shot",
+      "direction": "below",
+      "price": 400,
+      "note": "热火赋能 / Arcane Hot Shot / arcane_hot_shot 低于 400p 提醒"
     }
   ],
   "favorite_items": [
     "arcane_energize"
   ],
   "common_questions": [
+    "strun紫卡双爆无负",
+    "紫卡搜索rubico暴击率",
+    "紫卡搜索lanka无负100以下",
+    "老哥，充沛现在能买吗",
+    "充沛现在能买吗",
+    "赤毒布拉玛现在价格怎么样",
     "充沛多少钱",
     "那现在呢",
     "我有 Lex Prime 蓝图和枪管，还差多少钱做一套",
@@ -34,17 +46,23 @@
   "watchlist": [
     {
       "item_id": "molt_augmented",
-      "item_name": "蜕化·升腾",
+      "item_name": "蜕化升腾",
       "frequency": "daily",
-      "time": "09:00",
+      "time": "12:30",
       "content": "top3_buyers"
     }
   ],
   "user_profile": {
-    "preferred_trade_type": "neutral",
+    "preferred_trade_type": "buy",
     "queried_items": {
-      "Lex": 2,
-      "Prime": 2,
+      "Lex": 4,
+      "Prime": 4,
+      "充沛现在能买吗": 2,
+      "strun紫卡双爆无负": 1,
+      "紫卡搜索rubico暴击率": 1,
+      "紫卡搜索lanka无负100以下": 1,
+      "老哥": 1,
+      "赤毒布拉玛现在价格怎么样": 1,
       "充沛多少钱": 1,
       "那现在呢": 1,
       "我有": 1,
@@ -63,6 +81,223 @@
       "prime_part",
       "arcane"
     ],
-    "total_queries": 10
-  }
+    "total_queries": 20
+  },
+  "recent_suggestions": [
+    {
+      "item_id": "afuris_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 盗贼双枪 prime +369p (ROI 75.9%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "akarius_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 阿利乌双枪 prime +198p (ROI 42.9%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "afuris_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 盗贼双枪 prime +369p (ROI 75.9%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "akarius_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 阿利乌双枪 prime +198p (ROI 42.9%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "afuris_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「test」发现机会: 盗贼双枪 prime +369p (ROI 75.9%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "akarius_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「test」发现机会: 阿利乌双枪 prime +198p (ROI 42.9%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "akstiletto_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 50 白金」发现机会: 史提托双枪 prime +170p (ROI 64.2%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "carrier_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 50 白金」发现机会: 搬运者 prime +28p (ROI 10.3%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "afuris_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 盗贼双枪 prime +369p (ROI 75.9%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "akarius_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 阿利乌双枪 prime +198p (ROI 42.9%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "afuris_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 盗贼双枪 prime +369p (ROI 75.9%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "akarius_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 阿利乌双枪 prime +165p (ROI 33.3%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "afuris_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 盗贼双枪 prime +369p (ROI 75.9%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "akarius_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 阿利乌双枪 prime +165p (ROI 33.3%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "afuris_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「test」发现机会: 盗贼双枪 prime +369p (ROI 75.9%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "akarius_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「test」发现机会: 阿利乌双枪 prime +165p (ROI 33.3%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "akstiletto_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 50 白金」发现机会: 史提托双枪 prime +170p (ROI 64.2%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "banshee_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 50 白金」发现机会: Banshee Prime 一套 +40p (ROI 15.4%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "carrier_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 50 白金」发现机会: 搬运者 prime +20p (ROI 7.1%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "akarius_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 阿利乌双枪 prime +165p (ROI 33.3%)",
+      "timestamp": ""
+    }
+  ],
+  "active_goals": [
+    {
+      "goal_id": "06d359a0fc25",
+      "goal_type": "earn_platinum",
+      "description": "攒 100 白金",
+      "target": "all",
+      "criteria": {
+        "target_amount": 100,
+        "budget": 500
+      },
+      "status": "active",
+      "created_at": "2026-05-05T03:28:34.186981+00:00",
+      "results": []
+    },
+    {
+      "goal_id": "08f12585598a",
+      "goal_type": "earn_platinum",
+      "description": "攒 100 白金",
+      "target": "all",
+      "criteria": {
+        "target_amount": 100,
+        "budget": 500
+      },
+      "status": "active",
+      "created_at": "2026-05-05T03:30:11.009835+00:00",
+      "results": []
+    },
+    {
+      "goal_id": "0507ae00e168",
+      "goal_type": "earn_platinum",
+      "description": "test",
+      "target": "all",
+      "criteria": {
+        "target_amount": 100
+      },
+      "status": "active",
+      "created_at": "2026-05-05T03:33:23.332062+00:00",
+      "results": []
+    },
+    {
+      "goal_id": "c4947ea7b83c",
+      "goal_type": "earn_platinum",
+      "description": "攒 50 白金",
+      "target": "all",
+      "criteria": {
+        "target_amount": 50,
+        "budget": 300
+      },
+      "status": "active",
+      "created_at": "2026-05-05T03:39:13.028452+00:00",
+      "results": []
+    },
+    {
+      "goal_id": "0d7bf736245d",
+      "goal_type": "earn_platinum",
+      "description": "攒 100 白金",
+      "target": "all",
+      "criteria": {
+        "target_amount": 100,
+        "budget": 500
+      },
+      "status": "active",
+      "created_at": "2026-05-05T07:52:10.888488+00:00",
+      "results": []
+    }
+  ],
+  "fissure_alerts": [
+    {
+      "node_pattern": "虚空",
+      "mission_type": "MT_EXTERMINATION",
+      "tier": "",
+      "hard": null,
+      "note": "地点=虚空、任务=歼灭"
+    }
+  ]
 }

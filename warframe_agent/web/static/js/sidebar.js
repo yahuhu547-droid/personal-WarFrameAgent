@@ -561,13 +561,13 @@ async function deleteTradeRecord(tradeId) {
 
 // 交易历史按钮事件
 document.getElementById('trade-history-btn')?.addEventListener('click', () => {
-    toggleMoreMenu();
+    document.getElementById('more-menu')?.classList.remove('active');
     loadTradeHistory();
 });
 
 // ===== 每日报告 =====
 document.getElementById('report-btn')?.addEventListener('click', async () => {
-    toggleMoreMenu();
+    document.getElementById('more-menu')?.classList.remove('active');
     const content = openDetailPanel('生成每日报告...');
     if (!content) return;
 
@@ -810,7 +810,7 @@ function exportDashboardData() {
 
 // 收藏仪表盘按钮事件
 document.getElementById('dashboard-btn')?.addEventListener('click', () => {
-    toggleMoreMenu();
+    document.getElementById('more-menu')?.classList.remove('active');
     loadFavoritesDashboard();
 });
 
@@ -2076,7 +2076,7 @@ function renderProfitResult(data, container) {
 
 // 绑定利润计算器按钮
 document.getElementById('profit-calc-btn')?.addEventListener('click', () => {
-    toggleMoreMenu();
+    document.getElementById('more-menu')?.classList.remove('active');
     showProfitCalculator();
 });
 
@@ -2213,7 +2213,7 @@ function testNotification() {
 
 // 绑定通知设置按钮
 document.getElementById('notify-settings-btn')?.addEventListener('click', () => {
-    toggleMoreMenu();
+    document.getElementById('more-menu')?.classList.remove('active');
     showNotificationSettings();
 });
 
@@ -2222,9 +2222,11 @@ document.getElementById('notify-settings-btn')?.addEventListener('click', () => 
 async function showFissureTracker() {
     const content = openDetailPanel('加载虚空裂隙...');
     if (!content) return;
+    const ver = getPanelVersion();
 
     try {
         const res = await fetch('/api/fissures');
+        if (getPanelVersion() !== ver) return;
         const data = await res.json();
 
         if (data.error) {
@@ -2305,15 +2307,17 @@ async function showFissureTracker() {
         }
 
         html += `</div>`;
+        if (getPanelVersion() !== ver) return;
         content.innerHTML = html;
     } catch (err) {
+        if (getPanelVersion() !== ver) return;
         content.innerHTML = createChartError('获取裂隙数据失败');
     }
 }
 
 // 绑定虚空裂隙按钮
 document.getElementById('fissure-btn')?.addEventListener('click', () => {
-    toggleMoreMenu();
+    document.getElementById('more-menu')?.classList.remove('active');
     showFissureTracker();
 });
 
@@ -2740,17 +2744,17 @@ async function showRelicSearch(q) {
 
 // 绑定新功能菜单按钮
 document.getElementById('wiki-warframes-btn')?.addEventListener('click', () => {
-    toggleMoreMenu();
+    document.getElementById('more-menu')?.classList.remove('active');
     showWikiWarframes('');
 });
 
 document.getElementById('wiki-mods-btn')?.addEventListener('click', () => {
-    toggleMoreMenu();
+    document.getElementById('more-menu')?.classList.remove('active');
     showWikiMods('', '', '');
 });
 
 document.getElementById('relic-search-btn')?.addEventListener('click', () => {
-    toggleMoreMenu();
+    document.getElementById('more-menu')?.classList.remove('active');
     showRelicSearch('');
 });
 
@@ -2774,7 +2778,7 @@ function copyWhisperMessage(sellerName, itemName, platinum) {
 
 // ===== 虚空裂隙面板 (借鉴 WarStonks) =====
 async function showFissures() {
-    toggleMoreMenu();
+    document.getElementById('more-menu')?.classList.remove('active');
     const content = document.getElementById('detail-content');
     if (!content) return;
     content.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>加载裂隙数据...</p></div>';
@@ -3035,7 +3039,7 @@ async function loadRelicSources(relicDisplayName) {
 
 // ===== 价格异常检测 (借鉴 WarStonks 套利扫描) =====
 async function showPriceAnomalies() {
-    toggleMoreMenu();
+    document.getElementById('more-menu')?.classList.remove('active');
     const content = document.getElementById('detail-content');
     if (!content) return;
     content.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>扫描价格异常...</p></div>';
@@ -3078,68 +3082,136 @@ async function showPriceAnomalies() {
 
 document.getElementById('anomaly-btn')?.addEventListener('click', () => showPriceAnomalies());
 
+// ===== 通用扫描轮询 =====
+async function _pollScan(url, content, onDone, onError) {
+    const ver = getPanelVersion();
+    try {
+        const resp = await fetch(url);
+        if (getPanelVersion() !== ver) return;
+        if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${resp.status}`); }
+        const data = await resp.json();
+
+        if (data.status === 'done') {
+            if (getPanelVersion() !== ver) return;
+            onDone(data);
+            return;
+        }
+
+        const taskId = data.task_id;
+        if (!taskId) throw new Error('未获取到任务ID');
+
+        let attempts = 0;
+        const maxAttempts = 150;
+        while (attempts < maxAttempts) {
+            await new Promise(r => setTimeout(r, 2000));
+            attempts++;
+            if (getPanelVersion() !== ver) return;
+            const sr = await fetch(`/api/scan_status/${taskId}`);
+            if (!sr.ok) break;
+            const sd = await sr.json();
+            if (sd.status === 'done') { if (getPanelVersion() !== ver) return; onDone(sd); return; }
+            if (sd.status === 'error') throw new Error(sd.error || '扫描异常');
+            if (content && attempts % 5 === 0) {
+                const sub = content.querySelector('.empty-sub');
+                if (sub) sub.textContent = `扫描中${'.'.repeat((attempts % 3) + 1)} (${attempts * 2}s)`;
+            }
+        }
+        throw new Error('扫描超时');
+    } catch (err) {
+        if (getPanelVersion() !== ver) return;
+        if (onError) onError(err);
+        else if (content) {
+            content.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div>
+                <span class="empty-primary">扫描失败</span><span class="empty-sub">${err.message}</span></div>`;
+        }
+    }
+}
+
 // ===== Mod 翻转分析 =====
-async function loadModFlipper(minProfit = 3) {
-    toggleMoreMenu();
+let _modFlipData = [];
+let _modFlipPage = 0;
+const _MOD_FLIP_PAGE_SIZE = 5;
+
+function renderModFlipPage(content) {
+    const items = _modFlipData;
+    const totalPages = Math.ceil(items.length / _MOD_FLIP_PAGE_SIZE);
+    const start = _modFlipPage * _MOD_FLIP_PAGE_SIZE;
+    const pageItems = items.slice(start, start + _MOD_FLIP_PAGE_SIZE);
+
+    let html = `<div class="panel-title-row">
+        <span class="panel-title-eyebrow">Mod 翻转 (100%+ ROI)</span>
+        <span class="badge ${items.length > 0 ? 'badge-gold' : 'badge-muted'}">${items.length} 机会</span>
+    </div>`;
+
+    if (items.length === 0) {
+        html += `<div class="empty-state"><div class="empty-icon">🔄</div>
+            <span class="empty-primary">暂无翻转机会</span>
+            <span class="empty-sub">当前市场未发现 100%+ ROI 的 Mod</span></div>`;
+    } else {
+        html += '<div class="card"><div class="card-body">';
+        pageItems.forEach((item, idx) => {
+            const globalIdx = start + idx + 1;
+            const primeBadge = item.is_prime ? '<span style="background:linear-gradient(135deg,#c9a32e,#f0d060);color:#1a1a2e;padding:1px 6px;border-radius:4px;font-size:0.7em;font-weight:700;margin-left:6px;">PRIME</span>' : '';
+            const roiColor = item.roi_pct >= 200 ? '#00ff88' : item.roi_pct >= 150 ? '#88ff00' : '#ffcc00';
+            const shortName = (item.display_name || item.item_id).split(' / ')[0];
+            html += `<div class="fissure-item" style="flex-direction:column;align-items:flex-start;gap:4px;">
+                <div style="display:flex;justify-content:space-between;width:100%;align-items:center;">
+                    <div class="fissure-node">${globalIdx}. ${shortName}${primeBadge}</div>
+                    <span style="color:${roiColor};font-weight:700;font-family:var(--font-mono);font-size:1.05em;">ROI ${item.roi_pct}%</span>
+                </div>
+                <div style="display:flex;gap:10px;font-size:0.8em;color:var(--text-secondary);flex-wrap:wrap;align-items:center;">
+                    <span style="color:var(--green-success);font-weight:600;">+${item.flip_profit}p</span>
+                    <span>买 R0: ${item.r0_buy_price}p</span>
+                    <span>卖 R${item.max_rank}: ${item.r10_sell_price}p</span>
+                    <span>内融: ${(item.endo_cost / 1000).toFixed(1)}k</span>
+                    <span>每千内融: ${item.plat_per_1k_endo}p</span>
+                    <span>48h量: ${item.volume_48h ?? '?'}</span>
+                </div>
+            </div>`;
+        });
+        html += '</div></div>';
+
+        // Pagination controls
+        if (totalPages > 1) {
+            html += `<div style="display:flex;justify-content:center;align-items:center;gap:12px;margin-top:12px;">
+                <button onclick="modFlipPrevPage()" ${_modFlipPage === 0 ? 'disabled' : ''} style="padding:6px 16px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:6px;cursor:${_modFlipPage === 0 ? 'not-allowed' : 'pointer'};opacity:${_modFlipPage === 0 ? 0.4 : 1};">上一页</button>
+                <span style="color:var(--text-muted);font-size:0.85em;">${_modFlipPage + 1} / ${totalPages}</span>
+                <button onclick="modFlipNextPage()" ${_modFlipPage >= totalPages - 1 ? 'disabled' : ''} style="padding:6px 16px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:6px;cursor:${_modFlipPage >= totalPages - 1 ? 'not-allowed' : 'pointer'};opacity:${_modFlipPage >= totalPages - 1 ? 0.4 : 1};">下一页</button>
+            </div>`;
+        }
+    }
+    content.innerHTML = html;
+}
+
+function modFlipPrevPage() {
+    if (_modFlipPage > 0) { _modFlipPage--; renderModFlipPage(document.getElementById('detail-content')); }
+}
+function modFlipNextPage() {
+    const totalPages = Math.ceil(_modFlipData.length / _MOD_FLIP_PAGE_SIZE);
+    if (_modFlipPage < totalPages - 1) { _modFlipPage++; renderModFlipPage(document.getElementById('detail-content')); }
+}
+
+async function loadModFlipper() {
+    document.getElementById('more-menu')?.classList.remove('active');
     const content = openDetailPanel('扫描 Mod 翻转机会...<br><small style="color:var(--text-muted)">首次扫描可能需要 1-2 分钟</small>');
     if (!content) return;
 
-    try {
-        const resp = await fetch(`/api/mod_flipper?min_profit=${minProfit}&limit=20`);
-        const data = await resp.json();
-        const items = data.results || [];
-
-        let html = `<div class="panel-title-row">
-            <span class="panel-title-eyebrow">Mod 翻转</span>
-            <span class="badge ${items.length > 0 ? 'badge-gold' : 'badge-muted'}">${items.length} 机会</span>
-        </div>`;
-
-        if (items.length === 0) {
-            html += `<div class="empty-state"><div class="empty-icon">🔄</div>
-                <span class="empty-primary">暂无翻转机会</span>
-                <span class="empty-sub">当前市场未发现符合条件的 Mod</span></div>`;
-        } else {
-            html += '<div class="card"><div class="card-body">';
-            items.forEach((item, idx) => {
-                const riskColor = item.risk_level === 'low' ? 'var(--green-success)' :
-                    item.risk_level === 'medium' ? 'var(--orange-warning)' : 'var(--red-error)';
-                const riskIcon = item.risk_level === 'low' ? '🟢' :
-                    item.risk_level === 'medium' ? '🟡' : '🔴';
-                html += `<div class="fissure-item" style="flex-direction:column;align-items:flex-start;gap:4px;">
-                    <div style="display:flex;justify-content:space-between;width:100%;align-items:center;">
-                        <div class="fissure-node">${idx + 1}. ${item.display_name || item.item_id}</div>
-                        <span style="color:var(--green-success);font-weight:700;font-family:var(--font-mono);font-size:1.1em;">+${item.profit}p</span>
-                    </div>
-                    <div style="display:flex;gap:12px;font-size:0.8em;color:var(--text-secondary);flex-wrap:wrap;">
-                        <span>买 R0: ${item.buy_price}p</span>
-                        <span>卖满级: ${item.sell_price}p</span>
-                        <span>内融: ${(item.endo_cost / 1000).toFixed(1)}k</span>
-                        <span>每千内融: ${item.plat_per_1k_endo}p</span>
-                        <span>48h量: ${item.volume_48h ?? '?'}</span>
-                        <span style="color:${riskColor}">${riskIcon} ${item.risk_level}</span>
-                    </div>
-                </div>`;
-            });
-            html += '</div></div>';
-        }
-        content.innerHTML = html;
-    } catch (err) {
-        content.innerHTML = `<div class="empty-state"><div class="empty-icon">🔄</div>
-            <span class="empty-primary">加载失败</span><span class="empty-sub">${err.message}</span></div>`;
-    }
+    await _pollScan('/api/mod_flipper?min_profit=1&min_roi_pct=100&limit=50', content, (data) => {
+        _modFlipData = data.results || [];
+        _modFlipPage = 0;
+        renderModFlipPage(content);
+    });
 }
 
 document.getElementById('mod-flip-btn')?.addEventListener('click', () => loadModFlipper());
 
 // ===== 套装利润分析 =====
 async function loadSetProfit(minProfit = 3) {
-    toggleMoreMenu();
+    document.getElementById('more-menu')?.classList.remove('active');
     const content = openDetailPanel('扫描套装利润...<br><small style="color:var(--text-muted)">首次扫描可能需要 2-3 分钟</small>');
     if (!content) return;
 
-    try {
-        const resp = await fetch(`/api/set_profit?min_profit=${minProfit}&limit=20`);
-        const data = await resp.json();
+    await _pollScan(`/api/set_profit?min_profit=${minProfit}&limit=20`, content, (data) => {
         const items = data.results || [];
 
         let html = `<div class="panel-title-row">
@@ -3171,63 +3243,461 @@ async function loadSetProfit(minProfit = 3) {
             html += '</div></div>';
         }
         content.innerHTML = html;
-    } catch (err) {
-        content.innerHTML = `<div class="empty-state"><div class="empty-icon">📦</div>
-            <span class="empty-primary">加载失败</span><span class="empty-sub">${err.message}</span></div>`;
-    }
+    });
 }
 
 document.getElementById('set-profit-btn')?.addEventListener('click', () => loadSetProfit());
 
 // ===== 投资顾问 =====
-async function loadInvestmentAdvisor(budget = 1000, minRoi = 10) {
-    toggleMoreMenu();
-    const content = openDetailPanel('扫描投资机会...<br><small style="color:var(--text-muted)">首次扫描可能需要 1-2 分钟</small>');
+let _investData = [];
+let _investPage = 0;
+const _INVEST_PAGE_SIZE = 5;
+
+function renderInvestPage(content) {
+    const items = _investData;
+    const totalPages = Math.ceil(items.length / _INVEST_PAGE_SIZE);
+    const start = _investPage * _INVEST_PAGE_SIZE;
+    const pageItems = items.slice(start, start + _INVEST_PAGE_SIZE);
+
+    let html = `<div class="panel-title-row">
+        <span class="panel-title-eyebrow">Prime 套装投资顾问</span>
+        <span class="badge ${items.length > 0 ? 'badge-gold' : 'badge-muted'}">${items.length} 套装</span>
+    </div>`;
+
+    // 预算输入
+    html += `<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+        <label style="font-size:0.85em;color:var(--text-secondary);">预算:</label>
+        <input id="invest-budget" type="number" value="${_investBudget || 500}" min="10" step="50"
+            style="width:80px;padding:4px 8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:6px;font-size:0.85em;">
+        <span style="font-size:0.85em;color:var(--text-secondary);">p</span>
+        <button onclick="reloadInvestment()" style="padding:4px 12px;border:1px solid var(--accent-color);background:var(--accent-color);color:#fff;border-radius:6px;cursor:pointer;font-size:0.85em;">扫描</button>
+    </div>`;
+
+    if (items.length === 0) {
+        html += `<div class="empty-state"><div class="empty-icon">💎</div>
+            <span class="empty-primary">暂无投资机会</span>
+            <span class="empty-sub">当前市场未发现符合条件的 Prime 套装</span></div>`;
+    } else {
+        // 总利润汇总
+        const totalProfit = items.reduce((s, i) => s + i.total_profit, 0);
+        html += `<div style="background:var(--bg-tertiary);border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:0.85em;color:var(--text-secondary);">
+            预算 <span style="color:var(--text-primary);font-weight:600;">${_investBudget || 500}p</span> ·
+            全部执行可赚 <span style="color:var(--green-success);font-weight:700;">+${totalProfit}p</span>
+        </div>`;
+
+        html += '<div class="card"><div class="card-body">';
+        pageItems.forEach((item, idx) => {
+            const globalIdx = start + idx + 1;
+            const roiColor = item.roi_pct >= 100 ? '#00ff88' : item.roi_pct >= 50 ? '#ffcc00' : '#ff9900';
+            const riskColor = item.risk_level === 'low' ? 'var(--green-success)' :
+                item.risk_level === 'medium' ? 'var(--orange-warning)' : 'var(--red-error)';
+            const riskIcon = item.risk_level === 'low' ? '🟢' :
+                item.risk_level === 'medium' ? '🟡' : '🔴';
+            const strategyLabel = item.strategy === 'buy_parts_sell_set' ? '散买→整卖' : '整买→散卖';
+            const marketUrl = `https://warframe.market/items/${item.set_item_id}`;
+
+            html += `<div class="fissure-item" style="flex-direction:column;align-items:flex-start;gap:4px;">
+                <div style="display:flex;justify-content:space-between;width:100%;align-items:center;">
+                    <div class="fissure-node">${globalIdx}. ${item.display_name}</div>
+                    <span style="color:${roiColor};font-weight:700;font-family:var(--font-mono);font-size:1.05em;">ROI ${item.roi_pct}%</span>
+                </div>
+                <div style="display:flex;gap:8px;font-size:0.8em;color:var(--text-secondary);flex-wrap:wrap;align-items:center;">
+                    <span style="background:var(--bg-tertiary);padding:1px 6px;border-radius:4px;font-size:0.85em;">${strategyLabel}</span>
+                    <span style="color:var(--green-success);font-weight:600;">+${item.profit_per_set}p/套</span>
+                    <span>成本: ${item.buy_cost}p</span>
+                    <span>可买: ${item.sets_affordable}套</span>
+                    <span style="color:var(--green-success);font-weight:600;">总赚: +${item.total_profit}p</span>
+                    <span>48h量: ${item.volume_48h ?? '?'}</span>
+                    <span style="color:${riskColor}">${riskIcon} ${item.risk_level}</span>
+                </div>`;
+
+            // 部件明细（可折叠）
+            if (item.part_details && item.part_details.length > 0) {
+                const detailId = `invest-parts-${globalIdx}`;
+                html += `<div style="width:100%;margin-top:2px;">
+                    <button onclick="toggleInvestParts('${detailId}')" style="background:none;border:none;color:var(--accent-color);cursor:pointer;font-size:0.75em;padding:0;">
+                        ▶ 部件明细
+                    </button>
+                    <div id="${detailId}" style="display:none;margin-top:4px;padding:6px 8px;background:var(--bg-tertiary);border-radius:6px;font-size:0.75em;">
+                        <div style="display:grid;grid-template-columns:1fr auto auto;gap:2px 12px;">`;
+                item.part_details.forEach(p => {
+                    html += `<span style="color:var(--text-secondary);">${p.name}</span>
+                        <span>买 ${p.buy}p</span>
+                        <span>卖 ${p.sell}p</span>`;
+                });
+                html += `</div>
+                        <div style="margin-top:6px;">
+                            <a href="${marketUrl}" target="_blank" rel="noopener" style="color:var(--accent-color);text-decoration:none;font-size:0.9em;">
+                                在 warframe.market 查看 ↗
+                            </a>
+                        </div>
+                    </div>
+                </div>`;
+            }
+
+            html += `</div>`;
+        });
+        html += '</div></div>';
+
+        // 分页控件
+        if (totalPages > 1) {
+            html += `<div style="display:flex;justify-content:center;align-items:center;gap:12px;margin-top:12px;">
+                <button onclick="investPrevPage()" ${_investPage === 0 ? 'disabled' : ''} style="padding:6px 16px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:6px;cursor:${_investPage === 0 ? 'not-allowed' : 'pointer'};opacity:${_investPage === 0 ? 0.4 : 1};">上一页</button>
+                <span style="color:var(--text-muted);font-size:0.85em;">${_investPage + 1} / ${totalPages}</span>
+                <button onclick="investNextPage()" ${_investPage >= totalPages - 1 ? 'disabled' : ''} style="padding:6px 16px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:6px;cursor:${_investPage >= totalPages - 1 ? 'not-allowed' : 'pointer'};opacity:${_investPage >= totalPages - 1 ? 0.4 : 1};">下一页</button>
+            </div>`;
+        }
+    }
+    content.innerHTML = html;
+}
+
+function toggleInvestParts(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const btn = el.previousElementSibling;
+    if (el.style.display === 'none') {
+        el.style.display = 'block';
+        if (btn) btn.textContent = '▼ 部件明细';
+    } else {
+        el.style.display = 'none';
+        if (btn) btn.textContent = '▶ 部件明细';
+    }
+}
+
+function investPrevPage() {
+    if (_investPage > 0) { _investPage--; renderInvestPage(document.getElementById('detail-content')); }
+}
+function investNextPage() {
+    const totalPages = Math.ceil(_investData.length / _INVEST_PAGE_SIZE);
+    if (_investPage < totalPages - 1) { _investPage++; renderInvestPage(document.getElementById('detail-content')); }
+}
+
+let _investBudget = 500;
+
+async function reloadInvestment() {
+    const input = document.getElementById('invest-budget');
+    if (input) _investBudget = parseInt(input.value) || 500;
+    await loadInvestmentAdvisor(_investBudget);
+}
+
+async function loadInvestmentAdvisor(budget = 500) {
+    document.getElementById('more-menu')?.classList.remove('active');
+    _investBudget = budget;
+    const content = openDetailPanel('扫描 Prime 套装投资机会...<br><small style="color:var(--text-muted)">首次扫描可能需要 2-3 分钟</small>');
+    if (!content) return;
+
+    await _pollScan(`/api/investment?budget=${budget}&min_roi_pct=10&limit=30`, content, (data) => {
+        _investData = data.results || [];
+        _investPage = 0;
+        renderInvestPage(content);
+    });
+}
+
+document.getElementById('investment-btn')?.addEventListener('click', () => loadInvestmentAdvisor());
+
+// ===== 目标引擎 =====
+let _goalsData = [];
+let _goalsPage = 0;
+const _GOAL_PAGE_SIZE = 5;
+
+function renderGoalPage(content) {
+    const items = _goalsData;
+    const totalPages = Math.ceil(items.length / _GOAL_PAGE_SIZE);
+    const start = _goalsPage * _GOAL_PAGE_SIZE;
+    const pageItems = items.slice(start, start + _GOAL_PAGE_SIZE);
+
+    let html = `<div class="panel-title-row">
+        <span class="panel-title-eyebrow">Agent 目标引擎</span>
+        <span class="badge ${items.length > 0 ? 'badge-gold' : 'badge-muted'}">${items.length} 目标</span>
+    </div>`;
+
+    // 创建目标按钮
+    html += `<div style="margin-bottom:12px;">
+        <button onclick="showCreateGoalModal()" style="padding:6px 16px;border:1px solid var(--accent-color);background:var(--accent-color);color:#fff;border-radius:6px;cursor:pointer;font-size:0.85em;width:100%;">+ 创建新目标</button>
+    </div>`;
+
+    if (items.length === 0) {
+        html += `<div class="empty-state"><div class="empty-icon">🎯</div>
+            <span class="empty-primary">暂无活跃目标</span>
+            <span class="empty-sub">创建目标让 Agent 帮你自动寻找交易机会</span></div>`;
+    } else {
+        html += '<div class="card"><div class="card-body">';
+        pageItems.forEach((goal, idx) => {
+            const globalIdx = start + idx + 1;
+            const statusColor = goal.status === 'active' ? 'var(--green-success)' :
+                goal.status === 'achieved' ? 'var(--accent-color)' : 'var(--red-error)';
+            const statusLabel = goal.status === 'active' ? '进行中' :
+                goal.status === 'achieved' ? '已达成' : '已放弃';
+            const typeLabel = {
+                'maximize_profit': '最大化利润',
+                'flip_mod': 'Mod 翻转',
+                'build_set': '凑套装',
+                'find_bargain': '找便宜货',
+                'earn_platinum': '攒白金'
+            }[goal.goal_type] || goal.goal_type;
+
+            html += `<div class="fissure-item" style="flex-direction:column;align-items:flex-start;gap:6px;">
+                <div style="display:flex;justify-content:space-between;width:100%;align-items:center;">
+                    <div class="fissure-node">${globalIdx}. ${goal.description}</div>
+                    <span style="color:${statusColor};font-size:0.8em;font-weight:600;">${statusLabel}</span>
+                </div>
+                <div style="display:flex;gap:8px;font-size:0.8em;color:var(--text-secondary);flex-wrap:wrap;align-items:center;">
+                    <span style="background:var(--bg-tertiary);padding:1px 6px;border-radius:4px;">${typeLabel}</span>
+                    <span>目标: ${goal.target}</span>
+                    <span>结果: ${goal.result_count} 条</span>
+                </div>`;
+
+            // 最近结果
+            if (goal.results && goal.results.length > 0) {
+                html += `<div style="width:100%;margin-top:2px;">
+                    <button onclick="toggleGoalResults('goal-results-${goal.goal_id}')" style="background:none;border:none;color:var(--accent-color);cursor:pointer;font-size:0.75em;padding:0;">
+                        ▶ 最近发现
+                    </button>
+                    <div id="goal-results-${goal.goal_id}" style="display:none;margin-top:4px;padding:6px 8px;background:var(--bg-tertiary);border-radius:6px;font-size:0.75em;">`;
+                goal.results.forEach(r => {
+                    html += `<div style="display:flex;justify-content:space-between;padding:2px 0;">
+                        <span>${r.item_name || r.item_id}</span>
+                        <span style="color:var(--green-success);">+${r.profit}p (ROI ${r.roi_pct}%)</span>
+                    </div>`;
+                });
+                html += `</div></div>`;
+            }
+
+            // 操作按钮
+            if (goal.status === 'active') {
+                html += `<div style="display:flex;gap:6px;width:100%;margin-top:4px;">
+                    <button onclick="executeGoal('${goal.goal_id}')" style="flex:1;padding:4px 8px;border:1px solid var(--accent-color);background:var(--accent-color);color:#fff;border-radius:6px;cursor:pointer;font-size:0.8em;">执行</button>
+                    <button onclick="abandonGoal('${goal.goal_id}')" style="flex:1;padding:4px 8px;border:1px solid var(--red-error);background:transparent;color:var(--red-error);border-radius:6px;cursor:pointer;font-size:0.8em;">放弃</button>
+                </div>`;
+            }
+
+            html += `</div>`;
+        });
+        html += '</div></div>';
+
+        // 分页
+        if (totalPages > 1) {
+            html += `<div style="display:flex;justify-content:center;align-items:center;gap:12px;margin-top:12px;">
+                <button onclick="goalPrevPage()" ${_goalsPage === 0 ? 'disabled' : ''} style="padding:6px 16px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:6px;cursor:${_goalsPage === 0 ? 'not-allowed' : 'pointer'};opacity:${_goalsPage === 0 ? 0.4 : 1};">上一页</button>
+                <span style="color:var(--text-muted);font-size:0.85em;">${_goalsPage + 1} / ${totalPages}</span>
+                <button onclick="goalNextPage()" ${_goalsPage >= totalPages - 1 ? 'disabled' : ''} style="padding:6px 16px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:6px;cursor:${_goalsPage >= totalPages - 1 ? 'not-allowed' : 'pointer'};opacity:${_goalsPage >= totalPages - 1 ? 0.4 : 1};">下一页</button>
+            </div>`;
+        }
+    }
+
+    // 摘要统计
+    html += `<div id="goal-summary" style="margin-top:12px;padding:8px 12px;background:var(--bg-tertiary);border-radius:8px;font-size:0.8em;color:var(--text-secondary);">
+        加载中...
+    </div>`;
+
+    content.innerHTML = html;
+    loadGoalSummary();
+}
+
+function toggleGoalResults(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const btn = el.previousElementSibling;
+    if (el.style.display === 'none') {
+        el.style.display = 'block';
+        if (btn) btn.textContent = '▼ 最近发现';
+    } else {
+        el.style.display = 'none';
+        if (btn) btn.textContent = '▶ 最近发现';
+    }
+}
+
+function goalPrevPage() {
+    if (_goalsPage > 0) { _goalsPage--; renderGoalPage(document.getElementById('detail-content')); }
+}
+function goalNextPage() {
+    const totalPages = Math.ceil(_goalsData.length / _GOAL_PAGE_SIZE);
+    if (_goalsPage < totalPages - 1) { _goalsPage++; renderGoalPage(document.getElementById('detail-content')); }
+}
+
+async function loadGoalSummary() {
+    try {
+        const resp = await fetch('/api/goals/summary');
+        const data = await resp.json();
+        const el = document.getElementById('goal-summary');
+        if (el) {
+            el.innerHTML = `活跃: <b>${data.active_goals}</b> · 交易: <b>${data.total_outcomes}</b> · 采纳率: <b>${data.adoption_rate}%</b> · 预期利润: <b>${data.total_expected_profit}p</b>`;
+        }
+    } catch (e) {}
+}
+
+async function loadGoalDashboard() {
+    const content = openDetailPanel('加载目标列表...');
     if (!content) return;
 
     try {
-        const resp = await fetch(`/api/investment?budget=${budget}&min_roi=${minRoi}&limit=15`);
+        const resp = await fetch('/api/goals');
         const data = await resp.json();
-        const items = data.results || [];
-
-        let html = `<div class="panel-title-row">
-            <span class="panel-title-eyebrow">投资顾问</span>
-            <span class="badge ${items.length > 0 ? 'badge-gold' : 'badge-muted'}">${items.length} 机会</span>
-        </div>`;
-
-        if (items.length === 0) {
-            html += `<div class="empty-state"><div class="empty-icon">💎</div>
-                <span class="empty-primary">暂无投资机会</span>
-                <span class="empty-sub">预算 ${budget}p，最低 ROI ${minRoi}%</span></div>`;
-        } else {
-            html += '<div class="card"><div class="card-body">';
-            items.forEach((item, idx) => {
-                const riskColor = item.risk_level === 'low' ? 'var(--green-success)' :
-                    item.risk_level === 'medium' ? 'var(--orange-warning)' : 'var(--red-error)';
-                const riskIcon = item.risk_level === 'low' ? '🟢' :
-                    item.risk_level === 'medium' ? '🟡' : '🔴';
-                html += `<div class="fissure-item" style="flex-direction:column;align-items:flex-start;gap:4px;">
-                    <div style="display:flex;justify-content:space-between;width:100%;align-items:center;">
-                        <div class="fissure-node">${idx + 1}. ${item.display_name || item.item_id}</div>
-                        <span style="color:var(--green-success);font-weight:700;font-family:var(--font-mono);font-size:1.1em;">${item.roi_pct}%</span>
-                    </div>
-                    <div style="display:flex;gap:12px;font-size:0.8em;color:var(--text-secondary);flex-wrap:wrap;">
-                        <span>买: ${item.buy_price}p</span>
-                        <span>卖: ${item.sell_price}p</span>
-                        <span>利润: +${item.profit}p</span>
-                        <span>供/需: ${item.supply_count}/${item.demand_count}</span>
-                        <span>日量: ${item.daily_volume ?? '?'}</span>
-                        <span style="color:${riskColor}">${riskIcon} ${item.risk_level}</span>
-                    </div>
-                </div>`;
-            });
-            html += '</div></div>';
-        }
-        content.innerHTML = html;
+        _goalsData = data.goals || [];
+        _goalsPage = 0;
+        renderGoalPage(content);
     } catch (err) {
-        content.innerHTML = `<div class="empty-state"><div class="empty-icon">💎</div>
+        content.innerHTML = `<div class="empty-state"><div class="empty-icon">🎯</div>
             <span class="empty-primary">加载失败</span><span class="empty-sub">${err.message}</span></div>`;
     }
 }
 
-document.getElementById('investment-btn')?.addEventListener('click', () => loadInvestmentAdvisor());
+function showCreateGoalModal() {
+    const content = document.getElementById('detail-content');
+    if (!content) return;
+
+    content.innerHTML = `<div class="panel-title-row">
+        <span class="panel-title-eyebrow">创建新目标</span>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px;padding:8px 0;">
+        <div>
+            <label style="font-size:0.85em;color:var(--text-secondary);display:block;margin-bottom:4px;">目标类型</label>
+            <select id="goal-type" onchange="toggleGoalTypeFields(this.value)" style="width:100%;padding:6px 8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:6px;">
+                <option value="maximize_profit">最大化利润（全扫描）</option>
+                <option value="flip_mod">Mod 翻转</option>
+                <option value="build_set">凑套装</option>
+                <option value="find_bargain">找便宜货</option>
+                <option value="earn_platinum">攒白金</option>
+            </select>
+        </div>
+        <div>
+            <label style="font-size:0.85em;color:var(--text-secondary);display:block;margin-bottom:4px;">目标描述</label>
+            <input id="goal-desc" type="text" placeholder="例如：找到 ROI 100%+ 的 Mod 翻转机会" style="width:100%;padding:6px 8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:6px;">
+        </div>
+        <div>
+            <label style="font-size:0.85em;color:var(--text-secondary);display:block;margin-bottom:4px;">预算 (p)</label>
+            <input id="goal-budget" type="number" value="500" min="10" step="50" style="width:100%;padding:6px 8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:6px;">
+        </div>
+        <div id="goal-target-amount-row" style="display:none;">
+            <label style="font-size:0.85em;color:var(--text-secondary);display:block;margin-bottom:4px;">目标白金 (p)</label>
+            <input id="goal-target-amount" type="number" value="100" min="10" step="10" style="width:100%;padding:6px 8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:6px;">
+        </div>
+        <div id="goal-roi-row">
+            <label style="font-size:0.85em;color:var(--text-secondary);display:block;margin-bottom:4px;">最低 ROI %</label>
+            <input id="goal-roi" type="number" value="50" min="0" step="10" style="width:100%;padding:6px 8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:6px;">
+        </div>
+        <div style="display:flex;gap:8px;">
+            <button onclick="submitCreateGoal()" style="flex:1;padding:8px;border:1px solid var(--accent-color);background:var(--accent-color);color:#fff;border-radius:6px;cursor:pointer;font-weight:600;">创建</button>
+            <button onclick="loadGoalDashboard()" style="flex:1;padding:8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:6px;cursor:pointer;">取消</button>
+        </div>
+    </div>`;
+}
+
+function toggleGoalTypeFields(goalType) {
+    const targetRow = document.getElementById('goal-target-amount-row');
+    const roiRow = document.getElementById('goal-roi-row');
+    if (targetRow) targetRow.style.display = goalType === 'earn_platinum' ? 'block' : 'none';
+    if (roiRow) roiRow.style.display = goalType === 'earn_platinum' ? 'none' : 'block';
+}
+
+async function submitCreateGoal() {
+    const goalType = document.getElementById('goal-type')?.value || 'maximize_profit';
+    const desc = document.getElementById('goal-desc')?.value || '';
+    const budget = parseInt(document.getElementById('goal-budget')?.value) || 500;
+    const roi = parseInt(document.getElementById('goal-roi')?.value) || 50;
+    const targetAmount = parseInt(document.getElementById('goal-target-amount')?.value) || 100;
+
+    if (!desc.trim()) {
+        alert('请输入目标描述');
+        return;
+    }
+
+    try {
+        if (goalType === 'earn_platinum') {
+            const resp = await fetch('/api/goals/earn', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target_amount: targetAmount, budget})
+            });
+            const data = await resp.json();
+            if (data.goal_id) {
+                loadGoalDashboard();
+            }
+        } else {
+            const resp = await fetch('/api/goals', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    goal_type: goalType,
+                    description: desc.trim(),
+                    target: goalType === 'flip_mod' ? 'mod' : goalType === 'build_set' ? 'prime_sets' : 'all',
+                    criteria: {budget, min_roi: roi}
+                })
+            });
+            const data = await resp.json();
+            if (data.status === 'ok') {
+                loadGoalDashboard();
+            }
+        }
+    } catch (err) {
+        alert('创建失败: ' + err.message);
+    }
+}
+
+async function executeGoal(goalId) {
+    const content = document.getElementById('detail-content');
+    const ver = getPanelVersion();
+    if (content) {
+        content.innerHTML = `<div class="empty-state"><div class="empty-icon">⏳</div>
+            <span class="empty-primary">正在执行目标...</span>
+            <span class="empty-sub">扫描中，通常需要 1-4 分钟</span></div>`;
+    }
+
+    try {
+        const resp = await fetch(`/api/goals/${goalId}/execute`, {method: 'POST'});
+        if (getPanelVersion() !== ver) return;
+        if (!resp.ok) {
+            const errData = await resp.json().catch(() => ({}));
+            throw new Error(errData.detail || `HTTP ${resp.status}`);
+        }
+        const {task_id} = await resp.json();
+
+        let attempts = 0;
+        const maxAttempts = 150;
+        while (attempts < maxAttempts) {
+            await new Promise(r => setTimeout(r, 2000));
+            attempts++;
+            if (getPanelVersion() !== ver) return;
+            const statusResp = await fetch(`/api/goals/execute_status/${task_id}`);
+            if (!statusResp.ok) break;
+            const status = await statusResp.json();
+
+            if (status.status === 'done') {
+                if (getPanelVersion() !== ver) return;
+                const goalsResp = await fetch('/api/goals');
+                const goalsData = await goalsResp.json();
+                _goalsData = goalsData.goals || [];
+                _goalsPage = 0;
+                if (content) renderGoalPage(content);
+                return;
+            }
+            if (status.status === 'error') {
+                throw new Error(status.error || '执行异常');
+            }
+            if (content && attempts % 5 === 0) {
+                const dots = '.'.repeat((attempts % 3) + 1);
+                const sub = content.querySelector('.empty-sub');
+                if (sub) sub.textContent = `扫描中${dots} (${attempts * 2}s)`;
+            }
+        }
+        throw new Error('执行超时');
+    } catch (err) {
+        if (getPanelVersion() !== ver) return;
+        if (content) {
+            content.innerHTML = `<div class="empty-state"><div class="empty-icon">❌</div>
+                <span class="empty-primary">执行失败</span><span class="empty-sub">${err.message}</span></div>`;
+        }
+    }
+}
+
+async function abandonGoal(goalId) {
+    if (!confirm('确定放弃这个目标？')) return;
+    try {
+        await fetch(`/api/goals/${goalId}`, {method: 'DELETE'});
+        loadGoalDashboard();
+    } catch (err) {
+        alert('操作失败: ' + err.message);
+    }
+}
+
+document.getElementById('goal-btn')?.addEventListener('click', () => { document.getElementById('more-menu')?.classList.remove('active'); loadGoalDashboard(); });

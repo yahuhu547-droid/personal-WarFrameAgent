@@ -603,6 +603,15 @@ class ChatAgent:
         return "\n".join(lines)
 
     def _handle_favorite_command(self, args: list[str]) -> str:
+        if not args or (len(args) == 1 and args[0].lower() in {"list", "列表"}):
+            if not self.memory.favorite_items:
+                return "收藏列表为空，使用 /fav add 物品名 添加收藏"
+            lines = ["当前收藏列表:"]
+            for i, item_id in enumerate(self.memory.favorite_items, 1):
+                lines.append(f"  {i}. {display_item_name(item_id)}")
+            lines.append(f"\n共 {len(self.memory.favorite_items)} 个收藏")
+            lines.append("使用 /fav add 物品名 添加，/fav remove 物品名 移除")
+            return "\n".join(lines)
         if len(args) < 2 or args[0].lower() not in {"add", "remove"}:
             return "用法: /fav add 物品名 或 /fav remove 物品名"
         action = args[0].lower()
@@ -619,6 +628,16 @@ class ChatAgent:
         return f"已移除收藏: {display_item_name(item_id)}"
 
     def _handle_alert_command(self, args: list[str]) -> str:
+        if not args or (len(args) == 1 and args[0].lower() in {"list", "列表"}):
+            if not self.memory.price_alerts:
+                return "价格提醒为空，使用 /alert add 物品名 below 45 添加提醒"
+            lines = ["当前价格提醒:"]
+            for i, alert in enumerate(self.memory.price_alerts, 1):
+                direction_cn = "低于" if alert.direction == "below" else "高于"
+                lines.append(f"  {i}. {display_item_name(alert.item_id)} {direction_cn} {alert.price}p")
+            lines.append(f"\n共 {len(self.memory.price_alerts)} 个提醒")
+            lines.append("使用 /alert add 物品名 below 45 添加，/alert remove 物品名 below 45 移除")
+            return "\n".join(lines)
         if len(args) < 4 or args[0].lower() not in {"add", "remove"}:
             return "用法: /alert add 物品名 below 45"
         action = args[0].lower()
@@ -653,6 +672,17 @@ class ChatAgent:
         return f"已移除提醒: {display_item_name(item_id)} {direction} {price}p"
 
     def _handle_preference_command(self, args: list[str]) -> str:
+        if not args or (len(args) == 1 and args[0].lower() in {"list", "列表", "show", "查看"}):
+            p = self.memory.preferences
+            lines = [
+                "当前偏好设置:",
+                f"  平台: {p.platform}",
+                f"  跨平台: {'开' if p.crossplay else '关'}",
+                f"  最大结果数: {p.max_results}",
+                "",
+                "修改: /pref platform pc | /pref crossplay on | /pref max 5",
+            ]
+            return "\n".join(lines)
         if len(args) < 2:
             return "用法: /pref platform pc | /pref crossplay on | /pref max 5"
         key = args[0].lower()
@@ -720,7 +750,7 @@ class ChatAgent:
         if not args:
             return tracker.format_goals_status()
         sub = args[0].lower()
-        if sub == "set":
+        if sub in ("set", "add", "新建"):
             desc = " ".join(args[1:]) if len(args) > 1 else ""
             if not desc:
                 return "请指定目标描述，例如: /goal set 一周内赚500p"
@@ -772,7 +802,7 @@ class ChatAgent:
                 return f"未找到 ID 为 {gid} 的目标"
             tracker.remove_goal(matches[0].goal_id)
             return f"已删除目标: {matches[0].description}"
-        return "未知的 /goal 子命令。可用: set, done, drop, review, rm"
+        return "未知的 /goal 子命令。可用: set/add, done, drop, review, rm"
 
     # ── 裂缝订阅命令 ────────────────────────────────────────
 
@@ -1292,6 +1322,79 @@ class ChatAgent:
         if tool_call.name == "deep_analysis":
             item_name = args.get("item_name", message)
             return self._deep_analysis(item_name)
+        if tool_call.name == "riven_search":
+            return self._handle_riven_search(args)
+        return None
+
+    def _handle_riven_search(self, args: dict) -> str:
+        """处理紫卡搜索工具调用。"""
+        from .riven import RivenQuery, parse_riven_query, search_rivens, format_riven_results, RIVEN_ATTRIBUTES, COMPOUND_KEYWORDS
+
+        weapon = args.get("weapon", "")
+        if not weapon:
+            return "请指定武器名称，如：斯特朗双爆紫卡无负"
+
+        # 构建查询消息用于解析属性（始终包含"紫卡"关键词）
+        fake_msg = weapon + "紫卡"
+        if args.get("positive"):
+            fake_msg += args["positive"]
+        if args.get("negative"):
+            fake_msg += args["negative"]
+
+        query = parse_riven_query(
+            fake_msg,
+            weapon_resolver=self._resolve_weapon_for_riven,
+        )
+        if not query:
+            # 回退：手动构建查询
+            from .dictionary import normalize_market_id
+            weapon_url = normalize_market_id(weapon)
+            positive = []
+            no_negative = False
+            if args.get("positive"):
+                pos_text = args["positive"]
+                for kw, attrs in COMPOUND_KEYWORDS.items():
+                    if kw in pos_text:
+                        positive.extend(attrs)
+                for cn, api in RIVEN_ATTRIBUTES.items():
+                    if cn in pos_text and api not in positive:
+                        positive.append(api)
+            if args.get("negative") and ("无负" in args["negative"] or "不要负" in args["negative"]):
+                no_negative = True
+            query = RivenQuery(weapon_url_name=weapon_url, positive_attrs=positive, no_negative=no_negative)
+
+        # 应用 max_price 参数
+        if args.get("max_price"):
+            query.max_price = int(args["max_price"])
+
+        results = search_rivens(query)
+        return format_riven_results(query, results)
+
+    def _resolve_weapon_for_riven(self, name: str) -> str | None:
+        """解析武器名到 market weapon_url_name。"""
+        from .dictionary import normalize_market_id
+        normalized = normalize_market_id(name)
+
+        # 先检查别名是否直接指向武器（不含 _set/_mod 等非武器后缀）
+        alias_id = self.resolver.aliases.get(
+            __import__("warframe_agent.dictionary", fromlist=["normalize_lookup_key"]).normalize_lookup_key(name)
+        )
+        if alias_id and not any(alias_id.endswith(s) for s in ["_set", "_mod", "_blueprint"]):
+            return alias_id
+
+        # 尝试字典解析
+        try:
+            result = self.resolver.resolve(name)
+            item_id = result.item_id
+            # 如果结果看起来像武器名（无 _set/_mod 后缀），使用它
+            if not any(item_id.endswith(s) for s in ["_set", "_mod", "_blueprint"]):
+                return item_id
+        except Exception:
+            pass
+
+        # 回退：直接用 normalized 名（如 "rubico", "soma", "strun"）
+        if normalized and len(normalized) >= 2:
+            return normalized
         return None
 
     def _deep_analysis(self, item_name: str) -> str | None:
@@ -1811,6 +1914,7 @@ _TRADING_TOOL_KEYWORDS = {
     "套装利润", "拆件赚", "拆件利润", "整套vs拆件",
     "投资", "投资推荐", "投资建议", "roi", "预算",
     "有什么mod", "哪些mod", "什么mod可以",
+    "紫卡", "裂罅", "riven", "洗卡",
 }
 
 

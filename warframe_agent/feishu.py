@@ -265,6 +265,9 @@ class FeishuBot:
 _FEISHU_WORKER_SCRIPT = '''
 import json
 import sys
+import time
+import threading
+from pathlib import Path
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody, CreateMessageRequest, CreateMessageRequestBody
 from lark_oapi.api.im.v1.model import P2ImMessageReceiveV1
@@ -275,6 +278,50 @@ API_URL = "http://127.0.0.1:8000/api/chat"
 DATA_DIR = r"{data_dir}"
 
 _client = None
+_service_start_ms = int(time.time() * 1000)  # 服务启动时间（毫秒）
+
+# 消息去重：持久化到磁盘，重启后仍有效
+_processed_lock = threading.Lock()
+_DEDUP_TTL = 600  # 10 分钟
+_DEDUP_FILE = Path(DATA_DIR) / "feishu_processed_ids.json"
+
+def _load_processed_ids() -> dict[str, float]:
+    try:
+        if _DEDUP_FILE.exists():
+            data = json.loads(_DEDUP_FILE.read_text(encoding="utf-8"))
+            # 清理过期条目
+            now = time.time()
+            return {{k: v for k, v in data.items() if now - v < _DEDUP_TTL}}
+    except Exception:
+        pass
+    return {{}}
+
+def _save_processed_ids(ids: dict[str, float]) -> None:
+    try:
+        _DEDUP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _DEDUP_FILE.write_text(json.dumps(ids), encoding="utf-8")
+    except Exception:
+        pass
+
+_processed_ids: dict[str, float] = _load_processed_ids()
+
+def _is_duplicate(message_id: str, create_time_ms: int = 0) -> bool:
+    # 关键：拒绝启动前创建的旧消息
+    if create_time_ms > 0 and create_time_ms < _service_start_ms:
+        return True
+    now = time.time()
+    with _processed_lock:
+        # 清理过期条目
+        expired = [k for k, t in _processed_ids.items() if now - t > _DEDUP_TTL]
+        for k in expired:
+            del _processed_ids[k]
+        if message_id in _processed_ids:
+            return True
+        _processed_ids[message_id] = now
+        # 定期持久化（每 10 条）
+        if len(_processed_ids) % 10 == 0:
+            _save_processed_ids(_processed_ids)
+        return False
 
 def get_client():
     global _client
@@ -285,6 +332,18 @@ def get_client():
 def on_message(data: P2ImMessageReceiveV1):
     try:
         msg = data.event.message
+        message_id = msg.message_id
+        create_time_ms = int(msg.create_time or "0")
+
+        # 消息去重 + 旧消息过滤
+        if _is_duplicate(message_id, create_time_ms):
+            return
+
+        # 过滤机器人自身消息
+        sender = getattr(data.event, 'sender', None)
+        if sender and getattr(sender, 'sender_type', '') == 'app':
+            return
+
         # 保存 chat_id 用于主动推送
         chat_id = msg.chat_id
         if chat_id:
@@ -307,7 +366,7 @@ def on_message(data: P2ImMessageReceiveV1):
         import requests
         resp = requests.post(API_URL, json={{"message": user_text}}, timeout=120)
         reply_text = resp.json().get("reply", "处理异常")
-        reply(msg.message_id, reply_text)
+        reply(message_id, reply_text)
     except Exception as e:
         print(f"[feishu] 异常: {{e}}", flush=True)
 

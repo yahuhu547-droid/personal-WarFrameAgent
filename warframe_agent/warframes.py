@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -352,12 +353,29 @@ def _detect_base_id(message: str, groups: dict[str, PrimeGroup]) -> str | None:
     normalized = message.lower().replace(" ", "_")
     # 价格查询相关的关键词，即使没有 "p" 或 "prime" 也应识别
     _PRICE_QUERY_HINTS = {"一套", "多少钱", "价格", "收", "卖", "买", "出", "多少", "查", "看看"}
+    # 部件关键词，说明用户在查 Prime 部件
+    _PART_HINTS = set()
+    for info in PARTS.values():
+        _PART_HINTS.update(info["terms"])
+    _PART_HINTS |= {"补齐", "补全", "还差", "缺", "一套"}
     has_price_hint = any(hint in message for hint in _PRICE_QUERY_HINTS)
+    has_part_hint = any(hint in message for hint in _PART_HINTS)
     for zh_alias, english_base in COMMON_WARFRAME_ALIASES.items():
-        if zh_alias in message and ("p" in message.lower() or "prime" in message.lower() or has_price_hint):
+        if zh_alias in message and ("p" in message.lower() or "prime" in message.lower() or has_price_hint or has_part_hint):
             candidate = f"{english_base}_prime"
             if candidate in groups:
                 return candidate
+    # 英文名 + P/Prime 缩写（如 "wukong p", "mesa p", "rhinop"）
+    if "p" in message.lower() or "prime" in message.lower() or has_price_hint:
+        for group in groups.values():
+            english_base = group.base_id.replace("_prime", "")
+            lower_msg = message.lower().strip()
+            # "wukong p", "wukong p 一套" — 不用 \b，改用非字母检查
+            if re.search(rf'(?<![a-z]){re.escape(english_base)}\s*p(?![a-z])', lower_msg):
+                return group.base_id
+            # "wukongp" (无空格)
+            if f"{english_base}p" in normalized:
+                return group.base_id
     ranked = sorted(groups.values(), key=lambda group: len(group.base_id), reverse=True)
     for group in ranked:
         candidates = [group.base_id, _group_english_title(group).lower().replace(" ", "_"), _group_english_title(group).lower()]

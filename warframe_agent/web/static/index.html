@@ -112,10 +112,6 @@
                         <span class="menu-icon">📋</span>
                         <span class="menu-text">交易历史</span>
                     </button>
-                    <button class="more-menu-item" id="arbitrage-btn">
-                        <span class="menu-icon">💰</span>
-                        <span class="menu-text">套利检测</span>
-                    </button>
                     <button class="more-menu-item" id="dashboard-btn">
                         <span class="menu-icon">📈</span>
                         <span class="menu-text">收藏仪表盘</span>
@@ -135,6 +131,10 @@
                     <button class="more-menu-item" id="investment-btn">
                         <span class="menu-icon">💎</span>
                         <span class="menu-text">投资顾问</span>
+                    </button>
+                    <button class="more-menu-item" id="goal-btn">
+                        <span class="menu-icon">🎯</span>
+                        <span class="menu-text">目标引擎</span>
                     </button>
                     <button class="more-menu-item" id="alias-btn">
                         <span class="menu-icon">🏷️</span>
@@ -295,6 +295,62 @@
                     <span class="setting-label">显示价格变动</span>
                     <input type="checkbox" id="setting-price-change" class="setting-toggle" checked>
                 </label>
+            </div>
+            <div class="settings-group">
+                <h3>微信推送 (WxPusher)</h3>
+                <label class="setting-item">
+                    <span class="setting-label">启用微信推送</span>
+                    <input type="checkbox" id="setting-wx-push" class="setting-toggle">
+                </label>
+                <div id="push-setup" class="push-setup" style="display:none;">
+                    <div class="push-uid-row">
+                        <input type="text" id="wxpusher-uid" placeholder="输入 WxPusher UID (UID_xxx)" autocomplete="off">
+                        <button id="wxpusher-save" class="push-btn">保存</button>
+                        <button id="wxpusher-test" class="push-btn push-btn-secondary">测试</button>
+                    </div>
+                    <p class="push-hint">获取 UID: 微信扫描下方二维码关注 WxPusher，然后在公众号内发送"uid"获取</p>
+                    <div id="push-qrcode-area" class="push-qrcode-area"></div>
+                    <label class="setting-item">
+                        <span class="setting-label">推送价格提醒</span>
+                        <input type="checkbox" id="setting-push-alerts" class="setting-toggle" checked>
+                    </label>
+                    <label class="setting-item">
+                        <span class="setting-label">推送关注通知</span>
+                        <input type="checkbox" id="setting-push-watches" class="setting-toggle" checked>
+                    </label>
+                    <label class="setting-item">
+                        <span class="setting-label">推送主动建议</span>
+                        <input type="checkbox" id="setting-push-proactive" class="setting-toggle" checked>
+                    </label>
+                    <label class="setting-item">
+                        <span class="setting-label">每日报告推送</span>
+                        <input type="checkbox" id="setting-push-report" class="setting-toggle" checked>
+                    </label>
+                    <div class="push-report-time">
+                        <span class="setting-label">报告时间</span>
+                        <input type="time" id="setting-report-time" value="09:00">
+                    </div>
+                </div>
+            </div>
+            <div class="settings-group">
+                <h3>飞书机器人</h3>
+                <label class="setting-item">
+                    <span class="setting-label">启用飞书机器人</span>
+                    <input type="checkbox" id="setting-feishu-enabled" class="setting-toggle">
+                </label>
+                <div id="feishu-setup" class="push-setup" style="display:none;">
+                    <div class="push-uid-row">
+                        <input type="text" id="feishu-app-id" placeholder="App ID (cli_xxx)" autocomplete="off">
+                    </div>
+                    <div class="push-uid-row">
+                        <input type="password" id="feishu-app-secret" placeholder="App Secret" autocomplete="off">
+                    </div>
+                    <div class="push-uid-row">
+                        <button id="feishu-save" class="push-btn">保存</button>
+                        <button id="feishu-test" class="push-btn push-btn-secondary">测试连接</button>
+                    </div>
+                    <p class="push-hint">使用 WebSocket 长连接模式，无需公网 IP。飞书开放平台需开启"机器人"能力。</p>
+                </div>
             </div>
             <div class="modal-decoration-bottom"></div>
         </div>

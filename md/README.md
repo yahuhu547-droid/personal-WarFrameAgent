@@ -24,15 +24,23 @@
 
 ### Agent 能力
 
-- **LLM 工具路由** — qwen3:8b 模型实现 function calling，自动将自然语言分发到 7 个工具：
+- **LLM 工具路由** — qwen3:8b 模型实现 Ollama 原生 function calling，ReAct 循环自动将自然语言分发到 13 个工具：
   - `query_price`: 查询单品实时价格
   - `query_set`: Prime 套装整套 vs 拆件对比
   - `query_missing_parts`: 计算补齐套装缺失部件花费
   - `scan_favorites`: 扫描关注列表当前状态
   - `set_alert`: 设置价格提醒
   - `price_trend`: 查看价格历史趋势
+  - `mod_flipper`: Mod 翻转利润排行榜（低买满级卖）
+  - `set_profit`: Prime 套装拆件利润分析
+  - `investment_advisor`: 投资顾问（按预算 + ROI 扫描机会）
+  - `query_events`: 游戏活动查询（虚空裂缝/Baro/入侵/虚空风暴，支持 type 过滤）
+  - `deep_analysis`: 云端大模型深度分析单个物品
+  - `plan`: 复杂请求分解为多步子任务执行
   - `general_chat`: 一般交易问题闲聊
-- **ReAct 多步推理** — 支持链式工具调用（如"我有50p买什么赋能倒卖最赚"→ 查询多个赋能 → 对比 → 推荐）
+- **ReAct 多步推理** — Ollama 原生 tool_calls + JSON 双格式解析，支持链式工具调用
+- **事件订阅推送** — `/fissure add` 订阅虚空裂缝条件，匹配时自动推送（支持等级/任务/地点/钢铁过滤）
+- **Baro 购买推荐** — 虚空商人到来时自动分析库存，对比杜卡特成本与市场白金价格，推送"值得买"列表
 - **多轮对话** — session history 注入 LLM，上下文连贯
 - **行为学习** — 分析用户查询模式构建画像，个性化回答
 - **主动智能** — 价格异常检测 + 趋势监控，Agent 主动给出建议
@@ -44,7 +52,7 @@
   - 收藏列表（`/fav add/remove`）
   - 价格提醒（`/alert add/remove`，支持 below/above 方向，可添加备注）
   - 交易偏好（平台、crossplay、最大结果数）
-  - 关注列表（定时推送，支持 daily/hourly/weekly）
+  - 裂缝订阅（`/fissure add/remove/list`）
   - 常见问题自动记录
   - 智能建议（异常检测结果）
 
@@ -65,6 +73,12 @@
 | `/fav remove 物品名` | 移除收藏 |
 | `/alert add 物品名 below 45` | 设置价格提醒 |
 | `/alert remove 物品名 below 45` | 移除价格提醒 |
+| `/fissure add 虚空 歼灭` | 订阅虚空裂缝通知 |
+| `/fissure list` | 查看裂缝订阅 |
+| `/fissure remove 序号` | 取消裂缝订阅 |
+| `/goal set 目标描述` | 创建交易目标 |
+| `/goal done ID` | 标记目标完成 |
+| `/goal review` | 复盘目标 |
 | `/pref platform pc` | 设置交易平台 |
 | `/pref crossplay on` | 设置跨平台 |
 | `/pref max 10` | 设置最大显示结果数 |
@@ -84,7 +98,7 @@
 - **Playwright** — 浏览器自动化抓取（绕过 Cloudflare）
 - **Chart.js** — 价格趋势可视化
 - **纯 HTML/CSS/JS** — 前端无构建工具，Tenno 科技终端风格
-- **169 个单元测试** — 覆盖所有核心模块和 Web API
+- **409 个单元测试** — 覆盖所有核心模块和 Web API
 
 ## 快速开始
 
@@ -149,20 +163,32 @@ Agent：已添加提醒: 充沛 低于 40p 时通知
 ```
 warframe_agent/        # 核心模块
   agent.py             # 主 Agent 入口，物品查询 + 报告生成
+  baro.py              # Baro 购买推荐分析器
   chat.py              # 对话式交易助手，整合所有 Agent 能力
   config.py            # 配置常量（API 地址、模型名、路径）
   dictionary.py        # 6 层物品名称解析器
+  events.py            # 游戏事件追踪（虚空裂缝/Baro/入侵/虚空风暴）
+  feedback.py          # 反馈分析器（交易结果 → 策略信号）
+  feishu.py            # 飞书机器人（WebSocket 长连接）
   formatter.py         # 输出格式化 + 游戏内私聊命令生成
+  goals.py             # 目标系统（创建/分解/执行/追踪）
+  investment.py        # 投资顾问扫描器
+  knowledge.py         # 结构化知识库（物品统计、品类健康度）
   llm.py               # Ollama LLM 调用封装（单轮 + 多轮对话）
   market.py            # warframe.market v2 API 客户端（缓存 + 限速）
-  memory.py            # 持久化记忆系统（不可变 dataclass + 画像 + 建议）
-  monitor.py           # 后台价格监控（daemon 线程 + 异常检测）
+  memory.py            # 持久化记忆系统（不可变 dataclass + 画像 + 裂缝订阅）
+  mod_flipper.py       # Mod 翻转利润扫描器
+  monitor.py           # 后台价格监控（daemon 线程 + 裂缝检查 + Baro 推荐）
   names.py             # 物品显示名称 + 模块级缓存
+  patterns.py          # 模式发现（从历史数据提取规律）
   price_history.py     # SQLite 价格历史追踪 + 趋势分析
+  push.py              # WxPusher 微信推送
   rag.py               # RAG 语义搜索（关键词 + 向量余弦相似度）
+  rules.py             # 规则引擎（市场评估、目标生成、推送消息）
   scraper.py           # Playwright 浏览器抓取（绕过 Cloudflare）
   session.py           # 会话上下文 + 追问检测 + messages 构建
-  tool_router.py       # ReAct 工具路由 + LLM 原生工具调用
+  set_profit.py        # Prime 套装利润扫描器
+  tool_router.py       # ReAct 工具路由 + Ollama 原生 tool_calls
   trade_history.py     # SQLite 交易历史记录
   trade_intent.py      # 交易意图检测（买入/卖出/观望）
   warframes.py         # Prime 套装定价 + 补件计算
@@ -172,7 +198,7 @@ warframe_agent/        # 核心模块
       index.html       # 主页面（Tenno 科技终端风格）
       css/             # 变量、动画、主样式、响应式
       js/              # app.js, chat.js, sidebar.js, chart.js
-tests/                 # 33 个测试文件，169 个测试用例
+tests/                 # 40+ 测试文件，409 个测试用例
 data/                  # 物品数据、别名映射、记忆存储、遗物数据
 tools/                 # 数据构建 + embedding 预计算脚本
 md/                    # 项目文档
@@ -184,11 +210,11 @@ md/                    # 项目文档
 python -m pytest tests/ -v
 ```
 
-33 个测试文件，169 个测试用例，覆盖：
+40+ 测试文件，409 个测试用例，覆盖：
 - 物品解析全链路（别名、字典、生成式、标准化、LLM、RAG）
 - 对话系统（查价、追问、斜杠命令、记忆操作、RAG 降级）
 - 多轮对话（session history、messages 构建、上下文连贯）
-- ReAct 推理（工具调用、多步分解、链式执行）
+- ReAct 推理（工具调用、多步分解、链式执行、Ollama 原生 tool_calls）
 - 行为学习（用户画像、关键词分析、个性化注入）
 - 主动智能（异常检测、趋势监控、建议生成）
 - 语义 RAG（向量搜索、余弦相似度、embedding 缓存）
@@ -199,14 +225,20 @@ python -m pytest tests/ -v
 - 交易意图（买入/卖出/观望识别）
 - 市场 API 客户端（排序、过滤、格式化）
 - Web API（所有端点、WebSocket、缓存、限速）
+- 游戏事件（虚空裂缝解析、Baro 解析、事件订阅匹配）
+- 三大交易工具（Mod 翻转、套装利润、投资顾问）
+- 飞书集成（消息收发、WebSocket 长连接）
 
 ## 架构设计
 
 ```
 用户输入
   │
-  ├─ 斜杠命令 (/fav, /alert, /scan, /pref, /memory)
+  ├─ 斜杠命令 (/fav, /alert, /scan, /pref, /memory, /fissure, /goal)
   │    └─ 直接执行，操作记忆系统
+  │
+  ├─ 事件/交易工具关键词检测
+  │    └─ 直接走路由器，跳过物品匹配（避免"虚空"→baro_void_signal 误匹配）
   │
   ├─ 追问检测 ("那散件呢", "涨了吗")
   │    └─ 复用 SessionContext 中的上次物品
@@ -216,7 +248,7 @@ python -m pytest tests/ -v
   │    └─ LLM 生成自然语言回复
   │
   └─ 模糊路径（无直接匹配）
-       ├─ LLM 工具路由 → 选择工具 → 执行 → 回复
+       ├─ ReAct 工具路由 → Ollama 原生 tool_calls → 执行 → 回复
        └─ RAG 语义搜索 → 降级回复
 ```
 

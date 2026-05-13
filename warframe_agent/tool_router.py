@@ -183,6 +183,23 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "riven_search",
+            "description": "搜索紫卡(Riven)拍卖信息。当用户提到紫卡、裂罅、Riven，或查询武器的紫卡时使用。支持指定正属性、负属性、价格上限。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "weapon": {"type": "string", "description": "武器名称，如 斯特朗、soma、rubico"},
+                    "positive": {"type": "string", "description": "期望的正属性，如 双爆、暴击率+暴击伤害"},
+                    "negative": {"type": "string", "description": "期望的负属性，如 无负、后坐力"},
+                    "max_price": {"type": "integer", "description": "最高价格(白金)"},
+                },
+                "required": ["weapon"],
+            },
+        },
+    },
 ]
 
 
@@ -251,6 +268,11 @@ TOOLS = [
         "name": "deep_analysis",
         "description": "深度分析单个物品的多维度数据，使用云端大模型推理",
         "parameters": {"item_name": "物品名称"},
+    },
+    {
+        "name": "riven_search",
+        "description": "搜索紫卡(Riven)拍卖信息。当用户提到紫卡、裂罅、Riven时使用。支持指定正属性、负属性、价格上限。",
+        "parameters": {"weapon": "武器名称", "positive": "期望正属性(如双爆)", "negative": "期望负属性(如无负)", "max_price": "最高价格"},
     },
 ]
 
@@ -412,7 +434,10 @@ def react_loop(
                 "   - 用户问Baro/虚空商人 → query_events(type='baro_visit')\n"
                 "8. 用户要对比多个物品或复杂分析 → plan（分解子任务）\n"
                 "9. 用户问价格趋势/涨跌 → price_trend\n"
-                "10. 一般闲聊或无法确定 → 直接回答，不调用工具\n\n"
+                "10. 用户问紫卡/裂罅/Riven → riven_search\n"
+                "    - 如\"斯特朗双爆紫卡无负\" → riven_search(weapon='斯特朗', positive='双爆', negative='无负')\n"
+                "    - 如\"rubico紫卡暴击率\" → riven_search(weapon='rubico', positive='暴击率')\n"
+                "11. 一般闲聊或无法确定 → 直接回答，不调用工具\n\n"
                 "## 注意事项\n"
                 "- 中文别名需映射到英文（如\"电男\"=\"volt\"）再调用工具\n"
                 "- 用户同时提到多个物品时，使用 plan 工具分别查询\n"

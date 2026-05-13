@@ -75,6 +75,7 @@ EXPORT_FILE_PAIRS = [
     ("ExportRelicArcane_zh.json", "ExportRelicArcane_en.json"),
     ("ExportUpgrades_zh.json", "ExportUpgrades_en.json"),
     ("ExportWarframes_zh.json", "ExportWarframes_en.json"),
+    ("ExportWeapons_zh.json", "ExportWeapons_en.json"),
 ]
 
 # 多模型预筛选配置（共用同一个 API endpoint，通过 model 参数切换）

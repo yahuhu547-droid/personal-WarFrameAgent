@@ -213,6 +213,20 @@ function setupWebSocket() {
                 showNotification(msg, data.priority === 1 ? 'warning' : 'info');
                 addChatMessage('agent', msg);
                 loadSidebar();
+            } else if (data.type === 'goal_opportunity') {
+                const priorityIcon = data.priority === 1 ? '🔴' : '🟡';
+                const msg = `${priorityIcon} 目标机会: ${data.message}`;
+                showNotification(msg, data.priority === 1 ? 'warning' : 'info');
+                addChatMessage('agent', msg);
+            } else if (data.type === 'proactive_push') {
+                const actionMap = {'buy now': '立即买入', 'sell now': '立即卖出', 'watch': '持续关注'};
+                const typeMap = {'opportunity': '机会', 'warning': '警告', 'recommendation': '推荐'};
+                const priorityIcon = data.priority === 1 ? '🔴' : '🟡';
+                const label = typeMap[data.push_type] || data.push_type;
+                const action = actionMap[data.action_suggestion] || data.action_suggestion;
+                const msg = `${priorityIcon} [${label}] ${data.item_display}\n${data.message}\n建议: ${action}`;
+                showNotification(msg, data.priority === 1 ? 'warning' : 'info');
+                addChatMessage('agent', msg);
             }
         };
 
@@ -372,6 +386,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 设置按钮
     document.getElementById('settings-btn')?.addEventListener('click', () => {
+        document.getElementById('more-menu')?.classList.remove('active');
         document.getElementById('settings-modal').classList.add('active');
     });
 });
@@ -430,11 +445,194 @@ function initSettings() {
             saveSettings();
         });
     }
+
+    // 微信推送设置
+    initPushSettings();
+    // 飞书机器人设置
+    initFeishuSettings();
 }
 
 function saveSettings() {
     try {
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(appSettings));
+    } catch (e) {}
+}
+
+// ===== 微信推送设置 =====
+
+async function initPushSettings() {
+    const wxToggle = document.getElementById('setting-wx-push');
+    const setupDiv = document.getElementById('push-setup');
+    const uidInput = document.getElementById('wxpusher-uid');
+    const saveBtn = document.getElementById('wxpusher-save');
+    const testBtn = document.getElementById('wxpusher-test');
+    const qrArea = document.getElementById('push-qrcode-area');
+
+    if (!wxToggle) return;
+
+    // 加载当前配置
+    try {
+        const resp = await fetch('/api/push/config');
+        const cfg = await resp.json();
+        wxToggle.checked = cfg.enabled || false;
+        if (uidInput && cfg.uids && cfg.uids.length > 0) {
+            uidInput.value = cfg.uids[0];
+        }
+        const pa = document.getElementById('setting-push-alerts');
+        const pw = document.getElementById('setting-push-watches');
+        const pp = document.getElementById('setting-push-proactive');
+        const pr = document.getElementById('setting-push-report');
+        const pt = document.getElementById('setting-report-time');
+        if (pa) pa.checked = cfg.push_alerts !== false;
+        if (pw) pw.checked = cfg.push_watches !== false;
+        if (pp) pp.checked = cfg.push_proactive !== false;
+        if (pr) pr.checked = cfg.push_daily_report !== false;
+        if (pt && cfg.report_time) pt.value = cfg.report_time;
+
+        if (cfg.enabled && setupDiv) setupDiv.style.display = 'block';
+    } catch (e) {}
+
+    // 切换显示/隐藏
+    wxToggle.addEventListener('change', async () => {
+        if (setupDiv) setupDiv.style.display = wxToggle.checked ? 'block' : 'none';
+        await savePushConfig({ enabled: wxToggle.checked });
+    });
+
+    // 保存 UID
+    if (saveBtn) {
+        saveBtn.addEventListener('click', async () => {
+            const uid = uidInput.value.trim();
+            if (!uid || !uid.startsWith('UID_')) {
+                showToast('请输入有效的 UID（以 UID_ 开头）', 'warning');
+                return;
+            }
+            await savePushConfig({ uids: [uid], enabled: true });
+            showToast('UID 已保存', 'success');
+        });
+    }
+
+    // 测试推送
+    if (testBtn) {
+        testBtn.addEventListener('click', async () => {
+            try {
+                const resp = await fetch('/api/push/test', { method: 'POST' });
+                const data = await resp.json();
+                if (data.status === 'ok') {
+                    showToast('测试消息已发送，请检查微信', 'success');
+                } else {
+                    showToast(data.message || '发送失败', 'error');
+                }
+            } catch (e) {
+                showToast('请求失败', 'error');
+            }
+        });
+    }
+
+    // 子开关变更
+    for (const [id, key] of [
+        ['setting-push-alerts', 'push_alerts'],
+        ['setting-push-watches', 'push_watches'],
+        ['setting-push-proactive', 'push_proactive'],
+        ['setting-push-report', 'push_daily_report'],
+    ]) {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('change', () => savePushConfig({ [key]: el.checked }));
+        }
+    }
+
+    // 报告时间变更
+    const ptEl = document.getElementById('setting-report-time');
+    if (ptEl) {
+        ptEl.addEventListener('change', () => savePushConfig({ report_time: ptEl.value }));
+    }
+
+    // 加载二维码
+    if (qrArea) {
+        try {
+            const resp = await fetch('/api/push/qrcode');
+            const data = await resp.json();
+            if (data.status === 'ok' && data.url) {
+                qrArea.innerHTML = `<img src="${data.url}" alt="扫码关注 WxPusher">`;
+            }
+        } catch (e) {}
+    }
+}
+
+async function savePushConfig(updates) {
+    try {
+        await fetch('/api/push/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updates),
+        });
+    } catch (e) {}
+}
+
+// ===== 飞书机器人设置 =====
+
+async function initFeishuSettings() {
+    const toggle = document.getElementById('setting-feishu-enabled');
+    const setupDiv = document.getElementById('feishu-setup');
+    const appIdInput = document.getElementById('feishu-app-id');
+    const appSecretInput = document.getElementById('feishu-app-secret');
+    const saveBtn = document.getElementById('feishu-save');
+    const testBtn = document.getElementById('feishu-test');
+
+    if (!toggle) return;
+
+    // 加载配置
+    try {
+        const resp = await fetch('/api/feishu/config');
+        const cfg = await resp.json();
+        toggle.checked = cfg.enabled || false;
+        if (appIdInput) appIdInput.value = cfg.app_id || '';
+        if (cfg.enabled && setupDiv) setupDiv.style.display = 'block';
+    } catch (e) {}
+
+    // 切换显示
+    toggle.addEventListener('change', async () => {
+        if (setupDiv) setupDiv.style.display = toggle.checked ? 'block' : 'none';
+        await saveFeishuConfig({ enabled: toggle.checked });
+    });
+
+    // 保存
+    if (saveBtn) {
+        saveBtn.addEventListener('click', async () => {
+            const updates = {};
+            if (appIdInput) updates.app_id = appIdInput.value.trim();
+            if (appSecretInput && appSecretInput.value) updates.app_secret = appSecretInput.value.trim();
+            updates.enabled = true;
+            await saveFeishuConfig(updates);
+            showToast('飞书配置已保存，正在连接...', 'success');
+        });
+    }
+
+    // 测试
+    if (testBtn) {
+        testBtn.addEventListener('click', async () => {
+            try {
+                const resp = await fetch('/api/feishu/test', { method: 'POST' });
+                const data = await resp.json();
+                if (data.status === 'ok') {
+                    showToast(data.message || '连接成功', 'success');
+                } else {
+                    showToast(data.message || '连接失败', 'error');
+                }
+            } catch (e) {
+                showToast('请求失败', 'error');
+            }
+        });
+    }
+}
+
+async function saveFeishuConfig(updates) {
+    try {
+        await fetch('/api/feishu/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updates),
+        });
     } catch (e) {}
 }
 
@@ -906,6 +1104,75 @@ style.textContent = `
         background: var(--blue-primary);
     }
 
+    .push-setup {
+        margin-top: 10px;
+        padding: 10px;
+        background: rgba(255,255,255,0.03);
+        border-radius: 8px;
+        border: 1px solid rgba(212,167,55,0.1);
+    }
+    .push-uid-row {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 8px;
+    }
+    .push-uid-row input {
+        flex: 1;
+        background: rgba(0,0,0,0.3);
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 6px;
+        padding: 6px 10px;
+        color: var(--text-primary);
+        font-size: 13px;
+        font-family: var(--font-mono);
+    }
+    .push-btn {
+        background: rgba(74,158,255,0.2);
+        border: 1px solid rgba(74,158,255,0.3);
+        color: var(--blue-primary);
+        padding: 6px 14px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 12px;
+        transition: all 0.2s;
+    }
+    .push-btn:hover { background: rgba(74,158,255,0.35); }
+    .push-btn-secondary {
+        background: rgba(255,255,255,0.05);
+        border-color: rgba(255,255,255,0.15);
+        color: var(--text-secondary);
+    }
+    .push-btn-secondary:hover { background: rgba(255,255,255,0.1); }
+    .push-hint {
+        font-size: 11px;
+        color: var(--text-tertiary);
+        margin: 6px 0;
+        line-height: 1.5;
+    }
+    .push-qrcode-area {
+        text-align: center;
+        margin: 8px 0;
+    }
+    .push-qrcode-area img {
+        max-width: 180px;
+        border-radius: 8px;
+        border: 1px solid rgba(255,255,255,0.1);
+    }
+    .push-report-time {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 0;
+    }
+    .push-report-time input[type="time"] {
+        background: rgba(0,0,0,0.3);
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 6px;
+        padding: 4px 8px;
+        color: var(--text-primary);
+        font-family: var(--font-mono);
+    }
+
     /* 快捷键帮助 */
     .shortcuts-list {
         display: flex;
@@ -1332,6 +1599,8 @@ if (Notification.permission === 'default') {
 
 // ===== 公共面板操作 =====
 
+let _panelVersion = 0;
+
 function openDetailPanel(loadingText) {
     const panel = document.getElementById('detail-panel');
     const content = document.getElementById('detail-content');
@@ -1339,6 +1608,7 @@ function openDetailPanel(loadingText) {
         console.error('[openDetailPanel] panel or content not found');
         return null;
     }
+    _panelVersion++;
     panel.style.display = '';  // Clear any inline display override
     panel.scrollTop = 0;
     panel.classList.add('active');
@@ -1347,6 +1617,10 @@ function openDetailPanel(loadingText) {
     setTimeout(() => panel.classList.remove('panel-enter'), 400);
     content.innerHTML = createChartLoading(loadingText || '加载中...');
     return content;
+}
+
+function getPanelVersion() {
+    return _panelVersion;
 }
 
 function createChartLoading(text) {
