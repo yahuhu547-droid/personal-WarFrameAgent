@@ -5,10 +5,21 @@
 
 const API_BASE = '';
 
+// HTML/JS 转义工具函数
+function escapeJsString(str) {
+    return String(str)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/"/g, '\\"')
+        .replace(/</g, '\\x3c')
+        .replace(/>/g, '\\x3e');
+}
+
 // ===== API 调用函数 =====
 
 async function fetchMemory() {
     const res = await fetch(`${API_BASE}/api/memory`);
+    if (!res.ok) return { error: `HTTP ${res.status}` };
     return await res.json();
 }
 
@@ -18,6 +29,7 @@ async function sendChat(message) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message })
     });
+    if (!res.ok) return { error: `HTTP ${res.status}` };
     return await res.json();
 }
 
@@ -27,6 +39,7 @@ async function addFavorite(itemId) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ item_id: itemId })
     });
+    if (!res.ok) return { error: `HTTP ${res.status}` };
     return await res.json();
 }
 
@@ -36,6 +49,7 @@ async function removeFavorite(itemId) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ item_id: itemId })
     });
+    if (!res.ok) return { error: `HTTP ${res.status}` };
     return await res.json();
 }
 
@@ -45,6 +59,7 @@ async function addAlert(itemId, direction, price, note = '') {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ item_id: itemId, direction, price, note })
     });
+    if (!res.ok) return { error: `HTTP ${res.status}` };
     return await res.json();
 }
 
@@ -54,6 +69,7 @@ async function removeAlertApi(itemId, direction, price) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ item_id: itemId, direction, price })
     });
+    if (!res.ok) return { error: `HTTP ${res.status}` };
     return await res.json();
 }
 
@@ -63,16 +79,21 @@ async function compareItems(items) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ items })
     });
+    if (!res.ok) return { error: `HTTP ${res.status}` };
     return await res.json();
 }
 
 // ===== 通知系统 =====
 
+let _audioCtx = null;
 function playNotificationSound() {
     try {
         const settings = JSON.parse(localStorage.getItem('warframe_notify_settings') || '{}');
         if (settings.soundAlert === false) return;
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        if (!_audioCtx || _audioCtx.state === 'closed') {
+            _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        const ctx = _audioCtx;
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.connect(gain);
@@ -183,7 +204,8 @@ function setupWebSocket() {
     }
 
     try {
-        const ws = new WebSocket(`ws://${location.host}/ws/notifications`);
+        const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${wsProto}//${location.host}/ws/notifications`);
 
         ws.onopen = () => {
             console.log('通知 WebSocket 已连接');
@@ -192,7 +214,13 @@ function setupWebSocket() {
         };
 
         ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
+            let data;
+            try {
+                data = JSON.parse(event.data);
+            } catch (e) {
+                console.warn('通知 WebSocket 消息解析失败:', e);
+                return;
+            }
             if (data.type === 'alert') {
                 const msg = `${data.item}: 当前 ${data.current_price}p (${data.direction} ${data.price}p)`;
                 showNotification(msg, 'warning');
@@ -553,7 +581,11 @@ async function initPushSettings() {
             const resp = await fetch('/api/push/qrcode');
             const data = await resp.json();
             if (data.status === 'ok' && data.url) {
-                qrArea.innerHTML = `<img src="${data.url}" alt="扫码关注 WxPusher">`;
+                const img = document.createElement('img');
+                img.src = data.url;
+                img.alt = '扫码关注 WxPusher';
+                qrArea.innerHTML = '';
+                qrArea.appendChild(img);
             }
         } catch (e) {}
     }
@@ -1627,7 +1659,7 @@ function createChartLoading(text) {
     return `
         <div class="chart-loading">
             <div class="loading"><div class="loading-dot"></div><div class="loading-dot"></div><div class="loading-dot"></div></div>
-            <div class="loading-text">${text || '加载价格数据...'}</div>
+            <div class="loading-text">${escapeHtml(text || '加载价格数据...')}</div>
         </div>
     `;
 }
@@ -1659,12 +1691,13 @@ document.addEventListener('click', function(e) {
 });
 
 function createChartEmpty(itemId) {
+    const safeId = escapeJsString(itemId);
     return `
         <div class="chart-empty">
             <div class="empty-icon">📊</div>
             <div class="empty-title">暂无价格数据</div>
-            <div class="empty-subtitle">查询 "${itemId}" 后将显示价格历史</div>
-            <button class="empty-btn" onclick="queryItemPrice('${itemId}')"><span>立即查询</span></button>
+            <div class="empty-subtitle">查询 "${escapeHtml(itemId)}" 后将显示价格历史</div>
+            <button class="empty-btn" onclick="queryItemPrice('${safeId}')"><span>立即查询</span></button>
         </div>
     `;
 }
@@ -1674,7 +1707,7 @@ function createChartError(message) {
         <div class="chart-error">
             <div class="error-icon">⚠️</div>
             <div class="error-title">加载失败</div>
-            <div class="error-message">${message}</div>
+            <div class="error-message">${escapeHtml(message)}</div>
         </div>
     `;
 }
@@ -1775,6 +1808,7 @@ async function loadWatchlist() {
         const data = await res.json();
         const watchlist = data.watchlist || [];
         const header = list.previousElementSibling;
+        list.textContent = '';
 
         if (watchlist.length === 0) {
             list.classList.add('collapsed');
@@ -1785,7 +1819,6 @@ async function loadWatchlist() {
         list.classList.remove('collapsed');
         if (header) header.classList.remove('collapsed');
 
-        list.innerHTML = '';
         watchlist.forEach((watch, index) => {
             const div = document.createElement('div');
             div.className = 'list-item watch-item';
@@ -1804,19 +1837,39 @@ async function loadWatchlist() {
                 'all': '全部'
             }[watch.content] || watch.content;
 
-            div.innerHTML = `
-                <div class="item-header">
-                    <span class="item-name">${watch.item_name}</span>
-                    <span class="item-badge">${frequencyText}</span>
-                </div>
-                <div class="item-sub">${watch.time} | ${contentText}</div>
-                <div class="item-actions">
-                    <button class="action-btn danger" onclick="event.stopPropagation(); removeWatchItem('${watch.item_id}')">
-                        <span>移除</span>
-                    </button>
-                </div>
-            `;
+            const headerRow = document.createElement('div');
+            headerRow.className = 'item-header';
 
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'item-name';
+            nameSpan.textContent = watch.item_name;
+
+            const badgeSpan = document.createElement('span');
+            badgeSpan.className = 'item-badge';
+            badgeSpan.textContent = frequencyText;
+
+            headerRow.append(nameSpan, badgeSpan);
+            div.appendChild(headerRow);
+
+            const subDiv = document.createElement('div');
+            subDiv.className = 'item-sub';
+            subDiv.textContent = `${watch.time} | ${contentText}`;
+            div.appendChild(subDiv);
+
+            const actionsDiv = document.createElement('div');
+            actionsDiv.className = 'item-actions';
+
+            const removeButton = document.createElement('button');
+            removeButton.type = 'button';
+            removeButton.className = 'action-btn danger';
+            removeButton.appendChild(document.createElement('span')).textContent = '移除';
+            removeButton.addEventListener('click', (event) => {
+                event.stopPropagation();
+                removeWatchItem(watch.item_id);
+            });
+
+            actionsDiv.appendChild(removeButton);
+            div.appendChild(actionsDiv);
             list.appendChild(div);
         });
     } catch (err) {

@@ -16,7 +16,7 @@ let debounceTimer;
 let isTyping = false;
 let chatWs = null;
 let currentStreamMsg = null;
-wsReconnectDelay = 1000;
+let chatReconnectDelay = 1000;
 let wsReconnectTimer = null;
 
 // ===== Markdown 配置 =====
@@ -59,7 +59,8 @@ function saveChatHistory() {
                      msg.classList.contains('agent') ? 'agent' : 'system';
         const content = msg.querySelector('.message-content');
         if (content) {
-            messages.push({ role, text: content.textContent || content.innerText });
+            const raw = content.getAttribute('data-raw');
+            messages.push({ role, text: raw || content.textContent || content.innerText });
         }
     });
     const recent = messages.slice(-MAX_HISTORY);
@@ -116,6 +117,7 @@ function addChatMessage(role, text, animate = true) {
     content.className = 'message-content';
 
     if (role === 'agent') {
+        content.setAttribute('data-raw', text);
         content.innerHTML = renderMarkdown(text);
         detectWhisperCommands(content);
     } else {
@@ -283,43 +285,52 @@ function rateMessage(ratingDiv, score, replyText) {
 function typewriterEffect(element, text) {
     if (isTyping) return;
     isTyping = true;
-    element.innerHTML = '';
-    let i = 0;
     const rendered = renderMarkdown(text);
-
-    function type() {
-        if (i < rendered.length) {
-            const chunk = rendered.substring(0, i + 1);
-            element.innerHTML = chunk;
-            i++;
-            setTimeout(type, 8);
-        } else {
-            element.innerHTML = rendered;
-            detectWhisperCommands(element);
-            isTyping = false;
-        }
-    }
-    type();
+    element.innerHTML = rendered;
+    detectWhisperCommands(element);
+    isTyping = false;
 }
 
 function scrollToBottom() {
     chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
+function scrollMessageIntoView(messageEl) {
+    if (!messageEl) {
+        scrollToBottom();
+        return;
+    }
+
+    const containerRect = chatMessages.getBoundingClientRect();
+    const messageRect = messageEl.getBoundingClientRect();
+    const overshoot = messageRect.bottom - containerRect.bottom;
+
+    if (overshoot > 0) {
+        chatMessages.scrollTop += overshoot + 12;
+    }
+}
+
 // ===== WebSocket 流式对话 =====
 
 function ensureChatWs() {
-    if (chatWs && chatWs.readyState === WebSocket.OPEN) return chatWs;
+    if (chatWs && (chatWs.readyState === WebSocket.OPEN || chatWs.readyState === WebSocket.CONNECTING)) return chatWs;
 
-    chatWs = new WebSocket(`ws://${location.host}/ws/chat`);
+    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    chatWs = new WebSocket(`${wsProto}//${location.host}/ws/chat`);
 
     chatWs.onopen = () => {
         console.log('Chat WebSocket 已连接');
-        wsReconnectDelay = 1000;
+        chatReconnectDelay = 1000;
     };
 
     chatWs.onmessage = (event) => {
-        const data = JSON.parse(event.data);
+        let data;
+        try {
+            data = JSON.parse(event.data);
+        } catch (e) {
+            console.warn('WebSocket 消息解析失败:', e);
+            return;
+        }
 
         if (data.status === 'processing') {
             if (currentStreamMsg) {
@@ -337,7 +348,7 @@ function ensureChatWs() {
                 content.setAttribute('data-raw', updated);
                 content.innerHTML = renderMarkdown(updated);
             }
-            scrollToBottom();
+            scrollMessageIntoView(currentStreamMsg);
             return;
         }
 
@@ -381,10 +392,10 @@ function ensureChatWs() {
     chatWs.onclose = () => {
         isTyping = false;
         currentStreamMsg = null;
-        console.log('Chat WebSocket 已断开，' + wsReconnectDelay + 'ms 后重连');
+        console.log('Chat WebSocket 已断开，' + chatReconnectDelay + 'ms 后重连');
         clearTimeout(wsReconnectTimer);
-        wsReconnectTimer = setTimeout(ensureChatWs, wsReconnectDelay);
-        wsReconnectDelay = Math.min(wsReconnectDelay * 2, 30000);
+        wsReconnectTimer = setTimeout(ensureChatWs, chatReconnectDelay);
+        chatReconnectDelay = Math.min(chatReconnectDelay * 2, 30000);
     };
 
     chatWs.onerror = (err) => {
@@ -927,11 +938,11 @@ function renderAliasList(aliases) {
     list.innerHTML = aliases.map(a => `
         <div class="alias-item">
             <div class="alias-info">
-                <span class="alias-name">${a.name}</span>
+                <span class="alias-name">${escapeHtml(a.name)}</span>
                 <span class="alias-arrow">→</span>
-                <span class="alias-display">${a.display || a.item_id}</span>
+                <span class="alias-display">${escapeHtml(a.display || a.item_id)}</span>
             </div>
-            <button class="alias-remove-btn" onclick="removeAlias('${a.name.replace(/'/g, "\\'")}')">&times;</button>
+            <button class="alias-remove-btn" onclick="removeAlias('${escapeJsString(a.name)}')">&times;</button>
         </div>
     `).join('');
 }
@@ -1096,7 +1107,7 @@ function showItemNotFound(query) {
                 html += '<div class="suggestions-hint">你是不是想找：</div>';
                 html += '<div class="suggestion-buttons">';
                 data.suggestions.forEach(s => {
-                    html += `<button class="suggestion-btn" onclick="queryItemPrice('${s.item_id}')">${escapeHtml(s.name)}</button>`;
+                    html += `<button class="suggestion-btn" onclick="queryItemPrice('${escapeJsString(s.item_id)}')">${escapeHtml(s.name)}</button>`;
                 });
                 html += '</div>';
             }
@@ -1104,7 +1115,7 @@ function showItemNotFound(query) {
             html += `
                 <div class="add-alias-hint">
                     <span>如果是你熟悉的叫法，可以</span>
-                    <button class="alias-link-btn" onclick="openAliasModal('${escapeHtml(query)}')">添加自定义别名</button>
+                    <button class="alias-link-btn" onclick="openAliasModal('${escapeJsString(query)}')">添加自定义别名</button>
                 </div>
             `;
 
@@ -1115,7 +1126,7 @@ function showItemNotFound(query) {
                 <div class="not-found-hint">未找到「${escapeHtml(query)}」</div>
                 <div class="add-alias-hint">
                     <span>如果是你熟悉的叫法，可以</span>
-                    <button class="alias-link-btn" onclick="openAliasModal('${escapeHtml(query)}')">添加自定义别名</button>
+                    <button class="alias-link-btn" onclick="openAliasModal('${escapeJsString(query)}')">添加自定义别名</button>
                 </div>
             `;
         });

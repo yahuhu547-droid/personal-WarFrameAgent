@@ -118,8 +118,8 @@ def analyze_prime_investment(
         parts_buy_total += buy_price
         parts_sell_total += sell_price
 
-        all_supply += sum(1 for o in orders if o.get("order_type") == "sell")
-        all_demand += sum(1 for o in orders if o.get("order_type") == "buy")
+        all_supply += sum(1 for o in orders if (o.get("order_type") or o.get("type")) == "sell")
+        all_demand += sum(1 for o in orders if (o.get("order_type") or o.get("type")) == "buy")
 
         part_details.append({
             "key": part_key,

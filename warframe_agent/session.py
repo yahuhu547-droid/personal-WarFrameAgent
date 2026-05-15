@@ -10,6 +10,9 @@ FOLLOWUP_TERMS = [
     "那", "呢", "散件", "部件", "比昨天", "比上次",
     "还有", "其他的", "怎么样了", "现在呢", "多少了",
     "涨了吗", "跌了吗", "变了吗",
+    "返回", "帮我看", "有没有", "只要",
+    "哪个好", "哪些好", "推荐", "值不值", "划算吗",
+    "能买吗", "要买吗", "入手吗", "出吗", "卖吗",
 ]
 
 
@@ -18,6 +21,7 @@ class SessionContext:
     last_item_ids: list[str] = field(default_factory=list)
     last_query_type: str | None = None
     last_intent: str | None = None
+    last_riven_query: object | None = None
     history: list[tuple[str, str]] = field(default_factory=list)
 
     def update(

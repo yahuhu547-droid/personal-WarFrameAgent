@@ -52,12 +52,13 @@ async function showPriceChart(itemId, range) {
         }
 
         // 时间范围选择器
+        const safeId = escapeJsString(itemId);
         html += `
             <div class="chart-range-selector">
-                <button class="range-btn ${currentRange === '24h' ? 'active' : ''}" onclick="showPriceChart('${itemId}', '24h')">24h</button>
-                <button class="range-btn ${currentRange === '7d' ? 'active' : ''}" onclick="showPriceChart('${itemId}', '7d')">7天</button>
-                <button class="range-btn ${currentRange === '30d' ? 'active' : ''}" onclick="showPriceChart('${itemId}', '30d')">30天</button>
-                <button class="range-btn ${currentRange === 'all' ? 'active' : ''}" onclick="showPriceChart('${itemId}', 'all')">全部</button>
+                <button class="range-btn ${currentRange === '24h' ? 'active' : ''}" onclick="showPriceChart('${safeId}', '24h')">24h</button>
+                <button class="range-btn ${currentRange === '7d' ? 'active' : ''}" onclick="showPriceChart('${safeId}', '7d')">7天</button>
+                <button class="range-btn ${currentRange === '30d' ? 'active' : ''}" onclick="showPriceChart('${safeId}', '30d')">30天</button>
+                <button class="range-btn ${currentRange === 'all' ? 'active' : ''}" onclick="showPriceChart('${safeId}', 'all')">全部</button>
             </div>
         `;
 
@@ -100,6 +101,7 @@ window.showPriceChart = showPriceChart;
 async function getItemDetail(itemId) {
     try {
         const res = await fetch(`/api/item_detail/${itemId}`);
+        if (!res.ok) return null;
         return await res.json();
     } catch (e) {
         return null;
@@ -109,6 +111,7 @@ async function getItemDetail(itemId) {
 async function getHistoryWithRange(itemId, range) {
     try {
         const res = await fetch(`/api/history/${itemId}?range=${range}`);
+        if (!res.ok) return { snapshots: [] };
         return await res.json();
     } catch (e) {
         return { snapshots: [] };
@@ -122,15 +125,25 @@ function renderItemDetailCard(data) {
     const spreadText = data.spread !== null && data.spread !== undefined ? `${data.spread}p` : '-';
     const trendClass = data.trend === 'up' ? 'trend-up' : data.trend === 'down' ? 'trend-down' : 'trend-stable';
 
+    const safeDisplay = escapeHtml(data.display || data.item_id || '');
+    const safeItemId = escapeHtml(data.item_id || '');
+    const safeTrendDisplay = escapeHtml(data.trend_display || '');
+    const safeItemTypeDisplay = escapeHtml(data.item_type_display || '');
+    const jsSellerName = escapeJsString(data.seller ? data.seller.name : '');
+    const jsDisplay = escapeJsString(data.display || data.item_id || '');
+    const jsWhisperSell = escapeJsString(data.whisper_sell || '');
+    const jsWhisperBuy = escapeJsString(data.whisper_buy || '');
+    const jsItemId = escapeJsString(data.item_id || '');
+
     let card = `
         <div class="item-detail-card">
             <div class="item-detail-header">
-                <h3 class="item-detail-name">${data.display || data.item_id}</h3>
-                ${data.trend_display ? `<span class="trend-badge ${trendClass}">${data.trend_display}</span>` : ''}
+                <h3 class="item-detail-name">${safeDisplay}</h3>
+                ${data.trend_display ? `<span class="trend-badge ${trendClass}">${safeTrendDisplay}</span>` : ''}
                 ${data.item_type ? `
                 <div class="item-type-badge ${data.item_type}">
                     <span class="type-icon">${data.item_type === 'arcane' ? '⚡' : '🔧'}</span>
-                    <span class="type-text">${data.item_type_display}</span>
+                    <span class="type-text">${safeItemTypeDisplay}</span>
                     <span class="type-rank">Rank ${data.max_rank}/${data.max_rank}</span>
                 </div>
                 ` : ''}
@@ -139,8 +152,8 @@ function renderItemDetailCard(data) {
                 <div class="price-block sell">
                     <div class="price-label">最低卖价</div>
                     <div class="price-value">${data.sell_price !== null ? data.sell_price + 'p' : '暂无'}</div>
-                    ${data.seller ? `<div class="price-player">${data.seller.name} (信誉 ${data.seller.reputation})
-                        <button class="copy-whisper-btn" onclick="copyWhisperMessage('${data.seller.name}', '${data.display || data.item_id}', ${data.sell_price})" title="复制私聊消息">📋 复制私聊</button>
+                    ${data.seller ? `<div class="price-player">${escapeHtml(data.seller.name)} (信誉 ${data.seller.reputation})
+                        <button class="copy-whisper-btn" onclick="copyWhisperMessage('${jsSellerName}', '${jsDisplay}', ${data.sell_price})" title="复制私聊消息">📋 复制私聊</button>
                     </div>` : ''}
                 </div>
                 <div class="price-block spread ${spreadClass}">
@@ -150,7 +163,7 @@ function renderItemDetailCard(data) {
                 <div class="price-block buy">
                     <div class="price-label">最高收价</div>
                     <div class="price-value">${data.buy_price !== null ? data.buy_price + 'p' : '暂无'}</div>
-                    ${data.buyer ? `<div class="price-player">${data.buyer.name} (信誉 ${data.buyer.reputation})</div>` : ''}
+                    ${data.buyer ? `<div class="price-player">${escapeHtml(data.buyer.name)} (信誉 ${data.buyer.reputation})</div>` : ''}
                 </div>
             </div>
     `;
@@ -206,11 +219,11 @@ function renderItemDetailCard(data) {
                 <div class="rank-details">
                     <div class="rank-row">
                         <span class="rank-label">类型</span>
-                        <span class="rank-value" style="color: ${rarityColor}">${data.item_type_display}</span>
+                        <span class="rank-value" style="color: ${rarityColor}">${safeItemTypeDisplay}</span>
                     </div>
                     <div class="rank-row">
                         <span class="rank-label">稀有度</span>
-                        <span class="rank-value" style="color: ${rarityColor}">${rarityText}</span>
+                        <span class="rank-value" style="color: ${rarityColor}">${escapeHtml(rarityText)}</span>
                     </div>
                     <div class="rank-row">
                         <span class="rank-label">最大等级</span>
@@ -249,16 +262,16 @@ function renderItemDetailCard(data) {
 
     card += `
             <div class="item-detail-actions">
-                <button class="detail-action-btn" onclick="copyToClipboard('${data.whisper_sell || ''}')">
+                <button class="detail-action-btn" onclick="copyToClipboard('${jsWhisperSell}')">
                     复制购买私聊
                 </button>
-                <button class="detail-action-btn" onclick="copyToClipboard('${data.whisper_buy || ''}')">
+                <button class="detail-action-btn" onclick="copyToClipboard('${jsWhisperBuy}')">
                     复制出售私聊
                 </button>
-                <button class="detail-action-btn" onclick="addFavorite('${data.item_id}').then(() => { showToast('已收藏', 'success'); loadSidebar(); })">
+                <button class="detail-action-btn" onclick="addFavorite('${jsItemId}').then(() => { showToast('已收藏', 'success'); loadSidebar(); })">
                     收藏
                 </button>
-                <button class="detail-action-btn share-btn" onclick="shareItemCard('${data.item_id}', '${data.display || data.item_id}', ${data.sell_price || 'null'}, ${data.buy_price || 'null'}, ${data.spread || 'null'})">
+                <button class="detail-action-btn share-btn" onclick="shareItemCard('${jsItemId}', '${jsDisplay}', ${data.sell_price || 'null'}, ${data.buy_price || 'null'}, ${data.spread || 'null'})">
                     分享
                 </button>
             </div>
@@ -423,19 +436,23 @@ function renderChartStats(snapshots) {
 
     if (sellPrices.length > 0) {
         const avg = Math.round(sellPrices.reduce((a, b) => a + b, 0) / sellPrices.length);
+        const sellMin = sellPrices.reduce((a, b) => a < b ? a : b);
+        const sellMax = sellPrices.reduce((a, b) => a > b ? a : b);
         stats.push(`
             <div class="stat-item"><div class="stat-label">平均卖价</div><div class="stat-value">${avg}p</div></div>
-            <div class="stat-item"><div class="stat-label">最低卖价</div><div class="stat-value min">${Math.min(...sellPrices)}p</div></div>
-            <div class="stat-item"><div class="stat-label">最高卖价</div><div class="stat-value max">${Math.max(...sellPrices)}p</div></div>
+            <div class="stat-item"><div class="stat-label">最低卖价</div><div class="stat-value min">${sellMin}p</div></div>
+            <div class="stat-item"><div class="stat-label">最高卖价</div><div class="stat-value max">${sellMax}p</div></div>
         `);
     }
 
     if (buyPrices.length > 0) {
         const avg = Math.round(buyPrices.reduce((a, b) => a + b, 0) / buyPrices.length);
+        const buyMin = buyPrices.reduce((a, b) => a < b ? a : b);
+        const buyMax = buyPrices.reduce((a, b) => a > b ? a : b);
         stats.push(`
             <div class="stat-item"><div class="stat-label">平均收价</div><div class="stat-value">${avg}p</div></div>
-            <div class="stat-item"><div class="stat-label">最低收价</div><div class="stat-value min">${Math.min(...buyPrices)}p</div></div>
-            <div class="stat-item"><div class="stat-label">最高收价</div><div class="stat-value max">${Math.max(...buyPrices)}p</div></div>
+            <div class="stat-item"><div class="stat-label">最低收价</div><div class="stat-value min">${buyMin}p</div></div>
+            <div class="stat-item"><div class="stat-label">最高收价</div><div class="stat-value max">${buyMax}p</div></div>
         `);
     }
 
@@ -1105,7 +1122,7 @@ const COMPARE_COLORS = [
 ];
 
 let compareChart = null;
-var compareItems = ['', ''];
+let compareItemIds = ['', ''];
 let compareRange = '7d';
 
 function showComparePanel() {
@@ -1124,14 +1141,14 @@ function renderCompareUI() {
             <div class="compare-items-selector" id="compare-items-selector">
     `;
 
-    compareItems.forEach((item, index) => {
+    compareItemIds.forEach((item, index) => {
         html += `
             <div class="compare-item-row">
                 <input type="text" class="compare-item-input" placeholder="输入物品名称..."
-                    value="${item}" data-index="${index}"
+                    value="${escapeHtml(item)}" data-index="${index}"
                     oninput="onCompareInputChange(this, ${index})">
                 <div class="compare-suggestions" id="compare-suggestions-${index}" style="display:none; position:absolute;"></div>
-                ${compareItems.length > 2 ? `
+                ${compareItemIds.length > 2 ? `
                 <button class="compare-remove-btn" onclick="removeCompareItem(${index})">×</button>
                 ` : ''}
             </div>
@@ -1139,7 +1156,7 @@ function renderCompareUI() {
     });
 
     html += `
-                ${compareItems.length < 5 ? `
+                ${compareItemIds.length < 5 ? `
                 <button class="compare-add-btn" onclick="addCompareItem()">+ 添加物品</button>
                 ` : ''}
             </div>
@@ -1158,7 +1175,7 @@ function renderCompareUI() {
     content.innerHTML = html;
 
     // 绑定输入建议事件
-    compareItems.forEach((_, index) => {
+    compareItemIds.forEach((_, index) => {
         const input = document.querySelector(`.compare-item-input[data-index="${index}"]`);
         if (input) {
             let debounce;
@@ -1171,13 +1188,13 @@ function renderCompareUI() {
 }
 
 function addCompareItem() {
-    if (compareItems.length >= 5) return;
-    compareItems.push('');
+    if (compareItemIds.length >= 5) return;
+    compareItemIds.push('');
     renderCompareUI();
 }
 
 function removeCompareItem(index) {
-    compareItems.splice(index, 1);
+    compareItemIds.splice(index, 1);
     renderCompareUI();
 }
 
@@ -1190,7 +1207,7 @@ function setCompareRange(range) {
 
 let compareDebounce = null;
 function onCompareInputChange(input, index) {
-    compareItems[index] = input.value;
+    compareItemIds[index] = input.value;
     clearTimeout(compareDebounce);
     compareDebounce = setTimeout(() => showCompareSuggestions(input, index), 300);
 }
@@ -1205,6 +1222,7 @@ async function showCompareSuggestions(input, index) {
 
     try {
         const res = await fetch(`/api/suggest?q=${encodeURIComponent(query)}`);
+        if (!res.ok) return;
         const data = await res.json();
         if (!data.suggestions || data.suggestions.length === 0) {
             sugDiv.style.display = 'none';
@@ -1212,7 +1230,7 @@ async function showCompareSuggestions(input, index) {
         }
 
         sugDiv.innerHTML = data.suggestions.map(s =>
-            `<div class="suggestion-item" onclick="selectCompareItem(${index}, ${JSON.stringify(s)})">${s}</div>`
+            `<div class="suggestion-item" onclick="selectCompareItem(${index}, '${escapeJsString(s)}')">${escapeHtml(s)}</div>`
         ).join('');
         sugDiv.style.display = 'block';
         sugDiv.style.cssText = 'display:block; position:absolute; background:var(--glass-bg); border:var(--glass-border); border-radius:8px; max-height:150px; overflow-y:auto; z-index:10; width:100%;';
@@ -1222,7 +1240,7 @@ async function showCompareSuggestions(input, index) {
 }
 
 function selectCompareItem(index, itemId) {
-    compareItems[index] = itemId;
+    compareItemIds[index] = itemId;
     const input = document.querySelector(`.compare-item-input[data-index="${index}"]`);
     if (input) input.value = itemId;
     const sugDiv = document.getElementById(`compare-suggestions-${index}`);
@@ -1230,7 +1248,7 @@ function selectCompareItem(index, itemId) {
 }
 
 async function runCompare() {
-    const validItems = compareItems.filter(i => i.trim() !== '');
+    const validItems = compareItemIds.filter(i => i.trim() !== '');
     if (validItems.length < 2) {
         showToast('请至少输入2个物品', 'warning');
         return;
@@ -1245,6 +1263,10 @@ async function runCompare() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ item_ids: validItems, range: compareRange })
         });
+        if (!res.ok) {
+            chartArea.innerHTML = '<div class="chart-empty"><p>查询失败</p></div>';
+            return;
+        }
         const data = await res.json();
 
         if (!data.items || Object.keys(data.items).length === 0) {

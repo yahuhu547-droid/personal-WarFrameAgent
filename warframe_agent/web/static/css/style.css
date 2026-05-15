@@ -191,6 +191,7 @@ body {
 /* ===== 主聊天区域 ===== */
 .chat-area {
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--bg-primary);
@@ -219,6 +220,7 @@ body {
   padding: var(--space-lg) var(--space-xl);
   border-bottom: var(--glass-border);
   height: var(--header-height);
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   position: relative;
@@ -241,6 +243,7 @@ body {
 /* ===== 消息区域 ===== */
 .chat-messages {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: var(--space-xl);
   display: flex;
@@ -284,7 +287,7 @@ body {
   text-align: right;
   animation: messageInUser var(--duration-normal) var(--ease-spring);
   position: relative;
-  overflow: hidden;
+  overflow: clip;
 }
 
 /* 用户消息顶部能量线 */
@@ -307,7 +310,7 @@ body {
   margin-right: auto;
   animation: messageInAgent var(--duration-normal) var(--ease-spring);
   position: relative;
-  overflow: hidden;
+  overflow: clip;
 }
 
 /* Agent 消息顶部能量线 */
@@ -335,6 +338,7 @@ body {
 /* ===== 输入区域 ===== */
 .chat-input-area {
   display: flex;
+  flex-shrink: 0;
   padding: var(--space-lg) var(--space-xl);
   background: var(--glass-bg);
   backdrop-filter: blur(var(--glass-blur));
@@ -432,6 +436,7 @@ body {
 /* ===== 快捷操作 ===== */
 .quick-actions {
   display: flex;
+  flex-shrink: 0;
   gap: var(--space-sm);
   padding: 0 var(--space-xl) var(--space-lg);
   background: transparent;

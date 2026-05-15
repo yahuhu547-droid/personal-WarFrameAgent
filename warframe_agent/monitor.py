@@ -146,6 +146,12 @@ class PriceMonitor:
             self._notifications.clear()
             return result
 
+    def drain_watch_notifications(self) -> list:
+        with self._lock:
+            result = list(self._watch_notifications)
+            self._watch_notifications.clear()
+            return result
+
     def scan_once(self) -> ScanResult:
         from .market import best_buyers
         memory = AgentMemory.load(self.memory_path)
@@ -249,9 +255,9 @@ class PriceMonitor:
                 except Exception as exc:
                     result.errors.append(f"anomaly check {item_id}: {exc}")
         # Phase 4: 目标驱动扫描（规则引擎规划）
+        items = self._load_items()
         for goal in memory.active_goals_list():
             try:
-                items = self._load_items()
                 plan = plan_for_goal(goal)
                 goal_results = execute_plan(plan, items, self.order_fetcher)
                 for r in goal_results:
@@ -305,7 +311,7 @@ class PriceMonitor:
             # 每周推送：周一 + 在计划时间附近 + 本周还没推送
             iso_week = now.isocalendar()[1]
             week_key = f"W{iso_week}"
-            if now.weekday() == 0 and in_window and week_key not in last_notified:
+            if now.weekday() == 0 and in_window and week_key != last_notified:
                 return True
         return False
 
@@ -495,9 +501,12 @@ class PriceMonitor:
                     display_item_name(item_id) for item_id in event.items_affected[:3]
                 ) if event.items_affected else "未知物品"
                 push = ProactivePush(
-                    title="Prime Vault 回归",
-                    body=f"{item_text} 已回归！建议关注相关遗物和部件价格变化，回归初期价格通常会有波动。",
+                    item_id=event.items_affected[0] if event.items_affected else "unknown",
+                    item_display=item_text,
+                    push_type="opportunity",
                     priority=2,
+                    message=f"{item_text} 已回归！建议关注相关遗物和部件价格变化，回归初期价格通常会有波动。",
+                    action_suggestion="watch",
                 )
                 try:
                     self.on_proactive_push(push)
@@ -509,9 +518,12 @@ class PriceMonitor:
             if event.event_type == "prime_access" and event.description not in self._prime_access_pushed:
                 self._prime_access_pushed.add(event.description)
                 push = ProactivePush(
-                    title="Prime Access 上线",
-                    body="新 Prime Access 已上线！新 Prime 物品价格波动期，建议观望 1-2 周再入手。同类旧 Prime 套装可能短期下跌。",
+                    item_id="prime_access",
+                    item_display="Prime Access",
+                    push_type="recommendation",
                     priority=2,
+                    message="新 Prime Access 已上线！新 Prime 物品价格波动期，建议观望 1-2 周再入手。同类旧 Prime 套装可能短期下跌。",
+                    action_suggestion="watch",
                 )
                 try:
                     self.on_proactive_push(push)
@@ -568,12 +580,15 @@ class PriceMonitor:
             except Exception as exc:
                 logger.debug("价格突变检测失败 %s: %s", item_id, exc)
         return results
+
+    def _check_daily_report(self) -> None:
         """检查是否需要发送每日报告到微信。"""
         from .push import (
             PushConfig, WxPusher, should_send_daily_report,
             format_buyers_with_whisper, format_sellers_with_whisper,
         )
         from .market import best_sellers, best_buyers
+        from .names import display_item_name
 
         cfg = PushConfig.load()
         if not should_send_daily_report(cfg):
@@ -592,11 +607,12 @@ class PriceMonitor:
                     orders = self.order_fetcher(item_id)
                     sellers = best_sellers(orders, limit=3)
                     buyers = best_buyers(orders, limit=3)
+                    item_name = display_item_name(item_id)
                     if buyers:
-                        report_lines.append(format_buyers_with_whisper(item_id, item_id, buyers))
+                        report_lines.append(format_buyers_with_whisper(item_name, item_id, buyers))
                         report_lines.append("")
                     if sellers:
-                        report_lines.append(format_sellers_with_whisper(item_id, item_id, sellers))
+                        report_lines.append(format_sellers_with_whisper(item_name, item_id, sellers))
                         report_lines.append("")
                     has_data = True
                 except Exception:

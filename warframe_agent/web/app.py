@@ -5,15 +5,15 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import requests
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Query
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pathlib import Path
 
 from .. import config
@@ -67,7 +67,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Warframe Trading Agent API", lifespan=lifespan)
 
 # 后台任务跟踪
-_bg_tasks: dict[str, dict] = {}  # task_id -> {"status": "running"|"done"|"error", "result": ..., "error": ...}
+import time as _time
+_bg_tasks: dict[str, dict] = {}  # task_id -> {"status": "running"|"done"|"error", "result": ..., "error": ..., "created_at": float}
+_BG_TASK_TTL = 3600  # 1 hour
+
+
+def _evict_old_bg_tasks():
+    """清理超过 TTL 的后台任务，防止内存泄漏。"""
+    now = _time.time()
+    expired = [k for k, v in _bg_tasks.items() if now - v.get("created_at", now) > _BG_TASK_TTL]
+    for k in expired:
+        del _bg_tasks[k]
 
 
 class NoCacheAPIMiddleware(BaseHTTPMiddleware):
@@ -564,8 +574,45 @@ def calculate_ducat_efficiency(platinum_price: int | None, ducat_value: int | No
     }
 
 
-class ChatRequest(BaseModel):
-    message: str
+class ApiRequestModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    @staticmethod
+    def _strip_text(value: str, field_name: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError(f"{field_name} 不能为空")
+        return text
+
+    @staticmethod
+    def _normalize_item_id(value: str) -> str:
+        text = normalize_market_id(value)
+        if not text:
+            raise ValueError("item_id 无效")
+        if len(text) > 120:
+            raise ValueError("item_id 过长")
+        return text
+
+    @staticmethod
+    def _validate_hhmm(value: str) -> str:
+        text = value.strip()
+        if len(text) != 5 or text[2] != ":":
+            raise ValueError("时间格式必须是 HH:MM")
+        hour, minute = text.split(":", 1)
+        if not hour.isdigit() or not minute.isdigit():
+            raise ValueError("时间格式必须是 HH:MM")
+        if not (0 <= int(hour) <= 23 and 0 <= int(minute) <= 59):
+            raise ValueError("时间格式必须是 HH:MM")
+        return text
+
+
+class ChatRequest(ApiRequestModel):
+    message: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, value: str) -> str:
+        return cls._strip_text(value, "message")
 
 
 class ChatResponse(BaseModel):
@@ -579,20 +626,40 @@ class MemoryResponse(BaseModel):
     watchlist: list[dict[str, Any]] = []
 
 
-class FavoriteRequest(BaseModel):
-    item_id: str
+class FavoriteRequest(ApiRequestModel):
+    item_id: str = Field(min_length=1, max_length=120)
+
+    @field_validator("item_id")
+    @classmethod
+    def validate_item_id(cls, value: str) -> str:
+        return cls._normalize_item_id(value)
 
 
-class AlertRequest(BaseModel):
-    item_id: str
-    direction: str
-    price: int
-    note: str = ""
+class AlertRequest(ApiRequestModel):
+    item_id: str = Field(min_length=1, max_length=120)
+    direction: Literal["below", "above"]
+    price: int = Field(ge=1, le=100000)
+    note: str = Field(default="", max_length=200)
+
+    @field_validator("item_id")
+    @classmethod
+    def validate_item_id(cls, value: str) -> str:
+        return cls._normalize_item_id(value)
+
+    @field_validator("note")
+    @classmethod
+    def normalize_note(cls, value: str) -> str:
+        return value.strip()
 
 
-class PreferenceRequest(BaseModel):
-    key: str
-    value: str
+class PreferenceRequest(ApiRequestModel):
+    key: Literal["platform", "crossplay", "max_results"]
+    value: str = Field(min_length=1, max_length=32)
+
+    @field_validator("value")
+    @classmethod
+    def validate_value(cls, value: str) -> str:
+        return cls._strip_text(value, "value")
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -670,15 +737,42 @@ async def remove_alert(request: AlertRequest) -> JSONResponse:
 
 # ===== 微信推送 API =====
 
-class PushConfigRequest(BaseModel):
+class PushConfigRequest(ApiRequestModel):
     enabled: bool | None = None
-    app_token: str | None = None
-    uids: list[str] | None = None
+    app_token: str | None = Field(default=None, max_length=256)
+    uids: list[str] | None = Field(default=None, max_length=20)
     push_alerts: bool | None = None
     push_watches: bool | None = None
     push_proactive: bool | None = None
     push_daily_report: bool | None = None
-    report_time: str | None = None
+    report_time: str | None = Field(default=None, max_length=5)
+
+    @field_validator("app_token", mode="before")
+    @classmethod
+    def normalize_app_token(cls, value: str | None):
+        if value is None:
+            return None
+        return cls._strip_text(value, "app_token")
+
+    @field_validator("uids", mode="before")
+    @classmethod
+    def normalize_uids(cls, value):
+        if value is None:
+            return None
+        cleaned = []
+        for uid in value:
+            text = cls._strip_text(str(uid), "uid")
+            if len(text) > 128:
+                raise ValueError("uid 过长")
+            cleaned.append(text)
+        return cleaned
+
+    @field_validator("report_time", mode="before")
+    @classmethod
+    def normalize_report_time(cls, value: str | None):
+        if value is None:
+            return None
+        return cls._validate_hhmm(value)
 
 
 @app.get("/api/push/config")
@@ -732,7 +826,8 @@ async def get_push_qrcode() -> JSONResponse:
             return JSONResponse({"status": "ok", "url": data["data"]})
         return JSONResponse({"status": "error", "message": data.get("msg", "获取二维码失败")}, status_code=500)
     except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+        logger.error("获取二维码失败: %s", exc)
+        return JSONResponse({"status": "error", "message": "获取二维码失败，请稍后重试"}, status_code=500)
 
 
 @app.post("/api/push/callback")
@@ -768,10 +863,17 @@ async def push_callback(request: Request) -> JSONResponse:
 
 # ===== 飞书机器人 API =====
 
-class FeishuConfigRequest(BaseModel):
+class FeishuConfigRequest(ApiRequestModel):
     enabled: bool | None = None
-    app_id: str | None = None
-    app_secret: str | None = None
+    app_id: str | None = Field(default=None, max_length=128)
+    app_secret: str | None = Field(default=None, max_length=256)
+
+    @field_validator("app_id", "app_secret", mode="before")
+    @classmethod
+    def normalize_secret_fields(cls, value: str | None):
+        if value is None:
+            return None
+        return cls._strip_text(value, "config")
 
 
 @app.get("/api/feishu/config")
@@ -808,17 +910,33 @@ async def test_feishu() -> JSONResponse:
         client = feishu_bot._ensure_client()
         return JSONResponse({"status": "ok", "message": "客户端初始化成功，WebSocket 连接将在后台建立"})
     except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+        logger.error("飞书客户端初始化失败: %s", exc)
+        return JSONResponse({"status": "error", "message": "客户端初始化失败，请检查配置"}, status_code=500)
 
 
 # ===== 关注列表 API =====
 
-class WatchRequest(BaseModel):
-    item_id: str
-    item_name: str
-    frequency: str = "daily"
-    time: str = "09:00"
-    content: str = "top3_buyers"
+class WatchRequest(ApiRequestModel):
+    item_id: str = Field(min_length=1, max_length=120)
+    item_name: str = Field(min_length=1, max_length=120)
+    frequency: Literal["daily", "hourly", "weekly"] = "daily"
+    time: str = Field(default="09:00", max_length=5)
+    content: Literal["top3_sellers", "top3_buyers", "price_change", "all"] = "top3_buyers"
+
+    @field_validator("item_id")
+    @classmethod
+    def validate_item_id(cls, value: str) -> str:
+        return cls._normalize_item_id(value)
+
+    @field_validator("item_name")
+    @classmethod
+    def validate_item_name(cls, value: str) -> str:
+        return cls._strip_text(value, "item_name")
+
+    @field_validator("time")
+    @classmethod
+    def validate_time(cls, value: str) -> str:
+        return cls._validate_hhmm(value)
 
 
 @app.get("/api/watchlist")
@@ -865,17 +983,35 @@ async def remove_watch_item(item_id: str) -> JSONResponse:
 
 @app.post("/api/pref")
 async def set_preference(request: PreferenceRequest) -> JSONResponse:
+    value = request.value.strip().lower()
+    if request.key == "platform" and value not in {"pc", "ps", "ps4", "xbox", "switch"}:
+        raise HTTPException(status_code=422, detail="platform must be one of pc, ps, ps4, xbox, switch")
+    if request.key == "crossplay" and value not in {"on", "off", "true", "false", "1", "0", "yes", "no"}:
+        raise HTTPException(status_code=422, detail="crossplay must be on/off")
+    if request.key == "max_results":
+        if not value.isdigit() or not (1 <= int(value) <= 50):
+            raise HTTPException(status_code=422, detail="max_results must be between 1 and 50")
     memory = await _load_memory_async()
-    memory = memory.set_preference(request.key, request.value)
+    memory = memory.set_preference(request.key, value)
     await _save_memory_async(memory)
     return JSONResponse({"status": "ok"})
 
 
-class RatingRequest(BaseModel):
-    message: str
-    reply: str
-    rating: int = 3
-    session_id: str = ""
+class RatingRequest(ApiRequestModel):
+    message: str = Field(min_length=1, max_length=4000)
+    reply: str = Field(min_length=1, max_length=12000)
+    rating: int = Field(default=3, ge=1, le=5)
+    session_id: str = Field(default="", max_length=64)
+
+    @field_validator("message", "reply")
+    @classmethod
+    def validate_text_fields(cls, value: str) -> str:
+        return cls._strip_text(value, "text")
+
+    @field_validator("session_id")
+    @classmethod
+    def normalize_session_id(cls, value: str) -> str:
+        return value.strip()
 
 
 @app.post("/api/rate")
@@ -891,7 +1027,7 @@ async def rate_response(request: RatingRequest) -> JSONResponse:
 
 
 @app.get("/api/history/{item_id}")
-async def get_history(item_id: str, range: str = "all") -> JSONResponse:
+async def get_history(item_id: str, range: Literal["24h", "7d", "30d", "all"] = Query("all")) -> JSONResponse:
     range_map = {"24h": 24, "7d": 168, "30d": 720, "all": 0}
     hours = range_map.get(range, 0)
     if hours > 0:
@@ -912,9 +1048,17 @@ async def get_history(item_id: str, range: str = "all") -> JSONResponse:
     })
 
 
-class CompareHistoryRequest(BaseModel):
-    item_ids: list[str]
-    range: str = "7d"
+class CompareHistoryRequest(ApiRequestModel):
+    item_ids: list[str] = Field(min_length=1, max_length=5)
+    range: Literal["24h", "7d", "30d", "all"] = "7d"
+
+    @field_validator("item_ids", mode="before")
+    @classmethod
+    def normalize_item_ids(cls, value):
+        cleaned = []
+        for item_id in value:
+            cleaned.append(cls._normalize_item_id(str(item_id)))
+        return cleaned
 
 
 @app.post("/api/history/compare")
@@ -1086,7 +1230,8 @@ async def get_fissures() -> JSONResponse:
             "message": "外部API暂不可用，显示本地遗物掉落数据"
         })
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("获取裂隙数据失败: %s", e)
+        return JSONResponse({"error": "获取裂隙数据失败"}, status_code=500)
 
 
 @app.get("/api/fissures/relics")
@@ -1121,7 +1266,8 @@ async def get_relic_info() -> JSONResponse:
 
         return JSONResponse({"relics": relics[:100]})  # 限制返回数量
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("获取遗物数据失败: %s", e)
+        return JSONResponse({"error": "获取遗物数据失败"}, status_code=500)
 
 
 @app.get("/api/favorites_prices")
@@ -1207,13 +1353,13 @@ async def get_item_detail(item_id: str) -> JSONResponse:
                 if efficiency:
                     result["ducat_efficiency"] = efficiency
 
-        # 供需比（卖家数量 vs 买家数量）
-        sell_orders = [o for o in orders if o.get("order_type") == "sell"]
-        buy_orders = [o for o in orders if o.get("order_type") == "buy"]
-        result["supply_count"] = len(sell_orders)
-        result["demand_count"] = len(buy_orders)
-        if len(buy_orders) > 0:
-            result["supply_demand_ratio"] = round(len(sell_orders) / len(buy_orders), 2)
+        # 供需比（仅统计在线/游戏中卖家 vs 买家）
+        online_sell = [o for o in orders if (o.get("order_type") or o.get("type")) == "sell" and o.get("user", {}).get("status") in ("ingame", "online")]
+        online_buy = [o for o in orders if (o.get("order_type") or o.get("type")) == "buy" and o.get("user", {}).get("status") in ("ingame", "online")]
+        result["supply_count"] = len(online_sell)
+        result["demand_count"] = len(online_buy)
+        if len(online_buy) > 0:
+            result["supply_demand_ratio"] = round(len(online_sell) / len(online_buy), 2)
         else:
             result["supply_demand_ratio"] = None
 
@@ -1242,7 +1388,8 @@ async def get_item_detail(item_id: str) -> JSONResponse:
 
         return JSONResponse(result)
     except Exception as e:
-        return JSONResponse({"item_id": item_id, "error": str(e)}, status_code=404)
+        logger.error("获取物品详情失败 %s: %s", item_id, e)
+        return JSONResponse({"item_id": item_id, "error": "获取物品详情失败"}, status_code=404)
 
 
 @app.get("/api/report")
@@ -1340,19 +1487,34 @@ async def get_ducats_batch(request: ItemListRequest) -> JSONResponse:
 
 # ===== 交易历史 API =====
 
-class TradeRequest(BaseModel):
-    item_id: str
-    item_name: str
-    trade_type: str  # "buy" or "sell"
-    price: int
-    player_name: str = ""
-    notes: str = ""
+class TradeRequest(ApiRequestModel):
+    item_id: str = Field(min_length=1, max_length=120)
+    item_name: str = Field(min_length=1, max_length=120)
+    trade_type: Literal["buy", "sell"]
+    price: int = Field(ge=1, le=100000)
+    player_name: str = Field(default="", max_length=80)
+    notes: str = Field(default="", max_length=300)
+
+    @field_validator("item_id")
+    @classmethod
+    def validate_item_id(cls, value: str) -> str:
+        return cls._normalize_item_id(value)
+
+    @field_validator("item_name")
+    @classmethod
+    def validate_item_name(cls, value: str) -> str:
+        return cls._strip_text(value, "item_name")
+
+    @field_validator("player_name", "notes")
+    @classmethod
+    def normalize_optional_text(cls, value: str) -> str:
+        return value.strip()
 
 
 @app.get("/api/trades")
-async def get_trades(limit: int = 20) -> JSONResponse:
+async def get_trades(limit: int = Query(20, ge=1, le=100)) -> JSONResponse:
     """获取最近的交易记录"""
-    trades = trade_db.get_recent_trades(limit=limit)
+    trades = await asyncio.to_thread(trade_db.get_recent_trades, limit=limit)
     return JSONResponse({
         "trades": [
             {
@@ -1373,7 +1535,8 @@ async def get_trades(limit: int = 20) -> JSONResponse:
 @app.post("/api/trades")
 async def add_trade(request: TradeRequest) -> JSONResponse:
     """添加交易记录"""
-    trade_id = trade_db.add_trade(
+    trade_id = await asyncio.to_thread(
+        trade_db.add_trade,
         item_id=request.item_id,
         item_name=request.item_name,
         trade_type=request.trade_type,
@@ -1387,7 +1550,7 @@ async def add_trade(request: TradeRequest) -> JSONResponse:
 @app.delete("/api/trades/{trade_id}")
 async def delete_trade(trade_id: int) -> JSONResponse:
     """删除交易记录"""
-    success = trade_db.delete_trade(trade_id)
+    success = await asyncio.to_thread(trade_db.delete_trade, trade_id)
     if success:
         return JSONResponse({"status": "ok"})
     raise HTTPException(status_code=404, detail="交易记录不存在")
@@ -1396,14 +1559,14 @@ async def delete_trade(trade_id: int) -> JSONResponse:
 @app.get("/api/trades/stats")
 async def get_trade_stats() -> JSONResponse:
     """获取交易统计信息"""
-    stats = trade_db.get_trade_stats()
+    stats = await asyncio.to_thread(trade_db.get_trade_stats)
     return JSONResponse(stats)
 
 
 @app.get("/api/trades/item/{item_id}")
-async def get_trades_by_item(item_id: str, limit: int = 10) -> JSONResponse:
+async def get_trades_by_item(item_id: str, limit: int = Query(10, ge=1, le=100)) -> JSONResponse:
     """获取指定物品的交易记录"""
-    trades = trade_db.get_trades_by_item(item_id, limit=limit)
+    trades = await asyncio.to_thread(trade_db.get_trades_by_item, item_id, limit=limit)
     return JSONResponse({
         "item_id": item_id,
         "trades": [
@@ -1491,7 +1654,11 @@ def _set_scan_cache(key: str, data: list) -> None:
 
 
 @app.get("/api/mod_flipper")
-async def mod_flipper_endpoint(min_profit: int = 5, min_roi_pct: float = 100, limit: int = 50) -> JSONResponse:
+async def mod_flipper_endpoint(
+    min_profit: int = Query(5, ge=0, le=100000),
+    min_roi_pct: float = Query(100, ge=0, le=10000),
+    limit: int = Query(50, ge=1, le=100),
+) -> JSONResponse:
     """扫描 Mod 翻转利润（异步）。"""
     import uuid
     from ..mod_flipper import scan_all_mod_flips
@@ -1502,7 +1669,8 @@ async def mod_flipper_endpoint(min_profit: int = 5, min_roi_pct: float = 100, li
         return JSONResponse({"status": "done", "results": cached, "total": len(cached)})
 
     task_id = uuid.uuid4().hex[:12]
-    _bg_tasks[task_id] = {"status": "running", "result": None, "error": None}
+    _evict_old_bg_tasks()
+    _bg_tasks[task_id] = {"status": "running", "result": None, "error": None, "created_at": _time.time()}
 
     async def _run():
         try:
@@ -1535,7 +1703,10 @@ async def mod_flipper_endpoint(min_profit: int = 5, min_roi_pct: float = 100, li
 
 
 @app.get("/api/set_profit")
-async def set_profit_endpoint(min_profit: int = 5, limit: int = 20) -> JSONResponse:
+async def set_profit_endpoint(
+    min_profit: int = Query(5, ge=0, le=100000),
+    limit: int = Query(20, ge=1, le=100),
+) -> JSONResponse:
     """分析 Prime 套装利润（异步）。"""
     import uuid
     from ..set_profit import scan_all_set_profits
@@ -1546,7 +1717,8 @@ async def set_profit_endpoint(min_profit: int = 5, limit: int = 20) -> JSONRespo
         return JSONResponse({"status": "done", "results": cached, "total": len(cached)})
 
     task_id = uuid.uuid4().hex[:12]
-    _bg_tasks[task_id] = {"status": "running", "result": None, "error": None}
+    _evict_old_bg_tasks()
+    _bg_tasks[task_id] = {"status": "running", "result": None, "error": None, "created_at": _time.time()}
 
     async def _run():
         try:
@@ -1580,7 +1752,11 @@ async def set_profit_endpoint(min_profit: int = 5, limit: int = 20) -> JSONRespo
 
 
 @app.get("/api/investment")
-async def investment_endpoint(budget: int = 500, min_roi_pct: float = 10.0, limit: int = 30) -> JSONResponse:
+async def investment_endpoint(
+    budget: int = Query(500, ge=0, le=100000),
+    min_roi_pct: float = Query(10.0, ge=0, le=10000),
+    limit: int = Query(30, ge=1, le=100),
+) -> JSONResponse:
     """Prime 套装套利顾问 API（异步）。"""
     import uuid
     from ..investment import scan_prime_investments
@@ -1591,7 +1767,8 @@ async def investment_endpoint(budget: int = 500, min_roi_pct: float = 10.0, limi
         return JSONResponse({"status": "done", "results": cached, "total": len(cached)})
 
     task_id = uuid.uuid4().hex[:12]
-    _bg_tasks[task_id] = {"status": "running", "result": None, "error": None}
+    _evict_old_bg_tasks()
+    _bg_tasks[task_id] = {"status": "running", "result": None, "error": None, "created_at": _time.time()}
 
     async def _run():
         try:
@@ -1640,20 +1817,35 @@ async def scan_status(task_id: str) -> JSONResponse:
 
 # ===== 目标引擎 API =====
 
-class GoalRequest(BaseModel):
-    goal_type: str
-    description: str
-    target: str = "all"
-    criteria: dict = {}
+class GoalRequest(ApiRequestModel):
+    goal_type: Literal["maximize_profit", "flip_mod", "build_set", "find_bargain", "earn_platinum"]
+    description: str = Field(min_length=1, max_length=200)
+    target: str = Field(default="all", min_length=1, max_length=120)
+    criteria: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("description", "target")
+    @classmethod
+    def validate_text_fields(cls, value: str) -> str:
+        return cls._strip_text(value, "goal")
 
 
-class GoalOutcomeRequest(BaseModel):
-    action: str
-    item_id: str
-    price: int
-    expected_profit: int = 0
-    actual_profit: int = 0
-    user_feedback: str = "ignored"
+class GoalOutcomeRequest(ApiRequestModel):
+    action: str = Field(min_length=1, max_length=64)
+    item_id: str = Field(min_length=1, max_length=120)
+    price: int = Field(ge=1, le=100000)
+    expected_profit: int = Field(default=0, ge=-100000, le=100000)
+    actual_profit: int = Field(default=0, ge=-100000, le=100000)
+    user_feedback: Literal["good", "bad", "ignored"] = "ignored"
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, value: str) -> str:
+        return cls._strip_text(value, "action")
+
+    @field_validator("item_id")
+    @classmethod
+    def validate_item_id(cls, value: str) -> str:
+        return cls._normalize_item_id(value)
 
 
 @app.get("/api/goals")
@@ -1724,7 +1916,8 @@ async def execute_goal(goal_id: str) -> JSONResponse:
         raise HTTPException(status_code=404, detail="活跃目标不存在")
 
     task_id = uuid.uuid4().hex[:12]
-    _bg_tasks[task_id] = {"status": "running", "goal_id": goal_id, "result": None, "error": None}
+    _evict_old_bg_tasks()
+    _bg_tasks[task_id] = {"status": "running", "goal_id": goal_id, "result": None, "error": None, "created_at": _time.time()}
 
     async def _run():
         try:
@@ -1809,9 +2002,9 @@ async def goals_summary() -> JSONResponse:
     })
 
 
-class EarnPlatinumRequest(BaseModel):
-    target_amount: int = 100
-    budget: int = 500
+class EarnPlatinumRequest(ApiRequestModel):
+    target_amount: int = Field(default=100, ge=1, le=100000)
+    budget: int = Field(default=500, ge=0, le=100000)
 
 
 @app.post("/api/goals/earn")
@@ -1914,22 +2107,53 @@ async def get_events() -> JSONResponse:
 
 # ===== 利润计算器 API =====
 
-class ProfitCalcRequest(BaseModel):
-    item_id: str
-    material_costs: list[dict]  # [{"item_id": str, "quantity": int, "unit_cost": int}]
+class ProfitCalcRequest(ApiRequestModel):
+    item_id: str = Field(min_length=1, max_length=120)
+    material_costs: list[dict[str, int | str]] = Field(min_length=1, max_length=50)
+
+    @field_validator("item_id")
+    @classmethod
+    def validate_item_id(cls, value: str) -> str:
+        return cls._normalize_item_id(value)
 
 
-class ItemListRequest(BaseModel):
-    items: list[str]
+class ItemListRequest(ApiRequestModel):
+    items: list[str] = Field(min_length=1, max_length=10)
+
+    @field_validator("items", mode="before")
+    @classmethod
+    def normalize_items(cls, value):
+        cleaned = []
+        for item in value:
+            text = cls._strip_text(str(item), "item")
+            if len(text) > 120:
+                raise ValueError("item 过长")
+            cleaned.append(text)
+        return cleaned
 
 
-class AliasRequest(BaseModel):
-    name: str
-    item_id: str
+class AliasRequest(ApiRequestModel):
+    name: str = Field(min_length=1, max_length=60)
+    item_id: str = Field(min_length=1, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return cls._strip_text(value, "name")
+
+    @field_validator("item_id")
+    @classmethod
+    def validate_item_id(cls, value: str) -> str:
+        return cls._normalize_item_id(value)
 
 
-class AliasDeleteRequest(BaseModel):
-    name: str
+class AliasDeleteRequest(ApiRequestModel):
+    name: str = Field(min_length=1, max_length=60)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return cls._strip_text(value, "name")
 
 
 @app.post("/api/profit/calculate")
@@ -1983,11 +2207,12 @@ async def calculate_profit(request: ProfitCalcRequest) -> JSONResponse:
             "recommendation": "盈利" if (profit_sell and profit_sell > 0) else "亏损",
         })
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error("计算利润失败: %s", e)
+        return JSONResponse({"error": "计算利润失败"}, status_code=500)
 
 
 @app.get("/api/suggest")
-async def suggest_items(q: str = "") -> JSONResponse:
+async def suggest_items(q: str = Query("", max_length=60)) -> JSONResponse:
     if not q or len(q) < 1:
         return JSONResponse({"suggestions": []})
 
@@ -2042,7 +2267,8 @@ async def compare_items(request: ItemListRequest) -> JSONResponse:
 
             results.append(item_result)
         except Exception as e:
-            results.append({"name": item_name, "error": str(e)})
+            logger.error("对比物品失败 %s: %s", item_name, e)
+            results.append({"name": item_name, "error": "查询失败"})
     return JSONResponse({"items": results})
 
 
@@ -2089,7 +2315,8 @@ async def batch_query_items(request: ItemListRequest) -> JSONResponse:
 
             results.append(item_result)
         except Exception as e:
-            results.append({"name": item_name, "error": str(e)})
+            logger.error("批量查询失败 %s: %s", item_name, e)
+            results.append({"name": item_name, "error": "查询失败"})
 
     return JSONResponse({
         "items": results,
@@ -2134,7 +2361,7 @@ async def remove_alias(request: AliasDeleteRequest) -> JSONResponse:
 
 
 @app.get("/api/search_items")
-async def search_items(q: str = "") -> JSONResponse:
+async def search_items(q: str = Query("", max_length=60)) -> JSONResponse:
     """根据物品名搜索候选列表（用于别名绑定）"""
     if not q or len(q) < 1:
         return JSONResponse({"items": []})
@@ -2241,7 +2468,10 @@ async def websocket_notifications(websocket: WebSocket):
         while True:
             await asyncio.sleep(1)
     except WebSocketDisconnect:
-        ws_connections.remove(websocket)
+        pass
+    finally:
+        if websocket in ws_connections:
+            ws_connections.remove(websocket)
 
 
 async def broadcast_alert(notification: AlertNotification):
@@ -2378,32 +2608,32 @@ def setup_monitor():
             loop = asyncio.get_running_loop()
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(broadcast_alert(notification), loop)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("alert 回调异常: %s", exc)
 
     def on_watch_callback(notification: WatchNotification):
         try:
             loop = asyncio.get_running_loop()
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(broadcast_watch(notification), loop)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("watch 回调异常: %s", exc)
 
     def on_goal_opportunity_callback(opportunity: dict):
         try:
             loop = asyncio.get_running_loop()
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(broadcast_goal_opportunity(opportunity), loop)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("goal_opportunity 回调异常: %s", exc)
 
     def on_proactive_push_callback(push: ProactivePush):
         try:
             loop = asyncio.get_running_loop()
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(broadcast_proactive_push(push), loop)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("proactive_push 回调异常: %s", exc)
 
     def on_daily_report_callback(report_text: str):
         """每日报告同时推送到飞书"""
@@ -2429,8 +2659,8 @@ def setup_monitor():
             loop = asyncio.get_running_loop()
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(broadcast_fissure_alert(msg), loop)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("fissure WebSocket 回调异常: %s", exc)
         # 飞书推送
         try:
             if feishu_bot.available:
@@ -2450,8 +2680,8 @@ def setup_monitor():
             loop = asyncio.get_running_loop()
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(broadcast_baro_report(report_text), loop)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("baro 回调异常: %s", exc)
         # 飞书推送
         try:
             if feishu_bot.available:
@@ -2740,7 +2970,8 @@ async def get_riven_auctions(weapon: str = "") -> JSONResponse:
             "total": len(rivens),
         })
     except Exception as e:
-        return JSONResponse({"error": str(e), "rivens": []}, status_code=500)
+        logger.error("紫卡查询失败: %s", e)
+        return JSONResponse({"error": "紫卡查询失败", "rivens": []}, status_code=500)
 
 
 @app.get("/api/market/scrape/{item_url_name}")
@@ -2765,7 +2996,8 @@ async def scrape_market_orders(item_url_name: str) -> JSONResponse:
             "total": len(orders),
         })
     except Exception as e:
-        return JSONResponse({"error": str(e), "orders": []}, status_code=500)
+        logger.error("紫卡订单查询失败: %s", e)
+        return JSONResponse({"error": "紫卡订单查询失败", "orders": []}, status_code=500)
 
 
 @app.get("/api/relic/search")

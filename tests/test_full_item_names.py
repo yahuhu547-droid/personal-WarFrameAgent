@@ -14,7 +14,16 @@ class FullItemNameTests(unittest.TestCase):
                 {"item_id": "kuva_bramma", "zh_name": "赤毒布拉玛", "en_name": "Kuva Bramma"}
             ], ensure_ascii=False), encoding="utf-8")
 
-            name = display_item_name("kuva_bramma", item_data_path=item_data_path)
+            # 使用空别名文件，确保只走 zh_name 路径
+            empty_alias_path = Path(tmp) / "empty_aliases.json"
+            empty_alias_path.write_text("{}", encoding="utf-8")
+
+            from warframe_agent.names import clear_name_cache
+            clear_name_cache()
+            name = display_item_name("kuva_bramma",
+                                      alias_path=empty_alias_path,
+                                      item_data_path=item_data_path)
+            clear_name_cache()
 
         self.assertEqual(name, "赤毒布拉玛 / Kuva Bramma / kuva_bramma")
 

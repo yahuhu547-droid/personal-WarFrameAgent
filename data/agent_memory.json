@@ -22,9 +22,6 @@
     "arcane_energize"
   ],
   "common_questions": [
-    "strun紫卡双爆无负",
-    "紫卡搜索rubico暴击率",
-    "紫卡搜索lanka无负100以下",
     "老哥，充沛现在能买吗",
     "充沛现在能买吗",
     "赤毒布拉玛现在价格怎么样",
@@ -32,6 +29,9 @@
     "那现在呢",
     "我有 Lex Prime 蓝图和枪管，还差多少钱做一套",
     "Lex Prime 一套多少钱",
+    "斯特朗紫卡双爆无负，全部玩家",
+    "斯特朗紫卡双爆无负",
+    "全部玩家",
     "现在呢",
     "充沛现在价格怎么样",
     "那个回蓝的赋能现在行情怎样",
@@ -58,9 +58,8 @@
       "Lex": 4,
       "Prime": 4,
       "充沛现在能买吗": 2,
-      "strun紫卡双爆无负": 1,
-      "紫卡搜索rubico暴击率": 1,
-      "紫卡搜索lanka无负100以下": 1,
+      "斯特朗紫卡双爆无负": 2,
+      "全部玩家": 2,
       "老哥": 1,
       "赤毒布拉玛现在价格怎么样": 1,
       "充沛多少钱": 1,
@@ -74,7 +73,8 @@
       "那个回蓝的赋能现在行情怎样": 1,
       "你好啊": 1,
       "我要买充沛": 1,
-      "我想卖充沛": 1
+      "我想卖充沛": 1,
+      "枪管最高收多少": 1
     },
     "favorite_categories": [
       "prime_set",
@@ -85,143 +85,143 @@
   },
   "recent_suggestions": [
     {
-      "item_id": "afuris_prime_set",
+      "item_id": "ash_prime_set",
       "suggestion_type": "goal_opportunity",
       "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 盗贼双枪 prime +369p (ROI 75.9%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "akarius_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 阿利乌双枪 prime +198p (ROI 42.9%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "afuris_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 盗贼双枪 prime +369p (ROI 75.9%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "akarius_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 阿利乌双枪 prime +198p (ROI 42.9%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "afuris_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「test」发现机会: 盗贼双枪 prime +369p (ROI 75.9%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "akarius_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「test」发现机会: 阿利乌双枪 prime +198p (ROI 42.9%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "akstiletto_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 50 白金」发现机会: 史提托双枪 prime +170p (ROI 64.2%)",
+      "message": "目标「test」发现机会: Ash Prime 一套 +132p (ROI 27.9%)",
       "timestamp": ""
     },
     {
       "item_id": "carrier_prime_set",
       "suggestion_type": "goal_opportunity",
       "priority": 2,
-      "message": "目标「攒 50 白金」发现机会: 搬运者 prime +28p (ROI 10.3%)",
+      "message": "目标「test」发现机会: 搬运者 prime +112p (ROI 25.0%)",
       "timestamp": ""
     },
     {
-      "item_id": "afuris_prime_set",
+      "item_id": "ballistica_prime_set",
       "suggestion_type": "goal_opportunity",
       "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 盗贼双枪 prime +369p (ROI 75.9%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "akarius_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 阿利乌双枪 prime +198p (ROI 42.9%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "afuris_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 盗贼双枪 prime +369p (ROI 75.9%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "akarius_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 阿利乌双枪 prime +165p (ROI 33.3%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "afuris_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 盗贼双枪 prime +369p (ROI 75.9%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "akarius_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 阿利乌双枪 prime +165p (ROI 33.3%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "afuris_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「test」发现机会: 盗贼双枪 prime +369p (ROI 75.9%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "akarius_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「test」发现机会: 阿利乌双枪 prime +165p (ROI 33.3%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "akstiletto_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 50 白金」发现机会: 史提托双枪 prime +170p (ROI 64.2%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "banshee_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 50 白金」发现机会: Banshee Prime 一套 +40p (ROI 15.4%)",
+      "message": "目标「test」发现机会: 布里斯提卡 prime +70p (ROI 14.3%)",
       "timestamp": ""
     },
     {
       "item_id": "carrier_prime_set",
       "suggestion_type": "goal_opportunity",
       "priority": 2,
-      "message": "目标「攒 50 白金」发现机会: 搬运者 prime +20p (ROI 7.1%)",
+      "message": "目标「攒 50 白金」发现机会: 搬运者 prime +64p (ROI 25.0%)",
       "timestamp": ""
     },
     {
-      "item_id": "akarius_prime_set",
+      "item_id": "ballistica_prime_set",
       "suggestion_type": "goal_opportunity",
       "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 阿利乌双枪 prime +165p (ROI 33.3%)",
+      "message": "目标「攒 50 白金」发现机会: 布里斯提卡 prime +40p (ROI 14.3%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "boltor_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 50 白金」发现机会: 螺钉步枪 prime +24p (ROI 8.7%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "ash_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: Ash Prime 一套 +132p (ROI 27.9%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "carrier_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 搬运者 prime +112p (ROI 25.0%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "ballistica_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 布里斯提卡 prime +70p (ROI 14.3%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "ballistica_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 布里斯提卡 prime +91p (ROI 19.4%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "boltor_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 螺钉步枪 prime +40p (ROI 8.7%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "ballistica_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 布里斯提卡 prime +91p (ROI 19.4%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "boltor_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 螺钉步枪 prime +40p (ROI 8.7%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "ballistica_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「test」发现机会: 布里斯提卡 prime +91p (ROI 19.4%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "boltor_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「test」发现机会: 螺钉步枪 prime +40p (ROI 8.7%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "carrier_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 50 白金」发现机会: 搬运者 prime +64p (ROI 25.0%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "ash_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 50 白金」发现机会: Ash Prime 一套 +54p (ROI 19.6%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "ballistica_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 50 白金」发现机会: 布里斯提卡 prime +52p (ROI 19.4%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "ballistica_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 布里斯提卡 prime +91p (ROI 19.4%)",
+      "timestamp": ""
+    },
+    {
+      "item_id": "boltor_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 螺钉步枪 prime +40p (ROI 8.7%)",
       "timestamp": ""
     }
   ],

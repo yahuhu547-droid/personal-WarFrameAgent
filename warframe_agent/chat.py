@@ -19,8 +19,8 @@ from .names import display_item_name
 from .price_history import PriceHistoryDB
 from .rag import smart_search_rag
 from .session import SessionContext, is_followup
+from .riven import _looks_like_riven_query
 from .tool_router import build_router_prompt, parse_tool_call
-from .trade_history import TradeHistoryDB
 from .trade_intent import detect_trade_intent, detect_completed_trade, detect_trend_query, detect_compare_query
 from .warframes import price_warframe_query
 
@@ -28,12 +28,38 @@ logger = logging.getLogger(__name__)
 
 
 EXIT_COMMANDS = {"q", "quit", "exit", "退出", "关闭"}
+RIVEN_ONLINE_STATUSES = ("ingame", "online")
+RIVEN_ALL_STATUSES = ()
+RIVEN_INGAME_STATUSES = ("ingame",)
+RIVEN_INGAME_KEYWORDS = ("游戏中", "在游戏中", "游戏里的", "ingame", "in game")
+RIVEN_ONLINE_KEYWORDS = ("在线", "online", "在线玩家", "在线的", "在线卖家")
+RIVEN_ALL_STATUS_KEYWORDS = ("全部", "所有", "离线", "offline", "包括离线", "离线也要")
+
+
+def _riven_statuses_from_message(message: str, default_online: bool = False) -> tuple[str, ...] | None:
+    lowered = message.lower()
+    if any(keyword in lowered for keyword in RIVEN_ALL_STATUS_KEYWORDS):
+        return RIVEN_ALL_STATUSES
+    if any(keyword in lowered for keyword in RIVEN_INGAME_KEYWORDS):
+        return RIVEN_INGAME_STATUSES
+    if any(keyword in lowered for keyword in RIVEN_ONLINE_KEYWORDS):
+        return RIVEN_ONLINE_STATUSES
+    return RIVEN_ONLINE_STATUSES if default_online else None
+
+
+def _riven_status_label(statuses: tuple[str, ...]) -> str:
+    if statuses == RIVEN_INGAME_STATUSES:
+        return "游戏中卖家"
+    if statuses == RIVEN_ONLINE_STATUSES:
+        return "在线卖家"
+    if statuses == RIVEN_ALL_STATUSES:
+        return "全部卖家"
+    return "卖家"
 
 
 def build_system_context(
     knowledge: MarketKnowledge | None = None,
     event_tracker: EventTracker | None = None,
-    trade_db: TradeHistoryDB | None = None,
     memory: AgentMemory | None = None,
     game_data: GameDataStore | None = None,
     current_item_ids: list[str] | None = None,
@@ -90,14 +116,7 @@ def build_system_context(
             event_descs = [f"{e.event_type}: {e.description[:40]}" for e in events[:3]]
             parts.append(f"[游戏事件] {'; '.join(event_descs)}")
 
-    # 4. 交易历史摘要
-    if trade_db:
-        trades = trade_db.get_recent_trades(limit=20)
-        if trades:
-            total = len(trades)
-            parts.append(f"近期 {total} 笔交易记录")
-
-    # 5. 交易胜率
+    # 4. 交易胜率
     if memory and memory.trade_outcomes:
         outcomes = memory.trade_outcomes
         wins = sum(1 for o in outcomes if o.actual_profit > 0)
@@ -317,17 +336,19 @@ class ChatAgent:
             from .llm import chat_with_model
             return chat_with_model(messages)
         except Exception as exc:
-            logger.debug("LLM 调用失败: %s", exc)
+            logger.debug("chat_with_model 调用失败: %s", exc)
+        try:
             from .llm import chat_with_ollama
             return chat_with_ollama(messages)
-        except Exception:
-            parts = []
-            for msg in messages:
-                if msg["role"] == "system":
-                    parts.insert(0, msg["content"])
-                else:
-                    parts.append(msg["content"])
-            return self.model_call("\n\n".join(parts))
+        except Exception as exc:
+            logger.debug("chat_with_ollama 调用失败: %s", exc)
+        parts = []
+        for msg in messages:
+            if msg["role"] == "system":
+                parts.insert(0, msg["content"])
+            else:
+                parts.append(msg["content"])
+        return self.model_call("\n\n".join(parts))
 
     def answer(self, message: str) -> str:
         self._reload_memory()
@@ -337,6 +358,19 @@ class ChatAgent:
         if is_watchlist_command(message):
             return self.scan_watchlist()
         self._remember_common_question(message)
+        # 紫卡查询：优先确定性解析，避免 LLM 路由误判
+        if _looks_like_riven_query(message):
+            riven_result = self._try_deterministic_riven(message)
+            if riven_result:
+                self.session.add_exchange(message, riven_result)
+                self._log_answer(message, riven_result)
+                return riven_result
+        # 紫卡追问：基于上一次查询过滤（在线/便宜）
+        riven_followup = self._try_riven_followup(message)
+        if riven_followup:
+            self.session.add_exchange(message, riven_followup)
+            self._log_answer(message, riven_followup)
+            return riven_followup
         # 事件类/交易工具类查询直接走路由器，避免物品匹配误触发交易流程
         if _is_event_query(message) or _is_trading_tool_query(message):
             routed = self._try_router(message)
@@ -395,7 +429,7 @@ class ChatAgent:
             self._log_answer(message, deterministic_answer, contexts)
             return deterministic_answer
         current_ids = [ctx.item_id for ctx in contexts]
-        market_ctx = build_system_context(self.knowledge, self.event_tracker, trade_db=None, memory=self.memory, game_data=self.game_data, current_item_ids=current_ids)
+        market_ctx = build_system_context(self.knowledge, self.event_tracker, memory=self.memory, game_data=self.game_data, current_item_ids=current_ids)
         prompt_messages = build_chat_messages(message, contexts, self.memory, self.session.to_messages(current_query=message), market_ctx or None)
         try:
             answer = self._call_llm_messages(prompt_messages).strip()
@@ -443,6 +477,50 @@ class ChatAgent:
             yield result
             return
         self._remember_common_question(message)
+        # 紫卡查询：优先确定性解析，避免 LLM 路由误判
+        if _looks_like_riven_query(message):
+            riven_result = self._try_deterministic_riven(message)
+            if riven_result:
+                self.session.add_exchange(message, riven_result)
+                self._log_answer(message, riven_result)
+                yield riven_result
+                return
+        # 紫卡追问：基于上一次查询过滤（在线/便宜）
+        riven_followup = self._try_riven_followup(message)
+        if riven_followup:
+            self.session.add_exchange(message, riven_followup)
+            self._log_answer(message, riven_followup)
+            yield riven_followup
+            return
+        # 事件类/交易工具类查询直接走路由器，避免物品匹配误触发交易流程
+        if _is_event_query(message) or _is_trading_tool_query(message):
+            routed = self._try_router(message)
+            if routed:
+                self.session.add_exchange(message, routed)
+                self._log_answer(message, routed)
+                yield routed
+                return
+            if _is_trading_tool_query(message):
+                fallback = "交易工具暂时无法使用，请稍后重试。你也可以直接输入物品名称查询价格。"
+                self._log_answer(message, fallback)
+                yield fallback
+                return
+            if _is_event_query(message):
+                try:
+                    from .events import EventTracker
+                    tracker = EventTracker()
+                    events = tracker.get_active_events()
+                    if events:
+                        event_text = "\n".join(f"- {e.description}" for e in events[:10])
+                        result = f"当前游戏活动:\n{event_text}"
+                    else:
+                        result = "当前没有检测到特殊活动。"
+                except Exception:
+                    result = "暂时无法获取游戏活动信息。"
+                self.session.add_exchange(message, result)
+                self._log_answer(message, result)
+                yield result
+                return
         warframe_answer = price_warframe_query(message, self.warframe_items, self.order_fetcher)
         if warframe_answer:
             self.session.add_exchange(message, warframe_answer)
@@ -465,6 +543,8 @@ class ChatAgent:
             yield result
             return
         self.session.update([ctx.item_id for ctx in contexts])
+        # 自动记录已完成的交易
+        self._auto_record_trade(message, contexts)
         deterministic_answer = _deterministic_trade_intent_answer(message, contexts)
         if deterministic_answer:
             self.session.add_exchange(message, deterministic_answer)
@@ -472,7 +552,7 @@ class ChatAgent:
             yield deterministic_answer
             return
         current_ids = [ctx.item_id for ctx in contexts]
-        market_ctx = build_system_context(self.knowledge, self.event_tracker, trade_db=None, memory=self.memory, game_data=self.game_data, current_item_ids=current_ids)
+        market_ctx = build_system_context(self.knowledge, self.event_tracker, memory=self.memory, game_data=self.game_data, current_item_ids=current_ids)
         prompt_messages = build_chat_messages(message, contexts, self.memory, self.session.to_messages(current_query=message), market_ctx or None)
         # 流式调用 LLM
         full_reply = []
@@ -1326,6 +1406,113 @@ class ChatAgent:
             return self._handle_riven_search(args)
         return None
 
+    def _try_deterministic_riven(self, message: str) -> str | None:
+        """确定性紫卡路由：直接解析查询，不依赖 LLM 路由。"""
+        from .riven import parse_riven_query, search_rivens, format_riven_results
+
+        query = parse_riven_query(message, weapon_resolver=self._resolve_weapon_for_riven)
+        if not query:
+            query = self._try_model_riven_parse(message)
+            if not query:
+                return None
+            seller_statuses = _riven_statuses_from_message(message)
+            if seller_statuses is not None:
+                query.seller_statuses = seller_statuses
+        else:
+            seller_statuses = _riven_statuses_from_message(message, default_online=True)
+            if seller_statuses is not None:
+                query.seller_statuses = seller_statuses
+        results = search_rivens(query)
+        self.session.last_riven_query = query
+        return format_riven_results(query, results)
+
+    def _try_model_riven_parse(self, message: str):
+        """???????????????????????"""
+        from .riven import RivenQuery, RIVEN_ATTRIBUTES, COMPOUND_KEYWORDS
+        from .dictionary import normalize_market_id
+
+        prompt = (
+            "???? Warframe ??????? JSON???? JSON??????\n"
+            "??: weapon, positive_attrs, negative_attrs, no_negative, seller_status?\n"
+            "???????? url_name??? critical_chance?critical_damage?multishot?base_damage_/_melee_damage?\n"
+            "seller_status ??? ingame?online?all ??????\n"
+            "?: {\"weapon\":\"dual_toxocyst\",\"positive_attrs\":[\"critical_chance\",\"critical_damage\"],"
+            "\"negative_attrs\":[],\"no_negative\":true,\"seller_status\":\"online\"}\n"
+            f"??: {message}"
+        )
+        try:
+            raw = self._call_llm_messages([
+                {"role": "system", "content": "?? Warframe ??????????? JSON?"},
+                {"role": "user", "content": prompt},
+            ])
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start == -1 or end == -1:
+                return None
+            data = json.loads(raw[start:end + 1])
+        except Exception as exc:
+            logger.debug("????????: %s", exc)
+            return None
+
+        weapon_text = str(data.get("weapon") or "").strip()
+        weapon_url = self._resolve_weapon_for_riven(weapon_text) or normalize_market_id(weapon_text)
+        if not weapon_url:
+            return None
+        # 紫卡API不接受变体武器名，强制还原为基础版
+        weapon_url = self._normalize_riven_weapon_url(weapon_url)
+        message_weapon_url = self._resolve_weapon_for_riven(message)
+        if message_weapon_url:
+            weapon_url = self._normalize_riven_weapon_url(message_weapon_url)
+        elif weapon_text.lower() not in message.lower():
+            return None
+        valid_attrs = set(RIVEN_ATTRIBUTES.values()) | {attr for attrs in COMPOUND_KEYWORDS.values() for attr in attrs}
+        positive = [attr for attr in data.get("positive_attrs", []) if attr in valid_attrs]
+        negative = [attr for attr in data.get("negative_attrs", []) if attr in valid_attrs]
+        status = str(data.get("seller_status") or "").lower()
+        seller_statuses = RIVEN_ONLINE_STATUSES
+        if status == "ingame":
+            seller_statuses = RIVEN_INGAME_STATUSES
+        elif status == "online":
+            seller_statuses = RIVEN_ONLINE_STATUSES
+        elif status == "all":
+            seller_statuses = RIVEN_ALL_STATUSES
+        return RivenQuery(
+            weapon_url_name=weapon_url,
+            positive_attrs=list(dict.fromkeys(positive)),
+            negative_attrs=list(dict.fromkeys(negative)),
+            no_negative=bool(data.get("no_negative")),
+            seller_statuses=seller_statuses,
+        )
+
+    def _try_riven_followup(self, message: str) -> str | None:
+        """基于上一次紫卡查询的追问（在线/便宜/无负等过滤条件）。"""
+        from .riven import search_rivens, format_riven_results
+        query = self.session.last_riven_query
+        if query is None:
+            return None
+        lowered = message.lower()
+        seller_statuses = _riven_statuses_from_message(message)
+        online_only = seller_statuses is not None
+        cheap_only = any(kw in lowered for kw in ["便宜", "最便宜", "低价"])
+        if not (online_only or cheap_only):
+            return None
+        if seller_statuses is not None:
+            query.seller_statuses = seller_statuses
+        results = search_rivens(query)
+        if cheap_only and results:
+            results = results[:5]
+        suffix_parts = []
+        if online_only:
+            suffix_parts.append(_riven_status_label(seller_statuses))
+        if cheap_only:
+            suffix_parts.append("最低5条")
+        suffix = f"（{','.join(suffix_parts)}）" if suffix_parts else ""
+        text = format_riven_results(query, results)
+        if suffix:
+            text = text.replace("紫卡搜索结果", f"紫卡搜索结果{suffix}", 1)
+        self.session.update([query.weapon_url_name], "riven", "riven_followup")
+        return text
+
     def _handle_riven_search(self, args: dict) -> str:
         """处理紫卡搜索工具调用。"""
         from .riven import RivenQuery, parse_riven_query, search_rivens, format_riven_results, RIVEN_ATTRIBUTES, COMPOUND_KEYWORDS
@@ -1334,23 +1521,33 @@ class ChatAgent:
         if not weapon:
             return "请指定武器名称，如：斯特朗双爆紫卡无负"
 
-        # 构建查询消息用于解析属性（始终包含"紫卡"关键词）
+        # 构建查询消息用于解析属性（始终包含"紫卡"关键词，负向属性加"负"前缀）
         fake_msg = weapon + "紫卡"
         if args.get("positive"):
             fake_msg += args["positive"]
         if args.get("negative"):
-            fake_msg += args["negative"]
+            # LLM 返回的 negative 参数如 "暴击率"，需加"负"前缀以被 _extract_attributes 识别
+            neg_text = args["negative"]
+            if "无负" not in neg_text and "不要负" not in neg_text:
+                for cn_name in RIVEN_ATTRIBUTES:
+                    if cn_name in neg_text and f"负{cn_name}" not in neg_text:
+                        neg_text = neg_text.replace(cn_name, f"负{cn_name}")
+            fake_msg += neg_text
 
         query = parse_riven_query(
             fake_msg,
             weapon_resolver=self._resolve_weapon_for_riven,
         )
-        if not query:
+        if query:
+            # 紫卡API不接受变体武器名，强制还原为基础版
+            query.weapon_url_name = self._normalize_riven_weapon_url(query.weapon_url_name)
+        else:
             # 回退：手动构建查询
             from .dictionary import normalize_market_id
             weapon_url = normalize_market_id(weapon)
             positive = []
             no_negative = False
+            negative_attrs = []
             if args.get("positive"):
                 pos_text = args["positive"]
                 for kw, attrs in COMPOUND_KEYWORDS.items():
@@ -1359,19 +1556,34 @@ class ChatAgent:
                 for cn, api in RIVEN_ATTRIBUTES.items():
                     if cn in pos_text and api not in positive:
                         positive.append(api)
-            if args.get("negative") and ("无负" in args["negative"] or "不要负" in args["negative"]):
-                no_negative = True
-            query = RivenQuery(weapon_url_name=weapon_url, positive_attrs=positive, no_negative=no_negative)
+            if args.get("negative"):
+                neg_text = args["negative"]
+                if "无负" in neg_text or "不要负" in neg_text:
+                    no_negative = True
+                else:
+                    for cn, api in RIVEN_ATTRIBUTES.items():
+                        if cn in neg_text:
+                            negative_attrs.append(api)
+            query = RivenQuery(weapon_url_name=self._normalize_riven_weapon_url(weapon_url), positive_attrs=positive, negative_attrs=negative_attrs, no_negative=no_negative)
 
         # 应用 max_price 参数
         if args.get("max_price"):
             query.max_price = int(args["max_price"])
+        if args.get("seller_status") in RIVEN_INGAME_STATUSES:
+            query.seller_statuses = RIVEN_INGAME_STATUSES
+        elif args.get("seller_status") in RIVEN_ONLINE_STATUSES or args.get("online_only"):
+            query.seller_statuses = RIVEN_ONLINE_STATUSES
+        elif args.get("seller_status") in ("all", "offline"):
+            query.seller_statuses = RIVEN_ALL_STATUSES
+        else:
+            query.seller_statuses = RIVEN_ONLINE_STATUSES
 
         results = search_rivens(query)
+        self.session.last_riven_query = query
         return format_riven_results(query, results)
 
     def _resolve_weapon_for_riven(self, name: str) -> str | None:
-        """解析武器名到 market weapon_url_name。"""
+        """解析武器名到 market weapon_url_name（紫卡必须用普通版武器名）。"""
         from .dictionary import normalize_market_id
         normalized = normalize_market_id(name)
 
@@ -1392,10 +1604,49 @@ class ChatAgent:
         except Exception:
             pass
 
-        # 回退：直接用 normalized 名（如 "rubico", "soma", "strun"）
+        # 回退1：如果别名指向 _prime_set，提取基础武器名（如"西诺斯" → cernos_prime_set → cernos）
+        for candidate_id in [alias_id]:
+            if not candidate_id:
+                continue
+            base = self._extract_riven_base_from_set(candidate_id)
+            if base:
+                return base
+
+        # 回退2：直接用 normalized 名（如 "rubico", "soma", "strun"）
         if normalized and len(normalized) >= 2:
             return normalized
         return None
+
+    @staticmethod
+    def _extract_riven_base_from_set(item_id: str) -> str | None:
+        """从 _set/_blueprint 后缀的 item_id 提取基础武器名。
+        例：cernos_prime_set → cernos, akstiletto_prime_set → akstiletto.
+        """
+        import re
+        # 移除 _set / _blueprint 后缀
+        m = re.match(r'^(.*?)(?:_prime|_wraith|_vandal)?_(?:set|blueprint|chassis|systems|neuroptics)$', item_id)
+        if m:
+            base = m.group(1)
+            if base:
+                return base
+        return None
+
+    def _normalize_riven_weapon_url(self, weapon_url: str) -> str:
+        """将变体武器名还原为基础版（紫卡API不接受变体前缀）。"""
+        import re
+        variant_prefixes = [
+            "sancti_", "vaykor_", "prisma_", "wraith_", "vandal_",
+            "mutalist_", "kuva_", "tenet_", "dex_",
+            "secura_", "rakta_", "detonite_", "telos_", "cobra_",
+        ]
+        w = weapon_url.lower()
+        for prefix in sorted(variant_prefixes, key=len, reverse=True):  # 长前缀优先
+            if w.startswith(prefix):
+                base = w[len(prefix):]
+                # 验证基础版在紫卡武器列表中（如果不在，保持变体）
+                # 注意：这里只做本地修正，不查API（避免额外请求）
+                return base
+        return weapon_url
 
     def _deep_analysis(self, item_name: str) -> str | None:
         """使用云端大模型对物品进行多维度深度分析。"""
@@ -1412,8 +1663,8 @@ class ChatAgent:
 
         sellers = best_sellers(orders) if orders else []
         buyers = best_buyers(orders) if orders else []
-        sell_price = sellers[0]["platinum"] if sellers else None
-        buy_price = buyers[0]["platinum"] if buyers else None
+        sell_price = sellers[0].platinum if sellers else None
+        buy_price = buyers[0].platinum if buyers else None
 
         # 知识库数据
         stats_text = ""
@@ -1451,7 +1702,7 @@ class ChatAgent:
             f"## 当前市场\n"
             f"- 最低卖价: {sell_price}p\n"
             f"- 最高收价: {buy_price}p\n"
-            f"- 价差: {(sell_price - buy_price) if sell_price and buy_price else '未知'}p\n\n"
+            f"- 价差: {(sell_price - buy_price) if sell_price is not None and buy_price is not None else '未知'}{'p' if sell_price is not None and buy_price is not None else ''}\n\n"
         )
         if stats_text:
             analysis_prompt += f"## 知识库数据\n{stats_text}\n\n"
@@ -1491,30 +1742,30 @@ class ChatAgent:
                 return f"深度分析失败: {item_name}。请稍后重试。"
 
     def _query_missing_parts(self, warframe_name: str, owned_parts: list[str]) -> str | None:
-        from .warframes import find_warframe, build_set_price_info
-        if not self.warframe_items:
+        from .warframes import build_prime_groups, _load_items, PARTS, _render_missing_parts
+        items = self.warframe_items or _load_items()
+        groups = build_prime_groups(items)
+        # 尝试匹配 base_id
+        name_lower = warframe_name.lower().replace(" ", "_")
+        base_id = None
+        for gid, group in groups.items():
+            if name_lower in gid or gid.startswith(name_lower):
+                base_id = gid
+                break
+        if not base_id:
             return None
-        wf = find_warframe(warframe_name, self.warframe_items)
-        if not wf:
+        group = groups.get(base_id)
+        if not group:
             return None
-        info = build_set_price_info(wf, self.order_fetcher)
-        if not info:
-            return None
-        owned_lower = {p.lower() for p in owned_parts}
-        missing = []
-        total_missing = 0
-        for comp in info.get("components", []):
-            comp_name = comp.get("name", "")
-            if comp_name.lower() not in owned_lower:
-                price = comp.get("sell_price")
-                if price:
-                    missing.append(f"{comp_name}: {price}p")
-                    total_missing += price
-                else:
-                    missing.append(f"{comp_name}: 暂无价格")
-        if not missing:
-            return f"你已经拥有 {warframe_name} 的所有部件！"
-        return f"补齐 {warframe_name} 还需要:\n" + "\n".join(missing) + f"\n总计约: {total_missing}p"
+        # 将 owned_parts 转为 part key
+        owned_keys = []
+        for part in owned_parts:
+            part_lower = part.lower().strip()
+            for key, info in PARTS.items():
+                if part_lower in [t.lower() for t in info["terms"]]:
+                    owned_keys.append(key)
+                    break
+        return _render_missing_parts(group, owned_keys, self.order_fetcher)
 
     def _remember_common_question(self, message: str) -> None:
         self.memory = self.memory.with_common_question(message)
@@ -1570,7 +1821,11 @@ class ChatAgent:
                     if item_id not in item_ids:
                         item_ids.append(item_id)
         if not item_ids:
-            item_ids = self.rag_search(message)
+            # 纯指令类查询不应走 RAG 物品匹配，避免返回无关结果
+            _COMMAND_ONLY = {"返回", "帮我看", "在线玩家", "在线的", "便宜的", "最便宜的",
+                             "推荐", "建议", "哪个好", "哪些好"}
+            if not any(kw in message for kw in _COMMAND_ONLY):
+                item_ids = self.rag_search(message)
         contexts = []
         for item_id in item_ids[:3]:
             try:
@@ -1709,7 +1964,7 @@ def _deterministic_trade_intent_answer(message: str, contexts: list[ItemContext]
     return _render_trade_intent_context(contexts[0], intent)
 
 
-def _render_trade_intent_context(context: ItemContext, intent: str) -> str:
+def _render_trade_intent_context(context: ItemContext, intent: str) -> str | None:
     lines = [display_item_name(context.item_id)]
     if intent == "buy":
         lines.append(f"按你要买来看：当前最低卖价: {_price_text(context.best_sell_price)}")

@@ -140,10 +140,20 @@ class TestParseRivenQuery:
     def _resolver(self, name):
         from warframe_agent.dictionary import ItemResolver, normalize_market_id, normalize_lookup_key
         r = ItemResolver()
-        normalized = normalize_market_id(name)
+        # 先检查别名
         alias_id = r.aliases.get(normalize_lookup_key(name))
         if alias_id and not any(alias_id.endswith(s) for s in ["_set", "_mod", "_blueprint"]):
             return alias_id
+        # 尝试字典解析（支持中文武器名如"毒囊双枪"→dual_toxocyst）
+        try:
+            result = r.resolve(name)
+            item_id = result.item_id
+            if not any(item_id.endswith(s) for s in ["_set", "_mod", "_blueprint"]):
+                return item_id
+        except Exception:
+            pass
+        # 回退到 normalized
+        normalized = normalize_market_id(name)
         if normalized and len(normalized) >= 2:
             return normalized
         return None
@@ -160,6 +170,37 @@ class TestParseRivenQuery:
         assert q is not None
         assert q.weapon_url_name == "rubico"
         assert "critical_chance" in q.positive_attrs
+
+    def test_glaive_cn_name_resolves_to_glaive_not_halikar(self):
+        q = parse_riven_query("战刃紫卡", weapon_resolver=self._resolver)
+        assert q is not None
+        assert q.weapon_url_name == "glaive"
+
+    def test_status_prefix_does_not_break_weapon_name(self):
+        q = parse_riven_query("给我在线玩家毒囊双枪双爆紫卡，无负", weapon_resolver=self._resolver)
+        assert q is not None
+        assert q.weapon_url_name == "dual_toxocyst"
+        assert q.positive_attrs == ["critical_chance", "critical_damage"]
+        assert q.no_negative is True
+
+    def test_request_prefix_does_not_break_weapon_name(self):
+        q = parse_riven_query("要斯特朗双爆紫卡", weapon_resolver=self._resolver)
+        assert q is not None
+        assert q.weapon_url_name == "strun"
+        assert q.positive_attrs == ["critical_chance", "critical_damage"]
+
+    def test_geichu_prefix_does_not_break_weapon_name(self):
+        q = parse_riven_query("给出执法者双爆紫卡，无负", weapon_resolver=self._resolver)
+        assert q is not None
+        assert q.weapon_url_name == "magistar"
+        assert q.positive_attrs == ["critical_chance", "critical_damage"]
+        assert q.no_negative is True
+
+    def test_lawgiver_shortcut_resolves_to_magistar(self):
+        """简写"执法者"应解析为 magistar（基础版执法者，紫卡可用）。"""
+        q = parse_riven_query("执法者双爆紫卡无负", weapon_resolver=self._resolver)
+        assert q is not None
+        assert q.weapon_url_name == "magistar"
 
     def test_max_price(self):
         q = parse_riven_query("rubico紫卡100以下", weapon_resolver=self._resolver)
@@ -198,6 +239,90 @@ class TestFilterLogic:
         result = self._make_result(["critical_chance"], ["recoil"])
         assert len(result.negative_attrs) == 1
         # A "no_negative" query should reject this
+
+    def test_online_filter_happens_before_limit(self, monkeypatch):
+        from warframe_agent import riven
+
+        def auction(price, status, seller):
+            return {
+                "item": {
+                    "weapon_url_name": "laetum",
+                    "name": f"laetum-{seller}",
+                    "attributes": [
+                        {"url_name": "critical_chance", "value": -40, "positive": False},
+                    ],
+                    "re_rolls": 0,
+                },
+                "buyout_price": price,
+                "owner": {"ingame_name": seller, "status": status},
+            }
+
+        auctions = [auction(50 + i, "offline", f"offline-{i}") for i in range(10)]
+        auctions.extend([
+            auction(90, "ingame", "ingame-a"),
+            auction(100, "online", "online-a"),
+            auction(110, "ingame", "ingame-b"),
+        ])
+        monkeypatch.setattr(riven, "fetch_riven_auctions",
+            lambda weapon, positive_attrs=None, negative_attrs=None, max_price=None: auctions)
+
+        query = RivenQuery(
+            weapon_url_name="laetum",
+            negative_attrs=["critical_chance"],
+            seller_statuses=("ingame", "online"),
+        )
+
+        results = search_rivens(query)
+
+        assert [result.seller for result in results] == ["ingame-a", "ingame-b", "online-a"]
+
+    def test_negative_attrs_are_sent_to_api(self, monkeypatch):
+        from warframe_agent import riven
+
+        captured_urls = []
+
+        class Response:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"payload": {"auctions": []}}
+
+        def fake_get(url, headers, timeout):
+            captured_urls.append(url)
+            return Response()
+
+        monkeypatch.setattr(riven.requests, "get", fake_get)
+        monkeypatch.setattr(riven, "_wait_for_rate_limit", lambda: None)
+
+        query = RivenQuery(weapon_url_name="laetum", negative_attrs=["critical_chance"])
+        search_rivens(query)
+
+        assert "negative_stats=critical_chance" in captured_urls[0]
+
+
+class TestRivenStatusIntent:
+    def test_default_status_can_be_online_for_new_buy_query(self):
+        from warframe_agent.chat import _riven_statuses_from_message
+
+        assert _riven_statuses_from_message("给我毒囊双枪双爆紫卡", default_online=True) == ("ingame", "online")
+
+    def test_game_status_means_ingame_only(self):
+        from warframe_agent.chat import _riven_statuses_from_message
+
+        assert _riven_statuses_from_message("给出游戏中的玩家") == ("ingame",)
+
+    def test_online_status_includes_ingame_and_online(self):
+        from warframe_agent.chat import _riven_statuses_from_message
+
+        assert _riven_statuses_from_message("给出在线玩家的") == ("ingame", "online")
+
+    def test_all_status_explicitly_includes_offline(self):
+        from warframe_agent.chat import _riven_statuses_from_message
+
+        assert _riven_statuses_from_message("给出全部玩家") == ()
 
 
 # ── 格式化 ────────────────────────────────────────────────────────────────────
@@ -267,3 +392,124 @@ class TestRivenAPI:
             r = results[0]
             assert r.weapon == "strun"
             assert r.price is not None or r.price is None  # Just check structure
+
+
+# ── ChatAgent 确定性紫卡路由测试 ─────────────────────────────────────────────
+
+
+class TestChatAgentRivenRouting:
+    """验证 ChatAgent.answer() 对紫卡查询走确定性路由，不依赖 LLM。"""
+
+    def _make_agent(self):
+        from unittest.mock import patch
+        from warframe_agent.chat import ChatAgent
+        from warframe_agent.dictionary import ResolveResult
+
+        class FakeResolver:
+            aliases = {"斯特朗": "strun"}
+
+            def resolve(self, name):
+                if name in self.aliases or "斯特朗" in name:
+                    return ResolveResult("strun", "alias", name)
+                raise LookupError(name)
+
+        def model_call(prompt):
+            raise AssertionError("LLM should not be called for deterministic riven queries")
+
+        return ChatAgent(
+            resolver=FakeResolver(),
+            order_fetcher=lambda item_id: [],
+            model_call=model_call,
+        )
+
+    def test_strun_double_crit_no_neg_routes_to_riven(self):
+        from unittest.mock import patch
+        agent = self._make_agent()
+        fake_results = [
+            RivenResult(
+                weapon="strun",
+                mod_name="strun-visicron",
+                positive_attrs=[
+                    {"stat": "critical_chance", "value": 100.0},
+                    {"stat": "critical_damage", "value": 90.0},
+                ],
+                negative_attrs=[],
+                price=50,
+                seller="TestSeller",
+                seller_status="online",
+                re_rolls=3,
+            ),
+        ]
+        with patch("warframe_agent.riven.fetch_riven_auctions", return_value=[]):
+            with patch("warframe_agent.riven.search_rivens", return_value=fake_results):
+                answer = agent.answer("斯特朗紫卡双爆无负")
+
+        assert "Strun" in answer or "strun" in answer.lower()
+        assert "暴击率" in answer or "暴击伤害" in answer or "50p" in answer
+
+    def test_riven_query_does_not_fall_to_item_search(self):
+        """紫卡查询不应该走物品匹配返回武器部件。"""
+        from unittest.mock import patch
+        agent = self._make_agent()
+        with patch("warframe_agent.riven.fetch_riven_auctions", return_value=[]):
+            with patch("warframe_agent.riven.search_rivens", return_value=[]):
+                answer = agent.answer("斯特朗紫卡双爆无负")
+
+        assert "未找到" in answer or "紫卡" in answer
+        assert "部件" not in answer
+        assert "蓝图" not in answer
+
+    def test_new_riven_query_defaults_to_online_sellers(self):
+        from unittest.mock import patch
+        agent = self._make_agent()
+        captured = {}
+
+        def fake_search(query):
+            captured["query"] = query
+            return []
+
+        with patch("warframe_agent.riven.search_rivens", side_effect=fake_search):
+            agent.answer("斯特朗紫卡双爆无负")
+
+        assert captured["query"].seller_statuses == ("ingame", "online")
+
+    def test_explicit_all_players_disables_online_filter(self):
+        from unittest.mock import patch
+        agent = self._make_agent()
+        captured = {}
+
+        def fake_search(query):
+            captured["query"] = query
+            return []
+
+        with patch("warframe_agent.riven.search_rivens", side_effect=fake_search):
+            agent.answer("斯特朗紫卡双爆无负，全部玩家")
+
+        assert captured["query"].seller_statuses == ()
+
+    def test_followup_all_players_switches_to_all_sellers(self):
+        from unittest.mock import patch
+        agent = self._make_agent()
+        captured = []
+
+        def fake_search(query):
+            captured.append(tuple(query.seller_statuses))
+            return []
+
+        with patch("warframe_agent.riven.search_rivens", side_effect=fake_search):
+            agent.answer("斯特朗紫卡双爆无负")
+            agent.answer("全部玩家")
+
+        assert captured[0] == ("ingame", "online")
+        assert captured[1] == ()
+
+    def test_model_riven_parse_rejects_unmentioned_weapon_guess(self):
+        from warframe_agent.chat import ChatAgent
+
+        agent = ChatAgent(
+            resolver=self._make_agent().resolver,
+            order_fetcher=lambda item_id: [],
+            model_call=lambda prompt: '{"weapon":"vaykor_hek","positive_attrs":["critical_chance"],"negative_attrs":[],"no_negative":false}',
+        )
+
+        assert agent._try_model_riven_parse("给出不存在武器双爆紫卡") is None

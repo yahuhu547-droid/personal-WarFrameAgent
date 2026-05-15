@@ -8,6 +8,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable
+from urllib.parse import urlencode
 
 import requests
 
@@ -85,6 +86,11 @@ ATTR_DISPLAY_NAMES: dict[str, str] = {
     "damage_vs_infested": "对Infested",
 }
 
+RIVEN_WEAPON_ALIASES: dict[str, str] = {
+    "战刃": "glaive",
+    "glaive": "glaive",
+}
+
 # ── 数据结构 ──────────────────────────────────────────────────────────────────
 
 
@@ -95,6 +101,7 @@ class RivenQuery:
     negative_attrs: list[str] = field(default_factory=list)
     no_negative: bool = False
     max_price: int | None = None
+    seller_statuses: tuple[str, ...] = ()
 
 
 @dataclass
@@ -129,8 +136,8 @@ def parse_riven_query(
 
     return RivenQuery(
         weapon_url_name=weapon_name,
-        positive_attrs=positive,
-        negative_attrs=negative,
+        positive_attrs=list(dict.fromkeys(positive)),
+        negative_attrs=list(dict.fromkeys(negative)),
         no_negative=no_negative,
         max_price=max_price,
     )
@@ -144,13 +151,19 @@ def _looks_like_riven_query(message: str) -> bool:
 
 def _extract_weapon_name(message: str, resolver: Callable[[str], str] | None) -> str | None:
     """提取消息中的武器名。"""
+    for alias, weapon_url_name in sorted(RIVEN_WEAPON_ALIASES.items(), key=lambda entry: -len(entry[0])):
+        if alias in message:
+            return weapon_url_name
+
     # 先去掉紫卡相关关键词，避免干扰武器名识别
     cleaned = message
-    for kw in ["紫卡", "裂罅", "riven", "Riven", "查", "搜", "搜索", "查询", "无负", "不要负"]:
+    noise_keywords = ["紫卡", "裂罅", "riven", "Riven", "查", "搜", "搜索", "查询", "帮我", "给我", "给出", "我要", "要", "找", "看看", "无负", "不要负", "在线", "在线玩家", "在线卖家", "在线的", "游戏中", "玩家", "卖家", "买家", "online"]
+    for kw in sorted(noise_keywords, key=len, reverse=True):
         cleaned = cleaned.replace(kw, " ")
 
-    # 去掉属性关键词
-    for attr_kw in list(RIVEN_ATTRIBUTES.keys()) + list(COMPOUND_KEYWORDS.keys()):
+    # 去掉"负+属性"复合词（先去长的，再去短的，避免"负"残留）
+    for attr_kw in sorted(list(RIVEN_ATTRIBUTES.keys()) + list(COMPOUND_KEYWORDS.keys()), key=len, reverse=True):
+        cleaned = cleaned.replace(f"负{attr_kw}", " ")
         cleaned = cleaned.replace(attr_kw, " ")
 
     # 去掉价格相关
@@ -201,15 +214,16 @@ def _extract_attributes(message: str) -> tuple[list[str], list[str], bool]:
                 if attr not in positive:
                     positive.append(attr)
 
-    # 检查单个属性关键词
+    # 先检查显式负属性（如 "负后坐力"、"负暴击率"），排除"无负"/"不要负"前缀
+    clean_for_neg = message.replace("无负", "").replace("不要负", "").replace("没负", "")
     for cn_name, api_name in RIVEN_ATTRIBUTES.items():
-        if cn_name in message and api_name not in positive:
-            positive.append(api_name)
-
-    # 检查显式负属性（如 "负后坐力"、"负后坐"）
-    for cn_name, api_name in RIVEN_ATTRIBUTES.items():
-        if f"负{cn_name}" in message:
+        if f"负{cn_name}" in clean_for_neg:
             negative.append(api_name)
+
+    # 检查正向属性关键词（排除已被"负"修饰的）
+    for cn_name, api_name in RIVEN_ATTRIBUTES.items():
+        if cn_name in message and api_name not in positive and api_name not in negative:
+            positive.append(api_name)
 
     return positive, negative, no_negative
 
@@ -232,15 +246,31 @@ _RIVEN_CACHE_TTL = 120  # 2 分钟
 _riven_cache: dict[str, tuple[list[RivenResult], float]] = {}
 
 
-def fetch_riven_auctions(weapon_url_name: str) -> list[dict]:
+def fetch_riven_auctions(
+    weapon_url_name: str,
+    positive_attrs: list[str] | None = None,
+    negative_attrs: list[str] | None = None,
+    max_price: int | None = None,
+) -> list[dict]:
     """从 warframe.market 获取紫卡拍卖原始数据。"""
-    cache_key = weapon_url_name
+    params = {
+        "type": "riven",
+        "weapon_url_name": weapon_url_name,
+        "sort_by": "price_asc",
+    }
+    if positive_attrs:
+        params["positive_stats"] = ",".join(dict.fromkeys(positive_attrs))
+    if negative_attrs:
+        params["negative_stats"] = ",".join(dict.fromkeys(negative_attrs))
+    if max_price:
+        params["buyout_price"] = str(max_price)
+    cache_key = urlencode(params, doseq=True)
     if cache_key in _riven_cache:
         data, ts = _riven_cache[cache_key]
         if time.time() - ts < _RIVEN_CACHE_TTL:
             return data
 
-    url = f"{_RIVEN_API_BASE}?type=riven&weapon_url_name={weapon_url_name}&sort_by=price_asc"
+    url = f"{_RIVEN_API_BASE}?{cache_key}"
 
     for attempt in range(3):
         try:
@@ -264,7 +294,12 @@ def fetch_riven_auctions(weapon_url_name: str) -> list[dict]:
 
 def search_rivens(query: RivenQuery) -> list[RivenResult]:
     """搜索并过滤紫卡拍卖。"""
-    auctions = fetch_riven_auctions(query.weapon_url_name)
+    auctions = fetch_riven_auctions(
+        query.weapon_url_name,
+        positive_attrs=query.positive_attrs,
+        negative_attrs=query.negative_attrs,
+        max_price=query.max_price,
+    )
     results = []
 
     for item in auctions:
@@ -305,6 +340,10 @@ def search_rivens(query: RivenQuery) -> list[RivenResult]:
             continue
 
         owner = item.get("owner", {})
+        seller_status = owner.get("status", "")
+        if query.seller_statuses and seller_status not in query.seller_statuses:
+            continue
+
         results.append(RivenResult(
             weapon=auction_item.get("weapon_url_name", ""),
             mod_name=auction_item.get("name", ""),
@@ -312,12 +351,16 @@ def search_rivens(query: RivenQuery) -> list[RivenResult]:
             negative_attrs=neg_attrs,
             price=price,
             seller=owner.get("ingame_name", ""),
-            seller_status=owner.get("status", ""),
+            seller_status=seller_status,
             re_rolls=auction_item.get("re_rolls", 0),
         ))
 
     # 按价格排序
-    results.sort(key=lambda r: r.price or 999999)
+    if query.seller_statuses:
+        status_rank = {status: index for index, status in enumerate(query.seller_statuses)}
+        results.sort(key=lambda r: (status_rank.get(r.seller_status, 999), r.price or 999999))
+    else:
+        results.sort(key=lambda r: r.price or 999999)
     return results[:10]
 
 

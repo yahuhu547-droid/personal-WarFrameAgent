@@ -105,8 +105,8 @@ def _scan_mod_flip_strategy(
                 results.append({
                     "item_id": arcane_id,
                     "item_name": flip.display_name,
-                    "buy_price": flip.r0_buy,
-                    "sell_price": flip.r5_sell,
+                    "buy_price": flip.r0_buy_price,
+                    "sell_price": flip.r10_sell_price,
                     "profit": flip.flip_profit,
                     "roi_pct": flip.roi_pct,
                     "volume_48h": flip.volume_48h,

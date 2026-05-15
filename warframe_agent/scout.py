@@ -11,7 +11,8 @@ import time
 from typing import Callable
 
 from . import config
-from .llm import _cloud_chat_sync
+from .llm import _cloud_chat_sync, chat_with_ollama
+from .model_orchestrator import ModelOrchestrator, ModelRequest
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,11 @@ def _call_cloud(prompt: str, model: str) -> str | None:
     """调用指定云端模型，返回文本响应。"""
     try:
         messages = [{"role": "user", "content": prompt}]
-        return _cloud_chat_sync(messages, model=model)
+        orchestrator = ModelOrchestrator(
+            cloud_call=lambda payload, selected_model: _cloud_chat_sync(payload, model=selected_model),
+            local_call=chat_with_ollama,
+        )
+        return orchestrator.chat(ModelRequest(messages=messages, model=model, task="scout")).content
     except Exception as exc:
         logger.warning("Scout 云端调用失败 (%s): %s", model, exc)
         return None

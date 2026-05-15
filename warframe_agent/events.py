@@ -132,8 +132,8 @@ def _build_item_type_map() -> dict[str, str]:
         items = _json.loads(items_path.read_text(encoding="utf-8-sig"))
         name_to_id: dict[str, str] = {}
         for item in items:
-            en_name = item.get("en", "").lower()
-            item_id = item.get("id", "")
+            en_name = (item.get("en_name") or item.get("en", "")).lower()
+            item_id = item.get("item_id") or item.get("id", "")
             if en_name and item_id:
                 name_to_id[en_name] = item_id
             # 也用 search_terms

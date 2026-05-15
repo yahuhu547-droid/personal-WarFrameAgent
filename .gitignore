@@ -11,3 +11,43 @@ build/
 .vscode/
 *.lnk
 SESSION_HANDOFF_*.md
+
+# Local secrets and per-machine configuration
+.env.*
+!.env.example
+data/feishu_config.json
+data/push_config.json
+data/feishu_chat_id.txt
+
+# Runtime logs, caches, and local state
+data/*.log
+data/conversation_logs.jsonl
+data/*_cache.json
+data/worldstate_raw.json
+data/goals.json
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+
+# Test and UI artifacts
+test_results*.json
+playwright-report/
+test-results/
+screenshots/
+ui_upgrade_screenshot.png
+
+# Test artifacts and temp files
+_test_reply.txt
+_ws_reply.txt
+=1.24.0
+test_ui.py
+
+# Claude memory (per-user)
+.claude/memory/
+!.claude/memory/.gitkeep
+
+# Test screenshots
+md/test_screenshots/

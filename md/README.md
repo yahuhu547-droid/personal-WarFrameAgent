@@ -1,263 +1,179 @@
 # Warframe Trading Agent
 
-基于 Python + Ollama 本地大模型（qwen3:8b）的 Warframe 游戏交易智能助手。完全本地运行，无需云端 API，保护用户隐私。
+面向 Warframe 交易玩家的本地优先智能助手，提供查价、套装补齐、活动查询、交易记录、目标管理、价格监控、飞书/浏览器推送，以及 Web / CLI / 飞书三种交互方式。
 
-![UI Preview](docs/ui_preview.png)
+当前架构是 **本地模型优先 + 可选云端增强**：
 
-## 功能特性
+- 本地模型负责日常对话、工具路由和大部分实时查询。
+- 云端模型用于可选的复杂分析、自动路由和 Scout 预筛选。
+- 未配置 `CLOUD_API_KEY` 时，系统会停留在本地模型路径，不会自动走云端。
 
-### 核心查价
+## 核心能力
 
-- **实时查价** — 查询 warframe.market v2 API 的最低卖价、最高收价、价差，显示卖家/买家声望
-- **游戏内私聊命令** — 自动生成 `/w 玩家名 Hi! I want to buy/sell...` 格式的交易私聊，支持一键复制到剪贴板
-- **赋能满级估算** — 自动计算 arcane 类物品 21 个满级的总花费
-- **交易意图检测** — 识别"想买"、"想出"、"能卖吗"等中文表达，给出针对性的买入/卖出建议
+### 1. 交易与价格
 
-### 物品名称解析（6 层 fallback）
+- 实时查询 warframe.market 最低卖价、最高收价、价差、卖家/买家信息
+- 自动生成游戏内 `/w` 私聊命令
+- Arcane 满级成本估算
+- Prime 套装整套 vs 拆件价格对比
+- 缺失部件补齐成本计算
+- Mod 翻转、套装利润、投资顾问
+- Riven / 紫卡检索与筛选（自动识别变体武器，强制使用基础版查询）
 
-1. 手动别名表（`data/item_aliases.json`）
-2. 本地物品字典（从游戏导出数据构建）
-3. 生成式别名（自动从中英文数据生成）
-4. 标准化 market_id（空格→下划线、大小写归一化）
-5. LLM 模糊匹配（Ollama 推理）
-6. RAG 语义搜索（关键词匹配 + 编辑距离）
+### 2. 游戏数据与事件
 
-### Agent 能力
+- 虚空裂缝、Baro、入侵、虚空风暴等活动查询
+- 遗物掉落来源与掉落物查询
+- Baro 库存分析与购买建议
+- Wiki / 游戏资料接口聚合
 
-- **LLM 工具路由** — qwen3:8b 模型实现 Ollama 原生 function calling，ReAct 循环自动将自然语言分发到 13 个工具：
-  - `query_price`: 查询单品实时价格
-  - `query_set`: Prime 套装整套 vs 拆件对比
-  - `query_missing_parts`: 计算补齐套装缺失部件花费
-  - `scan_favorites`: 扫描关注列表当前状态
-  - `set_alert`: 设置价格提醒
-  - `price_trend`: 查看价格历史趋势
-  - `mod_flipper`: Mod 翻转利润排行榜（低买满级卖）
-  - `set_profit`: Prime 套装拆件利润分析
-  - `investment_advisor`: 投资顾问（按预算 + ROI 扫描机会）
-  - `query_events`: 游戏活动查询（虚空裂缝/Baro/入侵/虚空风暴，支持 type 过滤）
-  - `deep_analysis`: 云端大模型深度分析单个物品
-  - `plan`: 复杂请求分解为多步子任务执行
-  - `general_chat`: 一般交易问题闲聊
-- **ReAct 多步推理** — Ollama 原生 tool_calls + JSON 双格式解析，支持链式工具调用
-- **事件订阅推送** — `/fissure add` 订阅虚空裂缝条件，匹配时自动推送（支持等级/任务/地点/钢铁过滤）
-- **Baro 购买推荐** — 虚空商人到来时自动分析库存，对比杜卡特成本与市场白金价格，推送"值得买"列表
-- **多轮对话** — session history 注入 LLM，上下文连贯
-- **行为学习** — 分析用户查询模式构建画像，个性化回答
-- **主动智能** — 价格异常检测 + 趋势监控，Agent 主动给出建议
-- **语义 RAG** — nomic-embed-text 向量搜索，支持"回蓝的赋能"→ arcane_energize 等语义匹配
-- **后台价格监控** — daemon 线程每 5 分钟扫描关注物品和价格提醒，触发阈值时主动推送通知
-- **价格历史追踪** — SQLite 自动记录每次查询的价格快照，支持趋势分析（上涨/下跌/持平）
-- **会话上下文** — 检测追问关键词（"那散件呢"、"涨了吗"、"比昨天"等 14 种模式），自动复用上次查询物品
-- **持久化记忆系统** — 不可变 dataclass 设计，支持：
-  - 收藏列表（`/fav add/remove`）
-  - 价格提醒（`/alert add/remove`，支持 below/above 方向，可添加备注）
-  - 交易偏好（平台、crossplay、最大结果数）
-  - 裂缝订阅（`/fissure add/remove/list`）
-  - 常见问题自动记录
-  - 智能建议（异常检测结果）
+### 3. 智能体能力
 
-### Prime 套装
+- 多轮对话与上下文追问
+- 6 层物品名解析：手动别名、字典、生成式别名、标准化、LLM 模糊匹配、RAG 语义搜索
+- ReAct 工具路由：查价、套装、趋势、活动、投资、Riven、深度分析等能力按需调用
+- 复杂问题分解与分步执行（plan）
+- 本地优先、复杂请求可选云端分析
+- Scout 预筛选：先从候选池筛出更值得深入查询的条目，再做详细扫描
 
-- **整套 vs 拆件对比** — 自动查询套装价格和所有散件价格之和，计算哪种更划算
-- **补件计算** — 输入已有部件，计算补齐剩余部件的最低花费
-- **通用化支持** — 支持所有 Prime 战甲和武器，自动识别部件关系
+### 4. 自动化与主动提醒
 
-### 斜杠命令系统
+- 收藏列表、价格提醒、关注列表
+- 后台价格监控与异常提醒
+- 裂缝订阅与推送
+- 交易自动记录、盈亏统计
+- 交易目标创建、执行、复盘
+- 浏览器通知、WxPusher、飞书机器人推送
 
-| 命令 | 功能 |
-|------|------|
-| `/help` | 查看所有可用命令 |
-| `/memory` | 查看记忆摘要（偏好、收藏、提醒、常见问题） |
-| `/scan` | 手动触发全量扫描（收藏价格 + 提醒检查） |
-| `/fav add 物品名` | 添加收藏 |
-| `/fav remove 物品名` | 移除收藏 |
-| `/alert add 物品名 below 45` | 设置价格提醒 |
-| `/alert remove 物品名 below 45` | 移除价格提醒 |
-| `/fissure add 虚空 歼灭` | 订阅虚空裂缝通知 |
-| `/fissure list` | 查看裂缝订阅 |
-| `/fissure remove 序号` | 取消裂缝订阅 |
-| `/goal set 目标描述` | 创建交易目标 |
-| `/goal done ID` | 标记目标完成 |
-| `/goal review` | 复盘目标 |
-| `/pref platform pc` | 设置交易平台 |
-| `/pref crossplay on` | 设置跨平台 |
-| `/pref max 10` | 设置最大显示结果数 |
+## 交互方式
 
-### 其他
+### Web UI
 
-- **每日价格报告** — 批量生成关注物品的价格表，输出到 `reports/` 目录
-- **本地物品字典重建** — 从游戏导出数据重新生成中英文映射
+- FastAPI + WebSocket 提供聊天、推送和工具面板
+- 纯 HTML/CSS/JS 前端，无构建工具依赖
+- 价格详情、趋势图、收藏/提醒/关注面板
 
-## 技术栈
-
-- **Python 3.14** — 纯标准库 + 最少外部依赖
-- **Ollama**（qwen3:8b, 5.2GB）— 本地推理，零云端调用
-- **FastAPI + WebSocket** — Web 后端 + 流式通信
-- **warframe.market v2 API** — 实时交易数据
-- **SQLite** — 价格历史 + 交易历史持久化存储
-- **Playwright** — 浏览器自动化抓取（绕过 Cloudflare）
-- **Chart.js** — 价格趋势可视化
-- **纯 HTML/CSS/JS** — 前端无构建工具，Tenno 科技终端风格
-- **409 个单元测试** — 覆盖所有核心模块和 Web API
-
-## 快速开始
-
-### 前置要求
-
-- Python 3.10+
-- [Ollama](https://ollama.com/) 已安装并运行
-- 下载模型：`ollama pull qwen3:8b`
-
-### 安装
-
-```bash
-git clone https://github.com/yahuhu547-droid/personal-WarFrameAgent.git
-cd personal-WarFrameAgent
-python -m venv .venv
-.venv\Scripts\activate      # Windows
-pip install -r requirements.txt
-```
-
-### 构建自定义模型
-
-```bash
-python tools/build_ollama_model.py
-```
-
-### 运行
-
-**Web 模式**（推荐）：
+启动：
 
 ```bash
 python start_web.py
-# 浏览器访问 http://localhost:8000
+# 浏览器访问 http://127.0.0.1:8000
 ```
 
-**CLI 模式**：
+### CLI
 
 ```bash
 python main.py
 ```
 
-或双击 `start_web.bat`（Web 界面）/ `start_agent.bat`（CLI 主菜单）。
+### 飞书机器人
 
-### 对话示例
+- 支持多轮对话、查价、策略、交易和裂缝订阅
+- 使用说明见 [`FeishuUserGuide.md`](FeishuUserGuide.md)
 
-```
-你：充沛现在多少钱
-Agent：物品: 充沛赋能
-      最低卖价: 45p，卖家 Player1
-      最高收价: 38p，买家 Player2
-      价差: 7p
-      满级估算: 21 个约 945p
+## 斜杠命令概览
 
-你：那散件呢
-Agent：（自动复用上次物品，查询散件价格）
+| 命令 | 功能 |
+|------|------|
+| `/help` | 查看帮助 |
+| `/memory` | 查看记忆摘要 |
+| `/scan` | 扫描收藏和提醒 |
+| `/fav add/remove` | 管理收藏 |
+| `/alert add/remove` | 管理价格提醒 |
+| `/fissure add/remove/list` | 管理裂缝订阅 |
+| `/trade list/stats/add/undo` | 管理交易记录 |
+| `/relic` | 查询遗物掉落或遗物内容 |
+| `/strategy list/run` | 执行策略扫描 |
+| `/vault` | 查询 Vault 状态 |
+| `/goal` | 创建、完成、复盘目标 |
+| `/pref` | 设置平台、跨平台和结果数 |
 
-你：/alert add 充沛 below 40
-Agent：已添加提醒: 充沛 低于 40p 时通知
+## 技术栈
+
+- Python 3.14
+- Ollama（本地对话 / 路由 / embedding）
+- FastAPI + WebSocket
+- warframe.market API
+- Warframe World State API
+- SQLite（价格历史、交易历史、缓存）
+- Playwright（抓取与 WebUI 验证）
+- Chart.js
+- 纯 HTML / CSS / JavaScript
+
+## 当前测试状态
+
+当前仓库快照下，测试套件已通过：
+
+- **55 个测试文件**
+- **545 个测试用例（紫卡相关 75 个）**
+
+覆盖聊天、Web API、价格历史、监控、推送、Riven、Relic、策略、RAG、目标系统等核心模块。
+
+运行：
+
+```bash
+python -m pytest tests -q
 ```
 
 ## 项目结构
 
-```
-warframe_agent/        # 核心模块
-  agent.py             # 主 Agent 入口，物品查询 + 报告生成
-  baro.py              # Baro 购买推荐分析器
-  chat.py              # 对话式交易助手，整合所有 Agent 能力
-  config.py            # 配置常量（API 地址、模型名、路径）
-  dictionary.py        # 6 层物品名称解析器
-  events.py            # 游戏事件追踪（虚空裂缝/Baro/入侵/虚空风暴）
-  feedback.py          # 反馈分析器（交易结果 → 策略信号）
-  feishu.py            # 飞书机器人（WebSocket 长连接）
-  formatter.py         # 输出格式化 + 游戏内私聊命令生成
-  goals.py             # 目标系统（创建/分解/执行/追踪）
-  investment.py        # 投资顾问扫描器
-  knowledge.py         # 结构化知识库（物品统计、品类健康度）
-  llm.py               # Ollama LLM 调用封装（单轮 + 多轮对话）
-  market.py            # warframe.market v2 API 客户端（缓存 + 限速）
-  memory.py            # 持久化记忆系统（不可变 dataclass + 画像 + 裂缝订阅）
-  mod_flipper.py       # Mod 翻转利润扫描器
-  monitor.py           # 后台价格监控（daemon 线程 + 裂缝检查 + Baro 推荐）
-  names.py             # 物品显示名称 + 模块级缓存
-  patterns.py          # 模式发现（从历史数据提取规律）
-  price_history.py     # SQLite 价格历史追踪 + 趋势分析
-  push.py              # WxPusher 微信推送
-  rag.py               # RAG 语义搜索（关键词 + 向量余弦相似度）
-  rules.py             # 规则引擎（市场评估、目标生成、推送消息）
-  scraper.py           # Playwright 浏览器抓取（绕过 Cloudflare）
-  session.py           # 会话上下文 + 追问检测 + messages 构建
-  set_profit.py        # Prime 套装利润扫描器
-  tool_router.py       # ReAct 工具路由 + Ollama 原生 tool_calls
-  trade_history.py     # SQLite 交易历史记录
-  trade_intent.py      # 交易意图检测（买入/卖出/观望）
-  warframes.py         # Prime 套装定价 + 补件计算
+```text
+warframe_agent/
+  agent.py              # CLI 基础 Agent
+  chat.py               # 对话式交易助手
+  config.py             # 模型、路径、阈值、外部服务配置
+  llm.py                # 本地/云端模型调用与自动路由
+  tool_router.py        # ReAct 工具路由
+  dictionary.py         # 物品名称解析
+  market.py             # warframe.market API 封装
+  monitor.py            # 后台扫描与主动推送
+  memory.py             # 持久化记忆
+  price_history.py      # 价格历史
+  trade_history.py      # 交易历史
+  events.py             # 游戏事件追踪
+  baro.py               # Baro 推荐
+  relics.py             # 遗物搜索与掉落数据
+  riven.py              # Riven / 紫卡数据查询
+  scout.py              # 多模型预筛选
+  scanner.py            # 扫描任务支持
+  strategies.py         # 交易策略
+  goals.py              # 目标系统
+  report.py             # 每日报告
+  push.py               # WxPusher 推送
+  feishu.py             # 飞书机器人
   web/
-    app.py             # FastAPI Web 应用（35+ API 端点 + 2 WebSocket）
-    static/
-      index.html       # 主页面（Tenno 科技终端风格）
-      css/             # 变量、动画、主样式、响应式
-      js/              # app.js, chat.js, sidebar.js, chart.js
-tests/                 # 40+ 测试文件，409 个测试用例
-data/                  # 物品数据、别名映射、记忆存储、遗物数据
-tools/                 # 数据构建 + embedding 预计算脚本
-md/                    # 项目文档
+    app.py              # FastAPI 应用与 WebSocket
+    static/             # Web UI 静态资源
+
+tests/                  # 后端与集成测试
+data/                   # 本地数据、缓存、配置、运行态文件
+docs/                   # 设计文档、执行计划、阶段报告
+md/                     # 面向项目阅读的主文档
 ```
 
-## 测试
+## 架构概览
 
-```bash
-python -m pytest tests/ -v
-```
-
-40+ 测试文件，409 个测试用例，覆盖：
-- 物品解析全链路（别名、字典、生成式、标准化、LLM、RAG）
-- 对话系统（查价、追问、斜杠命令、记忆操作、RAG 降级）
-- 多轮对话（session history、messages 构建、上下文连贯）
-- ReAct 推理（工具调用、多步分解、链式执行、Ollama 原生 tool_calls）
-- 行为学习（用户画像、关键词分析、个性化注入）
-- 主动智能（异常检测、趋势监控、建议生成）
-- 语义 RAG（向量搜索、余弦相似度、embedding 缓存）
-- 后台监控（扫描触发、通知队列、线程生命周期、网络容错）
-- 价格历史（记录/查询、趋势计算、边界情况）
-- 会话上下文（追问检测、物品复用、历史记录）
-- Prime 套装（整套定价、拆件对比、补件计算、部件分组）
-- 交易意图（买入/卖出/观望识别）
-- 市场 API 客户端（排序、过滤、格式化）
-- Web API（所有端点、WebSocket、缓存、限速）
-- 游戏事件（虚空裂缝解析、Baro 解析、事件订阅匹配）
-- 三大交易工具（Mod 翻转、套装利润、投资顾问）
-- 飞书集成（消息收发、WebSocket 长连接）
-
-## 架构设计
-
-```
+```text
 用户输入
-  │
-  ├─ 斜杠命令 (/fav, /alert, /scan, /pref, /memory, /fissure, /goal)
-  │    └─ 直接执行，操作记忆系统
-  │
-  ├─ 事件/交易工具关键词检测
-  │    └─ 直接走路由器，跳过物品匹配（避免"虚空"→baro_void_signal 误匹配）
-  │
-  ├─ 追问检测 ("那散件呢", "涨了吗")
-  │    └─ 复用 SessionContext 中的上次物品
-  │
-  ├─ 确定性路径（别名/字典直接匹配）
-  │    ├─ 交易意图检测 → 针对性买卖建议
-  │    └─ LLM 生成自然语言回复
-  │
-  └─ 模糊路径（无直接匹配）
-       ├─ ReAct 工具路由 → Ollama 原生 tool_calls → 执行 → 回复
-       └─ RAG 语义搜索 → 降级回复
+  ├─ CLI / Web / 飞书
+  ├─ 斜杠命令 → 直接操作记忆、提醒、目标、订阅
+  ├─ 确定性路径 → 别名/字典/规则直接命中
+  └─ 模糊路径
+       ├─ ReAct 工具路由
+       ├─ RAG 语义回退
+       └─ 复杂请求可选云端增强
 ```
 
 ## 相关文档
 
-- [UI 设计计划](docs/ui_design_plan.md) - 详细的设计理念和规范
-- [UI 实现报告](docs/ui_implementation_report.md) - 实现的功能和技术细节
-- [升级计划](docs/upgrade_plan.md) - Phase 5-8 的完整升级计划
-- [UI 预览](docs/ui_preview.html) - 在线预览设计效果
+- [功能清单](FeatureList.md)
+- [智能体架构说明](AgentArchitecture.md)
+- [Web 服务与接口说明](WebService.md)
+- [飞书机器人使用指南](FeishuUserGuide.md)
+- [安全加固与分阶段整改执行计划](../docs/security-and-hardening-execution-plan.md)
+- [UI 设计计划](../docs/ui_design_plan.md)
+- [UI 实现报告](../docs/ui_implementation_report.md)
+- [UI 预览](../docs/ui_preview.html)
 
 ## License
 

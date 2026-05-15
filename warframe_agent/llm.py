@@ -12,8 +12,14 @@ logger = logging.getLogger(__name__)
 # ── 云端模型 ──────────────────────────────────────────────────────────────
 
 
+def _ensure_cloud_api_key() -> None:
+    if not config.CLOUD_API_KEY:
+        raise RuntimeError("CLOUD_API_KEY is not configured")
+
+
 def _cloud_chat_sync(messages: list[dict[str, str]], model: str = config.CLOUD_MODEL) -> str:
     """同步调用云端 OpenAI 兼容 API"""
+    _ensure_cloud_api_key()
     import urllib.request
     payload = json.dumps({
         "model": model,
@@ -35,45 +41,40 @@ def _cloud_chat_sync(messages: list[dict[str, str]], model: str = config.CLOUD_M
 
 
 async def _cloud_chat_stream(messages: list[dict[str, str]], model: str = config.CLOUD_MODEL) -> AsyncIterator[str]:
-    """流式调用云端 OpenAI 兼容 API"""
-    import urllib.request
-    payload = json.dumps({
+    """流式调用云端 OpenAI 兼容 API（使用 httpx 异步客户端）"""
+    _ensure_cloud_api_key()
+    import httpx
+    payload = {
         "model": model,
         "messages": messages,
         "max_tokens": config.CLOUD_MAX_TOKENS,
         "stream": True,
-    }).encode()
-    req = urllib.request.Request(
-        f"{config.CLOUD_API_BASE}/chat/completions",
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {config.CLOUD_API_KEY}",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        buffer = ""
-        while True:
-            chunk = resp.read(1024)
-            if not chunk:
-                break
-            buffer += chunk.decode()
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-                line = line.strip()
-                if not line or not line.startswith("data: "):
-                    continue
-                data_str = line[6:]
-                if data_str == "[DONE]":
-                    return
-                try:
-                    data = json.loads(data_str)
-                    delta = data["choices"][0].get("delta", {})
-                    content = delta.get("content", "")
-                    if content:
-                        yield content
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {config.CLOUD_API_KEY}",
+    }
+    async with httpx.AsyncClient(timeout=120) as client:
+        async with client.stream("POST", f"{config.CLOUD_API_BASE}/chat/completions", json=payload, headers=headers) as resp:
+            buffer = ""
+            async for chunk in resp.aiter_text():
+                buffer += chunk
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.strip()
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]
+                    if data_str == "[DONE]":
+                        return
+                    try:
+                        data = json.loads(data_str)
+                        delta = data["choices"][0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            yield content
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        continue
 
 
 # ── 复杂度评估 ────────────────────────────────────────────────────────────
@@ -113,6 +114,8 @@ def estimate_complexity(message: str) -> int:
 
 def should_use_cloud(message: str) -> bool:
     """根据配置和复杂度决定是否使用云端模型。"""
+    if not config.CLOUD_API_KEY:
+        return False
     if config.MODEL_ROUTING == "cloud":
         return True
     if config.MODEL_ROUTING == "local":
@@ -126,23 +129,13 @@ def should_use_cloud(message: str) -> bool:
 
 def chat_with_model(messages: list[dict[str, str]], model: str | None = None) -> str:
     """统一 LLM 调用接口。model="local" | "cloud" | None(自动)"""
-    if model == "cloud":
-        return _cloud_chat_sync(messages)
-    if model == "local":
-        return chat_with_ollama(messages)
-    # 自动路由：从最后一条 user 消息提取内容判断复杂度
-    user_msg = ""
-    for m in reversed(messages):
-        if m["role"] == "user":
-            user_msg = m["content"]
-            break
-    if should_use_cloud(user_msg):
-        try:
-            return _cloud_chat_sync(messages)
-        except Exception as exc:
-            logger.warning("云端模型调用失败，回退本地: %s", exc)
-            return chat_with_ollama(messages)
-    return chat_with_ollama(messages)
+    from .model_orchestrator import ModelOrchestrator, ModelRequest
+
+    orchestrator = ModelOrchestrator(
+        cloud_call=lambda payload, selected_model: _cloud_chat_sync(payload, model=selected_model),
+        local_call=chat_with_ollama,
+    )
+    return orchestrator.chat(ModelRequest(messages=messages, model=model, task="chat", use_cache=False)).content
 
 
 async def stream_chat_model(messages: list[dict[str, str]], model: str | None = None) -> AsyncIterator[str]:

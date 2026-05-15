@@ -81,6 +81,10 @@ class TestWebAPI(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ok"})
 
+    def test_set_preference_invalid_max_results(self):
+        response = self.client.post("/api/pref", json={"key": "max_results", "value": "0"})
+        self.assertEqual(response.status_code, 422)
+
     @patch("warframe_agent.web.app.price_db")
     def test_get_history(self, mock_db):
         from warframe_agent.price_history import PriceSnapshot
@@ -94,6 +98,13 @@ class TestWebAPI(unittest.TestCase):
         data = response.json()
         self.assertEqual(data["item_id"], "arcane_energize")
         self.assertEqual(len(data["snapshots"]), 2)
+
+
+    @patch("warframe_agent.web.app.price_db")
+    def test_get_history_invalid_range(self, mock_db):
+        response = self.client.get("/api/history/arcane_energize?range=90d")
+        self.assertEqual(response.status_code, 422)
+
 
 
 class TestWatchlistAPI(unittest.TestCase):
@@ -195,23 +206,20 @@ class TestTradesAPI(unittest.TestCase):
         response = self.client.delete("/api/trades/999")
         self.assertEqual(response.status_code, 404)
 
-    @patch("warframe_agent.web.app.trade_db")
-    def test_get_trade_stats(self, mock_db):
-        mock_db.get_trade_stats.return_value = {
-            "total_trades": 5,
-            "buy_count": 3,
-            "sell_count": 2,
-            "total_spent": 300,
-            "total_earned": 500,
-            "net_profit": 200,
-            "most_traded": [],
-        }
+    def test_add_trade_invalid_trade_type(self):
+        response = self.client.post("/api/trades", json={
+            "item_id": "item1",
+            "item_name": "物品一",
+            "trade_type": "hold",
+            "price": 100,
+        })
+        self.assertEqual(response.status_code, 422)
 
-        response = self.client.get("/api/trades/stats")
-        self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertEqual(data["total_trades"], 5)
-        self.assertEqual(data["net_profit"], 200)
+    @patch("warframe_agent.web.app.trade_db")
+    def test_get_trades_invalid_limit(self, mock_db):
+        response = self.client.get("/api/trades?limit=0")
+        self.assertEqual(response.status_code, 422)
+
 
     @patch("warframe_agent.web.app.trade_db")
     def test_get_trades_by_item(self, mock_db):
@@ -276,7 +284,7 @@ class TestAliasesAPI(unittest.TestCase):
             "name": "",
             "item_id": "arcane_energize",
         })
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 422)
 
     @patch("warframe_agent.web.app.inject_custom_aliases")
     @patch("warframe_agent.web.app.save_custom_aliases")

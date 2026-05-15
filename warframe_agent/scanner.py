@@ -55,8 +55,8 @@ class OpportunityScanner:
         sellers = best_sellers(orders)
         buyers = best_buyers(orders)
 
-        sell_price = sellers[0]["platinum"] if sellers else None
-        buy_price = buyers[0]["platinum"] if buyers else None
+        sell_price = sellers[0].platinum if sellers else None
+        buy_price = buyers[0].platinum if buyers else None
 
         if sell_price is None or buy_price is None:
             return None

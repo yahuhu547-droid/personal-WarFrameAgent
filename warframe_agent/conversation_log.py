@@ -40,8 +40,11 @@ def load_conversations(limit: int = 0) -> list[ConversationEntry]:
             line = line.strip()
             if not line:
                 continue
-            data = json.loads(line)
-            entries.append(ConversationEntry(**data))
+            try:
+                data = json.loads(line)
+                entries.append(ConversationEntry(**data))
+            except (json.JSONDecodeError, TypeError, KeyError):
+                continue
     if limit > 0:
         entries = entries[-limit:]
     return entries

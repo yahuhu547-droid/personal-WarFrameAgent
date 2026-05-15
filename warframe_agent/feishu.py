@@ -45,6 +45,7 @@ class FeishuBot:
         self.on_message = on_message  # (user_text, message_id) -> reply_text
         self._client: lark.Client | None = None
         self._ws_proc: subprocess.Popen | None = None
+        self._log_file = None
 
     @property
     def available(self) -> bool:
@@ -173,7 +174,7 @@ class FeishuBot:
             logger.warning("飞书卡片回复异常: %s", exc)
             return False
 
-    def _handle_message(self, data: P2ImMessageReceiveV1) -> None:
+    def _handle_message(self, data) -> None:
         """处理接收到的消息"""
         try:
             msg = data.event.message
@@ -239,6 +240,12 @@ class FeishuBot:
                 self._ws_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._ws_proc.kill()
+        if self._log_file:
+            try:
+                self._log_file.close()
+            except Exception:
+                pass
+            self._log_file = None
         logger.info("飞书 WebSocket 子进程已停止")
 
     def _kill_old_workers(self) -> None:

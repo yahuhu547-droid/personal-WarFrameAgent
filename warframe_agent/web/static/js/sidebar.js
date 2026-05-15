@@ -24,6 +24,7 @@ function savePriceCache(prices) {
 async function fetchFavoritesPrices() {
     try {
         const res = await fetch('/api/favorites_prices');
+        if (!res.ok) return;
         const data = await res.json();
         const prices = {};
         data.items.forEach(item => {
@@ -110,7 +111,7 @@ function renderFavorites(favorites) {
     const list = document.getElementById('favorites-list');
     if (!list) return;
     const header = list.previousElementSibling;
-    list.innerHTML = '';
+    list.textContent = '';
 
     if (!favorites || favorites.length === 0) {
         list.classList.add('collapsed');
@@ -127,38 +128,64 @@ function renderFavorites(favorites) {
         div.style.animationDelay = `${index * 50}ms`;
         div.dataset.itemId = typeof fav === 'object' ? fav.item_id : '';
 
-        // 兼容新旧格式：新格式为 {display, item_id} 对象，旧格式为字符串
         const itemId = typeof fav === 'object' ? fav.item_id : '';
         const display = typeof fav === 'object' ? fav.display : fav;
-
-        // 解析显示名称
-        const parts = display.split(' / ');
-        const displayName = parts[0] || display;
+        const displayText = typeof display === 'string' ? display : '';
+        const parts = displayText.split(' / ');
+        const displayName = parts[0] || displayText;
         const englishName = parts.length >= 3 ? parts[1] : '';
-
-        // 使用缓存的价格
         const cached = currentPrices[itemId] || previousPrices[itemId];
         const priceText = cached && cached.sell !== null ? `${cached.sell}p` : '';
 
-        div.innerHTML = `
-            <div class="item-header">
-                <span class="item-name">${displayName}</span>
-                <span class="item-price">${priceText}</span>
-            </div>
-            ${englishName ? `<div class="item-sub">${englishName}</div>` : ''}
-            <div class="item-actions">
-                <button class="action-btn" onclick="event.stopPropagation(); queryItemPrice('${itemId}')" title="查询价格">
-                    <span>查价</span>
-                </button>
-                <button class="action-btn danger" onclick="event.stopPropagation(); removeFavoriteItem('${itemId}')" title="移除收藏">
-                    <span>移除</span>
-                </button>
-            </div>
-        `;
+        const headerRow = document.createElement('div');
+        headerRow.className = 'item-header';
 
-        // 点击查询价格
-        div.addEventListener('click', (e) => {
-            if (!e.target.closest('.action-btn')) {
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'item-name';
+        nameSpan.textContent = displayName;
+
+        const priceSpan = document.createElement('span');
+        priceSpan.className = 'item-price';
+        priceSpan.textContent = priceText;
+
+        headerRow.append(nameSpan, priceSpan);
+        div.appendChild(headerRow);
+
+        if (englishName) {
+            const subDiv = document.createElement('div');
+            subDiv.className = 'item-sub';
+            subDiv.textContent = englishName;
+            div.appendChild(subDiv);
+        }
+
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'item-actions';
+
+        const queryButton = document.createElement('button');
+        queryButton.type = 'button';
+        queryButton.className = 'action-btn';
+        queryButton.title = '查询价格';
+        queryButton.appendChild(document.createElement('span')).textContent = '查价';
+        queryButton.addEventListener('click', (event) => {
+            event.stopPropagation();
+            queryItemPrice(itemId);
+        });
+
+        const removeButton = document.createElement('button');
+        removeButton.type = 'button';
+        removeButton.className = 'action-btn danger';
+        removeButton.title = '移除收藏';
+        removeButton.appendChild(document.createElement('span')).textContent = '移除';
+        removeButton.addEventListener('click', (event) => {
+            event.stopPropagation();
+            removeFavoriteItem(itemId);
+        });
+
+        actionsDiv.append(queryButton, removeButton);
+        div.appendChild(actionsDiv);
+
+        div.addEventListener('click', (event) => {
+            if (!event.target.closest('.action-btn')) {
                 queryItemPrice(itemId);
             }
         });
@@ -176,7 +203,7 @@ function renderAlerts(alerts) {
     const list = document.getElementById('alerts-list');
     if (!list) return;
     const header = list.previousElementSibling;
-    list.innerHTML = '';
+    list.textContent = '';
 
     if (!alerts || alerts.length === 0) {
         list.classList.add('collapsed');
@@ -197,35 +224,63 @@ function renderAlerts(alerts) {
         const directionIcon = alert.direction === 'below' ? '📉' : '📈';
         const directionText = alert.direction === 'below' ? '低于' : '高于';
         const alertItemId = alert.item_id || alert.item;
+        const alertItemName = alert.item || alertItemId;
 
-        div.innerHTML = `
-            <div class="item-header">
-                <span class="item-name">${alert.item}</span>
-                <span class="item-badge ${alert.direction}">${directionIcon}</span>
-            </div>
-            <div class="item-sub">${directionText} ${alert.price}p 时提醒${alert.note ? ` - ${alert.note}` : ''}</div>
-            <div class="item-actions">
-                <button class="action-btn" onclick="queryItemPrice('${alertItemId}')" title="查询价格">
-                    <span>查价</span>
-                </button>
-                <button class="action-btn danger" onclick="removeAlertItem('${alertItemId}', '${alert.direction}', ${alert.price})" title="移除提醒">
-                    <span>移除</span>
-                </button>
-            </div>
-        `;
+        const headerRow = document.createElement('div');
+        headerRow.className = 'item-header';
 
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'item-name';
+        nameSpan.textContent = alertItemName;
+
+        const badgeSpan = document.createElement('span');
+        badgeSpan.className = 'item-badge';
+        if (alert.direction === 'below' || alert.direction === 'above') {
+            badgeSpan.classList.add(alert.direction);
+        }
+        badgeSpan.textContent = directionIcon;
+
+        headerRow.append(nameSpan, badgeSpan);
+        div.appendChild(headerRow);
+
+        const subDiv = document.createElement('div');
+        subDiv.className = 'item-sub';
+        subDiv.textContent = `${directionText} ${alert.price}p 时提醒${alert.note ? ` - ${alert.note}` : ''}`;
+        div.appendChild(subDiv);
+
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'item-actions';
+
+        const queryButton = document.createElement('button');
+        queryButton.type = 'button';
+        queryButton.className = 'action-btn';
+        queryButton.title = '查询价格';
+        queryButton.appendChild(document.createElement('span')).textContent = '查价';
+        queryButton.addEventListener('click', () => queryItemPrice(alertItemId));
+
+        const removeButton = document.createElement('button');
+        removeButton.type = 'button';
+        removeButton.className = 'action-btn danger';
+        removeButton.title = '移除提醒';
+        removeButton.appendChild(document.createElement('span')).textContent = '移除';
+        removeButton.addEventListener('click', () => removeAlertItem(alertItemId, alert.direction, alert.price));
+
+        actionsDiv.append(queryButton, removeButton);
+        div.appendChild(actionsDiv);
         list.appendChild(div);
     });
 
-    // 添加展开/收起按钮
     if (alerts.length > MAX_VISIBLE_ALERTS) {
         const toggleBtn = document.createElement('div');
         toggleBtn.className = 'list-toggle';
-        toggleBtn.innerHTML = `
-            <button class="toggle-btn" onclick="toggleAlertsView()">
-                ${showAllAlerts ? '收起' : `查看全部 (${alerts.length})`}
-            </button>
-        `;
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'toggle-btn';
+        button.textContent = showAllAlerts ? '收起' : `查看全部 (${alerts.length})`;
+        button.addEventListener('click', toggleAlertsView);
+
+        toggleBtn.appendChild(button);
         list.appendChild(toggleBtn);
     }
 }
@@ -264,11 +319,26 @@ function toggleBatchMode() {
         if (!existingBar) {
             const bar = document.createElement('div');
             bar.className = 'batch-bar';
-            bar.innerHTML = `
-                <button class="batch-btn" onclick="batchSelectAll()">全选</button>
-                <button class="batch-btn danger" onclick="batchDelete()">删除选中</button>
-                <button class="batch-btn" onclick="toggleBatchMode()">取消</button>
-            `;
+
+            const selectAllButton = document.createElement('button');
+            selectAllButton.type = 'button';
+            selectAllButton.className = 'batch-btn';
+            selectAllButton.textContent = '全选';
+            selectAllButton.addEventListener('click', batchSelectAll);
+
+            const deleteButton = document.createElement('button');
+            deleteButton.type = 'button';
+            deleteButton.className = 'batch-btn danger';
+            deleteButton.textContent = '删除选中';
+            deleteButton.addEventListener('click', batchDelete);
+
+            const cancelButton = document.createElement('button');
+            cancelButton.type = 'button';
+            cancelButton.className = 'batch-btn';
+            cancelButton.textContent = '取消';
+            cancelButton.addEventListener('click', toggleBatchMode);
+
+            bar.append(selectAllButton, deleteButton, cancelButton);
             document.getElementById('favorites-list').after(bar);
         }
     } else {
@@ -345,9 +415,10 @@ function updateSidebarStatus(status) {
 async function queryItemPrice(itemId) {
     if (!itemId) return;
     const input = window.chatInput || document.getElementById('chat-input');
-    if (input) input.value = itemId;
-    if (typeof handleSend === 'function') handleSend();
-    else if (typeof window.handleSend === 'function') window.handleSend();
+    if (input) {
+        input.value = itemId;
+        input.focus();
+    }
 }
 
 async function removeFavoriteItem(itemId) {
@@ -463,12 +534,12 @@ async function loadTradeHistory() {
                             <span class="trade-type-badge ${typeClass}">${typeIcon} ${typeText}</span>
                             <span class="trade-price">${trade.price}p</span>
                         </div>
-                        <div class="trade-item-name">${trade.item_name}</div>
+                        <div class="trade-item-name">${escapeHtml(trade.item_name)}</div>
                         <div class="trade-item-details">
-                            ${trade.player_name ? `<span class="trade-player">玩家: ${trade.player_name}</span>` : ''}
+                            ${trade.player_name ? `<span class="trade-player">玩家: ${escapeHtml(trade.player_name)}</span>` : ''}
                             <span class="trade-date">${date}</span>
                         </div>
-                        ${trade.notes ? `<div class="trade-notes">${trade.notes}</div>` : ''}
+                        ${trade.notes ? `<div class="trade-notes">${escapeHtml(trade.notes)}</div>` : ''}
                         <div class="trade-item-actions">
                             <button class="action-btn danger" onclick="deleteTradeRecord(${trade.id})">删除</button>
                         </div>
@@ -1938,9 +2009,14 @@ async function showProfitItemSuggestions(input) {
             return;
         }
 
-        sugDiv.innerHTML = data.suggestions.map(s =>
-            `<div class="suggestion-item" onclick="selectProfitItem(${JSON.stringify(s)})">${s}</div>`
-        ).join('');
+        sugDiv.textContent = '';
+        data.suggestions.forEach((suggestion) => {
+            const item = document.createElement('div');
+            item.className = 'suggestion-item';
+            item.textContent = suggestion;
+            item.addEventListener('click', () => selectProfitItem(suggestion));
+            sugDiv.appendChild(item);
+        });
         sugDiv.style.display = 'block';
         sugDiv.style.cssText = 'display:block; position:absolute; background:var(--glass-bg); border:var(--glass-border); border-radius:8px; max-height:150px; overflow-y:auto; z-index:10; width:100%;';
     } catch (e) {
@@ -2018,7 +2094,7 @@ async function runProfitCalc() {
         const data = await res.json();
 
         if (data.error) {
-            resultDiv.innerHTML = `<div class="profit-recommendation bad">计算失败: ${data.error}</div>`;
+            resultDiv.innerHTML = `<div class="profit-recommendation bad">计算失败: ${escapeHtml(data.error)}</div>`;
             return;
         }
 
@@ -2036,7 +2112,7 @@ function renderProfitResult(data, container) {
     let html = `
         <div class="profit-result">
             <div class="profit-result-row">
-                <span class="profit-result-label">成品 (${data.display})</span>
+                <span class="profit-result-label">成品 (${escapeHtml(data.display)})</span>
                 <span class="profit-result-value">卖 ${data.sell_price || '-'}p / 收 ${data.buy_price || '-'}p</span>
             </div>
             <div class="profit-result-row">
@@ -2059,7 +2135,7 @@ function renderProfitResult(data, container) {
         html += `<div style="margin-top:12px; font-size:11px; color:var(--text-tertiary);">材料明细:</div>`;
         data.materials.forEach(mat => {
             html += `<div class="profit-result-row" style="font-size:12px;">
-                <span style="color:var(--text-secondary)">${mat.display} x${mat.quantity}</span>
+                <span style="color:var(--text-secondary)">${escapeHtml(mat.display)} x${mat.quantity}</span>
                 <span style="font-family:var(--font-mono)">${mat.total_cost}p</span>
             </div>`;
         });
@@ -2845,14 +2921,14 @@ async function showRelicDrops(tier, relicName) {
 
         if (data.error) {
             content.innerHTML = `<div class="empty-state"><div class="empty-icon">🔮</div>
-                <span class="empty-primary">未找到遗物</span><span class="empty-sub">${data.error}</span></div>`;
+                <span class="empty-primary">未找到遗物</span><span class="empty-sub">${escapeHtml(data.error)}</span></div>`;
             return;
         }
 
         let html = `<div class="panel-title-row">
             <span class="panel-title-eyebrow">遗物掉落</span>
-            <span class="badge badge-gold">${data.displayName || tier + ' ' + relicName}</span>
-            ${data.vaultStatus ? `<span class="badge ${data.vaultStatus === '已入库' ? 'badge-red' : 'badge-green'}">${data.vaultStatus}</span>` : ''}
+            <span class="badge badge-gold">${escapeHtml(data.displayName || tier + ' ' + relicName)}</span>
+            ${data.vaultStatus ? `<span class="badge ${data.vaultStatus === '已入库' ? 'badge-red' : 'badge-green'}">${escapeHtml(data.vaultStatus)}</span>` : ''}
             <button class="btn-gradient" style="margin-left:auto;padding:4px 12px;font-size:11px" onclick="showFissureTracker()">← 返回裂隙</button>
         </div>`;
 

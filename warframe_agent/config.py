@@ -25,7 +25,7 @@ CACHE_MAX_SIZE = 200        # 缓存最大条目数
 
 # 外部云端模型
 CLOUD_API_BASE = os.getenv("CLOUD_API_BASE", "https://gpt-agent.cc/v1")
-CLOUD_API_KEY = os.getenv("CLOUD_API_KEY", "sk-CioXA6nMkZwxdcDrfJXZ4syCuLkCL1ma20C0NKtcBEVmXDfc")
+CLOUD_API_KEY = os.getenv("CLOUD_API_KEY", "")
 CLOUD_MODEL = os.getenv("CLOUD_MODEL", "gpt-5.5")
 CLOUD_MAX_TOKENS = 2048
 
