@@ -2951,11 +2951,11 @@ def _get_vault_status(relic_base_name: str) -> str:
 
 
 @app.get("/api/riven/auctions")
-async def get_riven_auctions(weapon: str = "") -> JSONResponse:
+async def get_riven_auctions(weapon: str = "", page: int = 1, page_size: int = 20) -> JSONResponse:
     """获取裂罅 Mod 拍卖数据（通过 Playwright 抓取）"""
     try:
         from ..scraper import scrape_riven_auctions, scrape_sync
-        rivens = scrape_sync(scrape_riven_auctions(weapon))
+        riven_page = scrape_sync(scrape_riven_auctions(weapon, page=page, page_size=page_size))
         return JSONResponse({
             "rivens": [
                 {
@@ -2965,9 +2965,11 @@ async def get_riven_auctions(weapon: str = "") -> JSONResponse:
                     "price": r.price,
                     "seller": r.seller,
                 }
-                for r in rivens
+                for r in riven_page.rivens
             ],
-            "total": len(rivens),
+            "total": riven_page.total,
+            "page": riven_page.page,
+            "page_size": riven_page.page_size,
         })
     except Exception as e:
         logger.error("紫卡查询失败: %s", e)

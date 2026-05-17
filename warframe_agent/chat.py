@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, replace
 from typing import AsyncIterator, Callable, Iterable
 
@@ -15,7 +16,7 @@ from .game_data import GameDataStore
 from .knowledge import MarketKnowledge
 from .market import MarketOrder, best_buyers, best_sellers, fetch_orders
 from .memory import AgentMemory
-from .names import display_item_name
+from .names import display_item_name, load_item_data
 from .price_history import PriceHistoryDB
 from .rag import smart_search_rag
 from .session import SessionContext, is_followup
@@ -281,6 +282,8 @@ class ChatAgent:
         self.knowledge = knowledge
         self.event_tracker = event_tracker
         self.game_data = GameDataStore()
+        self._last_baro_recommendations = []
+        self._baro_item_info_lookup = None
 
     @staticmethod
     def _load_items_full() -> list[dict]:
@@ -358,6 +361,16 @@ class ChatAgent:
         if is_watchlist_command(message):
             return self.scan_watchlist()
         self._remember_common_question(message)
+        baro_followup = self._try_baro_order_followup(message)
+        if baro_followup:
+            self.session.add_exchange(message, baro_followup)
+            self._log_answer(message, baro_followup)
+            return baro_followup
+        baro_answer = self._try_baro_recommendation(message)
+        if baro_answer:
+            self.session.add_exchange(message, baro_answer)
+            self._log_answer(message, baro_answer)
+            return baro_answer
         # 紫卡查询：优先确定性解析，避免 LLM 路由误判
         if _looks_like_riven_query(message):
             riven_result = self._try_deterministic_riven(message)
@@ -371,6 +384,12 @@ class ChatAgent:
             self.session.add_exchange(message, riven_followup)
             self._log_answer(message, riven_followup)
             return riven_followup
+        # Prime 重生 / Vault 查询：直接走事件格式化，避免物品匹配误触发
+        if _is_prime_resurgence_query(message):
+            result = self._handle_vault_command()
+            self.session.add_exchange(message, result)
+            self._log_answer(message, result)
+            return result
         # 事件类/交易工具类查询直接走路由器，避免物品匹配误触发交易流程
         if _is_event_query(message) or _is_trading_tool_query(message):
             routed = self._try_router(message)
@@ -477,6 +496,18 @@ class ChatAgent:
             yield result
             return
         self._remember_common_question(message)
+        baro_followup = self._try_baro_order_followup(message)
+        if baro_followup:
+            self.session.add_exchange(message, baro_followup)
+            self._log_answer(message, baro_followup)
+            yield baro_followup
+            return
+        baro_answer = self._try_baro_recommendation(message)
+        if baro_answer:
+            self.session.add_exchange(message, baro_answer)
+            self._log_answer(message, baro_answer)
+            yield baro_answer
+            return
         # 紫卡查询：优先确定性解析，避免 LLM 路由误判
         if _looks_like_riven_query(message):
             riven_result = self._try_deterministic_riven(message)
@@ -491,6 +522,13 @@ class ChatAgent:
             self.session.add_exchange(message, riven_followup)
             self._log_answer(message, riven_followup)
             yield riven_followup
+            return
+        # Prime 重生 / Vault 查询：直接走事件格式化，避免物品匹配误触发
+        if _is_prime_resurgence_query(message):
+            result = self._handle_vault_command()
+            self.session.add_exchange(message, result)
+            self._log_answer(message, result)
+            yield result
             return
         # 事件类/交易工具类查询直接走路由器，避免物品匹配误触发交易流程
         if _is_event_query(message) or _is_trading_tool_query(message):
@@ -619,7 +657,7 @@ class ChatAgent:
             return self._handle_relic_command(tokens[1:])
         if command == "/strategy":
             return self._handle_strategy_command(tokens[1:])
-        if command == "/vault":
+        if command in {"/vault", "/resurgence", "/重生"}:
             return self._handle_vault_command()
         return "未知的 Agent 命令，输入 /help 查看可用命令"
 
@@ -650,7 +688,7 @@ class ChatAgent:
             "/relic 遗物名       查询遗物掉落物",
             "/strategy list      查看可用策略",
             "/strategy run 策略名  执行策略扫描",
-            "/vault              查看 Vault 状态",
+            "/vault              查看 Vault / Prime 重生状态",
         ])
 
     def _render_memory_summary(self) -> str:
@@ -1166,26 +1204,64 @@ class ChatAgent:
         return "用法: /strategy list | /strategy run 策略名"
 
     def _handle_vault_command(self) -> str:
-        """显示当前 Vault 状态。"""
-        from .events import EventTracker
-        tracker = EventTracker()
-        tracker.load_cache()
+        """显示当前 Vault / Prime 重生状态。"""
+        tracker = self.event_tracker or EventTracker()
+        if not self.event_tracker:
+            tracker.load_cache()
+        resurgence = tracker.get_prime_resurgence()
         vault_events = tracker.get_vault_status()
-        if not vault_events:
-            return "当前没有 Prime Vault 回归活动。"
-        lines = ["**Prime Vault 状态**\n"]
+        if not resurgence and not vault_events:
+            return "当前没有 Prime Vault / Prime 重生活动。"
+        lines = []
+        if resurgence and resurgence.prime_resurgence:
+            rotation = resurgence.prime_resurgence
+            paid_items = [item for item in rotation.items if item.prime_price]
+            relic_items = [item for item in rotation.items if item.regular_price]
+            relic_names = [_resurgence_relic_name(item) for item in relic_items]
+            relic_names = [name for index, name in enumerate(relic_names) if name and name not in relic_names[:index]]
+            warframe_items = [item for item in paid_items if _is_resurgence_warframe(item)]
+            weapon_items = [item for item in paid_items if _is_resurgence_weapon(item)]
+            if warframe_items:
+                lines.append("返厂战甲:")
+                for item in warframe_items[:12]:
+                    lines.append(f"- {_resurgence_warframe_display_name(item)}{self._resurgence_price_suffix(item, relic_names)}")
+            if weapon_items:
+                lines.append("返厂武器:")
+                for item in weapon_items[:12]:
+                    lines.append(f"- {_resurgence_weapon_display_name(item)}{self._resurgence_price_suffix(item, relic_names)}")
+            return "\n".join(lines)
         for event in vault_events:
             items = ", ".join(
                 display_item_name(item_id) for item_id in event.items_affected[:5]
             ) if event.items_affected else "未知物品"
-            lines.append(f"回归物品: {items}")
+            lines.append(f"Vault 回归物品: {items}")
             if event.start_time:
                 lines.append(f"开始时间: {event.start_time}")
             if event.end_time:
                 lines.append(f"结束时间: {event.end_time}")
             lines.append("")
-        lines.append("Vault 回归期间，相关遗物和部件价格通常会有波动。")
         return "\n".join(lines)
+
+    def _resurgence_price_suffix(self, item, relic_names: list[str] | None = None) -> str:
+        parts = [f"{item.prime_price} Regal Aya"]
+        if relic_names:
+            parts.append(f"可通过兑换当前 Prime 重生的{'、'.join(relic_names[:4])}刷取")
+        market_id = _resurgence_market_id(item)
+        if market_id:
+            try:
+                orders = self.order_fetcher(market_id)
+                sellers = best_sellers(orders, limit=1)
+                buyers = best_buyers(orders, limit=1)
+            except Exception:
+                sellers = []
+                buyers = []
+            if sellers:
+                lowest_buy = f"最低买入价 {sellers[0].platinum}p"
+            if buyers:
+                parts.append(f"最高卖出价 {buyers[0].platinum}p")
+            if sellers:
+                parts.append(lowest_buy)
+        return f" ({'，'.join(parts)})"
 
     def _auto_record_trade(self, message: str, contexts: list) -> str | None:
         """检测已完成的交易语句并自动记录。返回确认消息或 None。"""
@@ -1208,6 +1284,57 @@ class ChatAgent:
         except (LookupError, ValueError):
             matches = self._item_ids_from_alias_substrings(item_name)
             return matches[0] if matches else None
+
+    def _try_baro_recommendation(self, message: str) -> str | None:
+        if not _is_baro_recommendation_query(message):
+            return None
+        try:
+            from .baro import analyze_baro_inventory, format_baro_report, parse_baro_rank_request
+            tracker = self.event_tracker or EventTracker()
+            if not self.event_tracker:
+                tracker.load_cache()
+            events = tracker.get_active_events()
+            baro_event = next((e for e in events if e.event_type == "baro_visit" and e.baro_items), None)
+            if not baro_event:
+                return "当前没有检测到带库存的虚空商人事件。"
+            if _is_baro_inventory_query(message):
+                recommendations = analyze_baro_inventory(
+                    baro_event,
+                    self.order_fetcher,
+                    rank_request="max",
+                    item_info_lookup=self._baro_item_info_lookup,
+                )
+                self._last_baro_recommendations = recommendations
+                return format_baro_report(recommendations)
+            rank_request = parse_baro_rank_request(message)
+            recommendations = analyze_baro_inventory(
+                baro_event,
+                self.order_fetcher,
+                rank_request=rank_request,
+                item_info_lookup=self._baro_item_info_lookup,
+            )
+            self._last_baro_recommendations = recommendations
+            return format_baro_report(recommendations)
+        except Exception as exc:
+            logger.debug("Baro 推荐失败: %s", exc)
+            return "暂时无法分析虚空商人库存。"
+
+    def _try_baro_order_followup(self, message: str) -> str | None:
+        if not self._last_baro_recommendations:
+            return None
+        from .baro import (
+            find_baro_recommendation,
+            format_baro_order_details,
+            is_baro_order_detail_request,
+            parse_order_detail_limits,
+        )
+        if not is_baro_order_detail_request(message):
+            return None
+        recommendation = find_baro_recommendation(self._last_baro_recommendations, message)
+        if not recommendation:
+            return None
+        buyer_limit, seller_limit = parse_order_detail_limits(message)
+        return format_baro_order_details(recommendation, seller_limit=seller_limit, buyer_limit=buyer_limit)
 
     def _try_router(self, message: str) -> str | None:
         result = self._try_react_loop(message)
@@ -1388,6 +1515,7 @@ class ChatAgent:
             type_names = {
                 "void_fissure": "虚空裂缝", "void_storm": "虚空风暴",
                 "invasion": "入侵", "baro_visit": "虚空商人", "alert": "警报",
+                "prime_resurgence": "Prime 重生", "prime_vault": "Prime Vault",
             }
             lines = [f"## 当前游戏事件（共 {len(events)} 条）\n"]
             # 概览
@@ -1422,8 +1550,9 @@ class ChatAgent:
             seller_statuses = _riven_statuses_from_message(message, default_online=True)
             if seller_statuses is not None:
                 query.seller_statuses = seller_statuses
-        results = search_rivens(query)
+        results = search_rivens(query, page=1, page_size=self.session.last_riven_page_size)
         self.session.last_riven_query = query
+        self.session.last_riven_page = 1
         return format_riven_results(query, results)
 
     def _try_model_riven_parse(self, message: str):
@@ -1485,33 +1614,59 @@ class ChatAgent:
         )
 
     def _try_riven_followup(self, message: str) -> str | None:
-        """基于上一次紫卡查询的追问（在线/便宜/无负等过滤条件）。"""
-        from .riven import search_rivens, format_riven_results
+        """基于上一次紫卡查询的追问（翻页/在线/便宜/无负等过滤条件）。"""
+        from .riven import _extract_max_price, search_rivens, format_riven_results
         query = self.session.last_riven_query
         if query is None:
             return None
         lowered = message.lower()
+        next_page = any(kw in lowered for kw in ["下一组", "下一批", "下页", "再来", "更多", "继续"])
+        prev_page = any(kw in lowered for kw in ["上一组", "上一批", "上页", "前一页"])
         seller_statuses = _riven_statuses_from_message(message)
-        online_only = seller_statuses is not None
+        status_filter = seller_statuses is not None
         cheap_only = any(kw in lowered for kw in ["便宜", "最便宜", "低价"])
-        if not (online_only or cheap_only):
+        no_negative = any(kw in lowered for kw in ["无负", "不要负", "没负"])
+        max_price = _extract_max_price(message)
+        if not (next_page or prev_page or status_filter or cheap_only or no_negative or max_price is not None):
             return None
-        if seller_statuses is not None:
-            query.seller_statuses = seller_statuses
-        results = search_rivens(query)
-        if cheap_only and results:
-            results = results[:5]
+
+        from dataclasses import replace
+        query = replace(query)
+        page = self.session.last_riven_page
         suffix_parts = []
-        if online_only:
-            suffix_parts.append(_riven_status_label(seller_statuses))
-        if cheap_only:
-            suffix_parts.append("最低5条")
+
+        if next_page:
+            page += 1
+        elif prev_page:
+            page = max(1, page - 1)
+        else:
+            page = 1
+            if seller_statuses is not None:
+                query.seller_statuses = seller_statuses
+                suffix_parts.append(_riven_status_label(seller_statuses))
+            if no_negative:
+                query.no_negative = True
+                suffix_parts.append("无负")
+            if max_price is not None:
+                query.max_price = max_price
+                suffix_parts.append(f"≤{max_price}p")
+            if cheap_only:
+                suffix_parts.append("最低价")
+
+        results = search_rivens(query, page=page, page_size=self.session.last_riven_page_size)
+        boundary_note = ""
+        if next_page and results.page == self.session.last_riven_page:
+            boundary_note = "\n\n已经是最后一组。"
+        elif prev_page and self.session.last_riven_page == 1:
+            boundary_note = "\n\n已经是第一组。"
+        self.session.last_riven_query = query
+        self.session.last_riven_page = results.page
         suffix = f"（{','.join(suffix_parts)}）" if suffix_parts else ""
         text = format_riven_results(query, results)
         if suffix:
             text = text.replace("紫卡搜索结果", f"紫卡搜索结果{suffix}", 1)
         self.session.update([query.weapon_url_name], "riven", "riven_followup")
-        return text
+        return text + boundary_note
 
     def _handle_riven_search(self, args: dict) -> str:
         """处理紫卡搜索工具调用。"""
@@ -1578,8 +1733,9 @@ class ChatAgent:
         else:
             query.seller_statuses = RIVEN_ONLINE_STATUSES
 
-        results = search_rivens(query)
+        results = search_rivens(query, page=1, page_size=self.session.last_riven_page_size)
         self.session.last_riven_query = query
+        self.session.last_riven_page = 1
         return format_riven_results(query, results)
 
     def _resolve_weapon_for_riven(self, name: str) -> str | None:
@@ -2150,12 +2306,208 @@ def _message_tokens(message: str) -> list[str]:
     return [token for token in normalized.split() if token]
 
 
+def _resurgence_display_name(item) -> str:
+    normalized_name = _resurgence_prime_name(item)
+    zh = _RESURGENCE_NAME_ZH.get(normalized_name) or _RESURGENCE_NAME_ZH.get(item.item_name)
+    return zh or normalized_name or item.item_name
+
+
+def _resurgence_warframe_display_name(item) -> str:
+    return _resurgence_prime_name(item) or item.item_name
+
+
+def _resurgence_weapon_display_name(item) -> str:
+    market_id = _resurgence_market_id(item)
+    item_data = load_item_data().get(market_id, {}) if market_id else {}
+    zh_name = item_data.get("zh_name", "")
+    if zh_name:
+        return re.sub(r"\s*一套$", "", zh_name).strip()
+    return _RESURGENCE_NAME_ZH.get(_resurgence_prime_name(item), "") or _resurgence_prime_name(item) or item.item_name
+
+
+def _is_resurgence_warframe(item) -> bool:
+    return bool(_resurgence_market_id(item)) and "/Powersuits/" in item.item_type
+
+
+def _is_resurgence_weapon(item) -> bool:
+    market_id = _resurgence_market_id(item)
+    if not market_id or _is_resurgence_warframe(item):
+        return False
+    item_type = item.item_type.lower()
+    return "/weapons/" in item_type or "/weapon" in item_type
+
+
+def _resurgence_market_id(item) -> str:
+    if item.market_id.endswith("_prime_set"):
+        return item.market_id
+    if _is_resurgence_non_tradeable_item(item):
+        return ""
+    prime_name = _resurgence_prime_name(item)
+    if not prime_name:
+        return ""
+    slug = re.sub(r"[^a-z0-9]+", "_", prime_name.lower()).strip("_")
+    return f"{slug}_set" if slug.endswith("_prime") else ""
+
+
+def _resurgence_prime_name(item) -> str:
+    name = item.item_name.strip()
+    if not name or "Prime" not in name:
+        leaf = _resurgence_item_type_leaf(item.item_type)
+        if "Prime" not in leaf:
+            return ""
+        name = leaf
+    name = re.sub(r"\b(Weapon|Blueprint|Set)\b", "", name).strip()
+    match = re.match(r"^Prime\s+(.+)$", name)
+    if match:
+        name = f"{match.group(1).strip()} Prime"
+    camel_match = re.match(r"^(.+?)Prime(?:Weapon)?$", name)
+    if camel_match and " " not in name:
+        name = f"{camel_match.group(1)} Prime"
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def _resurgence_item_type_leaf(value: str) -> str:
+    leaf = value.rstrip("/").rsplit("/", 1)[-1]
+    return re.sub(r"(?<!^)(?=[A-Z])", " ", leaf).strip()
+
+
+def _is_resurgence_non_tradeable_item(item) -> bool:
+    text = f"{item.item_name} {item.item_type}".lower()
+    blocked = (
+        "scarf", "bobble", "armor", "dangle", "extractor", "pack", "bundle",
+        "syandana", "sugatra", "glyph", "decoration", "sigil", "operator",
+        "accessory", "attachments", "emote", "color", "colour",
+    )
+    if any(word in text for word in blocked):
+        return True
+    if "/types/items/miscitems/" in text:
+        return True
+    return False
+
+
+def _resurgence_relic_name(item) -> str:
+    export_name = _resurgence_relic_export_name(item.item_type)
+    if export_name:
+        return _localize_resurgence_relic_name(export_name)
+    name = item.item_name
+    tier_short = _resurgence_relic_tier_short(item.item_type) or _resurgence_relic_tier_short(name)
+    if tier_short:
+        tier_map = {"T1": "古纪", "T2": "前纪", "T3": "中纪", "T4": "后纪", "T5": "遗珍", "Lith": "古纪", "Meso": "前纪", "Neo": "中纪", "Axi": "后纪", "Requiem": "遗珍"}
+        code_match = re.search(r"Vault([A-Z]+\d*)(?:Bronze|Silver|Gold|Rare)?$", item.item_type) or re.search(r"\b([A-Z]\d+)\b", name)
+        code = code_match.group(1) if code_match else ""
+        return f"{tier_map.get(tier_short, tier_short)} {code}".strip()
+    match = re.match(r"^(Lith|Meso|Neo|Axi|Requiem)\s+(.+)$", name)
+    if not match:
+        return name
+    tier_map = {"Lith": "古纪", "Meso": "前纪", "Neo": "中纪", "Axi": "后纪", "Requiem": "遗珍"}
+    return f"{tier_map.get(match.group(1), match.group(1))} {match.group(2)}"
+
+
+_RESURGENCE_RELIC_EXPORT_CACHE: dict[str, str] | None = None
+
+
+def _resurgence_relic_export_name(item_type: str) -> str:
+    global _RESURGENCE_RELIC_EXPORT_CACHE
+    if _RESURGENCE_RELIC_EXPORT_CACHE is None:
+        _RESURGENCE_RELIC_EXPORT_CACHE = _build_resurgence_relic_export_cache()
+    return _RESURGENCE_RELIC_EXPORT_CACHE.get(_normalize_resurgence_relic_type(item_type), "")
+
+
+def _build_resurgence_relic_export_cache() -> dict[str, str]:
+    cache: dict[str, str] = {}
+    path = config.EXPORT_DIR / "ExportRelicArcane_en.json"
+    if not path.exists():
+        return cache
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return cache
+    entries = raw.get("ExportRelicArcane", raw) if isinstance(raw, dict) else raw
+    if not isinstance(entries, list):
+        return cache
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        unique = entry.get("uniqueName", "")
+        name = entry.get("name", "")
+        if unique and name:
+            cache[_normalize_resurgence_relic_type(unique)] = name
+    return cache
+
+
+def _normalize_resurgence_relic_type(item_type: str) -> str:
+    return item_type.replace("/Lotus/StoreItems/", "/Lotus/")
+
+
+def _localize_resurgence_relic_name(name: str) -> str:
+    match = re.match(r"^(Lith|Meso|Neo|Axi|Requiem)\s+(.+?)\s+Relic$", name)
+    if not match:
+        return name
+    tier_map = {"Lith": "古纪", "Meso": "前纪", "Neo": "中纪", "Axi": "后纪", "Requiem": "遗珍"}
+    return f"{tier_map.get(match.group(1), match.group(1))} {match.group(2)}"
+
+
+def _resurgence_relic_tier_short(value: str) -> str:
+    match = re.search(r"(?:^|/)T([1-5])VoidProjection", value)
+    if match:
+        return f"T{match.group(1)}"
+    match = re.search(r"\b(Lith|Meso|Neo|Axi|Requiem)\b", value)
+    return match.group(1) if match else ""
+
+
+_RESURGENCE_NAME_ZH = {
+    "Ash Prime": "Ash Prime",
+    "Banshee Prime": "Banshee Prime",
+    "Chroma Prime": "Chroma Prime",
+    "Ember Prime": "Ember Prime",
+    "Equinox Prime": "Equinox Prime",
+    "Frost Prime": "Frost Prime",
+    "Hydroid Prime": "Hydroid Prime",
+    "Limbo Prime": "Limbo Prime",
+    "Loki Prime": "Loki Prime",
+    "Mag Prime": "Mag Prime",
+    "Mesa Prime": "Mesa Prime",
+    "Mirage Prime": "Mirage Prime",
+    "Nekros Prime": "Nekros Prime",
+    "Nova Prime": "Nova Prime",
+    "Nyx Prime": "Nyx Prime",
+    "Rhino Prime": "犀牛 Prime",
+    "Saryn Prime": "Saryn Prime",
+    "Trinity Prime": "Trinity Prime",
+    "Valkyr Prime": "Valkyr Prime",
+    "Vauban Prime": "Vauban Prime",
+    "Volt Prime": "伏特 Prime",
+    "Wukong Prime": "悟空 Prime",
+}
+
+
 _EVENT_KEYWORDS = {
     "活动", "事件", "裂缝", "裂隙", "fissure", "虚空裂缝", "虚空裂隙",
     "baro", "虚空商人", "入侵", "invasion", "警报", "alert", "虚空风暴",
     "钢铁歼灭", "钢铁防御", "钢铁生存", "开核桃", "遗物", "核桃",
     "刷什么", "现在刷", "当前刷", "可以刷", "有什么活动",
+    "重生", "prime重生", "prime 重生", "resurgence", "prime resurgence", "prime vault",
 }
+
+
+def _is_prime_resurgence_query(message: str) -> bool:
+    lower = message.lower()
+    return any(kw in lower for kw in ("重生", "resurgence", "prime resurgence", "prime vault"))
+
+
+def _is_baro_recommendation_query(message: str) -> bool:
+    lower = message.lower()
+    has_baro = any(kw in lower for kw in ("baro", "虚空商人"))
+    if not has_baro:
+        return False
+    return any(kw in lower for kw in ("mod", "赋能", "价格", "买价", "卖价", "推荐", "有什么", "库存", "带来", "带了", "物品"))
+
+
+def _is_baro_inventory_query(message: str) -> bool:
+    lower = message.lower()
+    has_inventory = any(kw in lower for kw in ("有什么", "哪些", "库存", "带来", "带了", "物品"))
+    has_price_intent = any(kw in lower for kw in ("价格", "买价", "卖价", "推荐", "白金", "链接", "买家", "卖家", "私聊"))
+    return has_inventory and not has_price_intent
 
 
 def _is_event_query(message: str) -> bool:

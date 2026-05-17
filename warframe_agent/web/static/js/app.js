@@ -124,7 +124,7 @@ function showNotification(message, type = 'info') {
 function showToast(message, type = 'info') {
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
-    toast.textContent = message;
+    toast.textContent = typeof message === 'string' ? message : JSON.stringify(message);
 
     let container = document.getElementById('toast-container');
     if (!container) {
@@ -580,7 +580,7 @@ async function initPushSettings() {
         try {
             const resp = await fetch('/api/push/qrcode');
             const data = await resp.json();
-            if (data.status === 'ok' && data.url) {
+            if (data.status === 'ok' && typeof data.url === 'string' && data.url) {
                 const img = document.createElement('img');
                 img.src = data.url;
                 img.alt = '扫码关注 WxPusher';

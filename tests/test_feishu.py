@@ -8,7 +8,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from warframe_agent.feishu import FeishuBot, FeishuConfig
+from warframe_agent.feishu import FeishuBot, FeishuConfig, _worker_marker
 
 
 class TestFeishuConfig:
@@ -65,3 +65,51 @@ class TestFeishuBot:
         cfg = FeishuConfig(enabled=True, app_id="cli_test", app_secret="secret")
         bot = FeishuBot(cfg)
         bot.stop()  # 不应报错
+
+    @patch("warframe_agent.feishu.ReplyMessageRequest")
+    @patch("warframe_agent.feishu.ReplyMessageRequestBody")
+    def test_reply_uses_reply_request(self, mock_body_cls, mock_request_cls):
+        cfg = FeishuConfig(enabled=True, app_id="cli_test", app_secret="secret")
+        bot = FeishuBot(cfg)
+        client = MagicMock()
+        response = MagicMock()
+        response.success.return_value = True
+        client.im.v1.message.reply.return_value = response
+        bot._client = client
+
+        body = MagicMock()
+        mock_body_cls.builder.return_value.msg_type.return_value.content.return_value.build.return_value = body
+        request = MagicMock()
+        mock_request_cls.builder.return_value.message_id.return_value.request_body.return_value.build.return_value = request
+
+        assert bot.reply("om_test", "回复") is True
+        mock_request_cls.builder.return_value.message_id.assert_called_once_with("om_test")
+        client.im.v1.message.reply.assert_called_once_with(request)
+
+
+def test_worker_script_converts_data_dir_to_path():
+    from warframe_agent.feishu import _FEISHU_WORKER_SCRIPT
+
+    assert 'DATA_DIR = Path(r"{data_dir}")' in _FEISHU_WORKER_SCRIPT
+
+
+def test_worker_script_has_project_marker():
+    from warframe_agent.feishu import _FEISHU_WORKER_SCRIPT
+
+    assert 'WORKER_MARKER = "{marker}"' in _FEISHU_WORKER_SCRIPT
+
+
+def test_worker_cleanup_matches_project_marker():
+    cfg = FeishuConfig(enabled=True, app_id="cli_test", app_secret="secret")
+    bot = FeishuBot(cfg)
+    current = str(bot._ws_proc.pid) if bot._ws_proc else ""
+    marker = _worker_marker()
+    output = f"python -c worker {marker} 12345\npython -c lark_oapi P2ImMessageReceiveV1 67890\n"
+
+    with patch("warframe_agent.feishu.subprocess.run") as run:
+        run.return_value.stdout = output
+        bot._kill_old_workers()
+
+    kill_calls = [call for call in run.call_args_list if call.args[0][0] == "taskkill"]
+    assert len(kill_calls) == 1
+    assert kill_calls[0].args[0][-1] == "12345"

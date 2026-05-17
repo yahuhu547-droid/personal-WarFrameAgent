@@ -22,6 +22,8 @@ class SessionContext:
     last_query_type: str | None = None
     last_intent: str | None = None
     last_riven_query: object | None = None
+    last_riven_page: int = 1
+    last_riven_page_size: int = 10
     history: list[tuple[str, str]] = field(default_factory=list)
 
     def update(

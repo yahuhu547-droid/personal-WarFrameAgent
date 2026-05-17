@@ -116,6 +116,44 @@ class RivenResult:
     re_rolls: int = 0
 
 
+@dataclass
+class RivenSearchPage:
+    results: list[RivenResult]
+    total: int
+    page: int = 1
+    page_size: int = 10
+
+    @property
+    def has_next(self) -> bool:
+        return self.page * self.page_size < self.total
+
+    @property
+    def has_prev(self) -> bool:
+        return self.page > 1
+
+    @property
+    def start_index(self) -> int:
+        if self.total == 0:
+            return 0
+        return (self.page - 1) * self.page_size + 1
+
+    @property
+    def end_index(self) -> int:
+        return min(self.page * self.page_size, self.total)
+
+    def __iter__(self):
+        return iter(self.results)
+
+    def __len__(self) -> int:
+        return len(self.results)
+
+    def __getitem__(self, index):
+        return self.results[index]
+
+    def __bool__(self) -> bool:
+        return bool(self.results)
+
+
 # ── 解析 ─────────────────────────────────────────────────────────────────────
 
 
@@ -216,16 +254,22 @@ def _extract_attributes(message: str) -> tuple[list[str], list[str], bool]:
 
     # 先检查显式负属性（如 "负后坐力"、"负暴击率"），排除"无负"/"不要负"前缀
     clean_for_neg = message.replace("无负", "").replace("不要负", "").replace("没负", "")
-    for cn_name, api_name in RIVEN_ATTRIBUTES.items():
+    for cn_name, api_name in _attribute_terms_by_length():
         if f"负{cn_name}" in clean_for_neg:
             negative.append(api_name)
 
     # 检查正向属性关键词（排除已被"负"修饰的）
-    for cn_name, api_name in RIVEN_ATTRIBUTES.items():
-        if cn_name in message and api_name not in positive and api_name not in negative:
+    positive_text = message
+    for cn_name, api_name in _attribute_terms_by_length():
+        if cn_name in positive_text and api_name not in positive and api_name not in negative:
             positive.append(api_name)
+            positive_text = positive_text.replace(cn_name, " ")
 
     return positive, negative, no_negative
+
+
+def _attribute_terms_by_length() -> list[tuple[str, str]]:
+    return sorted(RIVEN_ATTRIBUTES.items(), key=lambda entry: -len(entry[0]))
 
 
 def _extract_max_price(message: str) -> int | None:
@@ -243,7 +287,7 @@ def _extract_max_price(message: str) -> int | None:
 
 _RIVEN_API_BASE = "https://api.warframe.market/v1/auctions/search"
 _RIVEN_CACHE_TTL = 120  # 2 分钟
-_riven_cache: dict[str, tuple[list[RivenResult], float]] = {}
+_riven_cache: dict[str, tuple[list[dict], float]] = {}
 
 
 def fetch_riven_auctions(
@@ -292,7 +336,7 @@ def fetch_riven_auctions(
     return []
 
 
-def search_rivens(query: RivenQuery) -> list[RivenResult]:
+def search_rivens(query: RivenQuery, page: int = 1, page_size: int = 10) -> RivenSearchPage:
     """搜索并过滤紫卡拍卖。"""
     auctions = fetch_riven_auctions(
         query.weapon_url_name,
@@ -361,14 +405,27 @@ def search_rivens(query: RivenQuery) -> list[RivenResult]:
         results.sort(key=lambda r: (status_rank.get(r.seller_status, 999), r.price or 999999))
     else:
         results.sort(key=lambda r: r.price or 999999)
-    return results[:10]
+
+    total = len(results)
+    page_size = max(1, page_size)
+    max_page = max(1, (total + page_size - 1) // page_size)
+    page = min(max(1, page), max_page)
+    start = (page - 1) * page_size
+    return RivenSearchPage(results=results[start:start + page_size], total=total, page=page, page_size=page_size)
 
 
 # ── 格式化 ────────────────────────────────────────────────────────────────────
 
 
-def format_riven_results(query: RivenQuery, results: list[RivenResult]) -> str:
+def build_riven_whisper(user_name: str) -> str:
+    return f"/w {user_name} Hi!"
+
+
+def format_riven_results(query: RivenQuery, page: RivenSearchPage | list[RivenResult]) -> str:
     """格式化紫卡搜索结果。"""
+    if isinstance(page, list):
+        page = RivenSearchPage(results=page, total=len(page))
+
     weapon_display = query.weapon_url_name.replace("_", " ").title()
     conditions = []
     if query.positive_attrs:
@@ -386,12 +443,12 @@ def format_riven_results(query: RivenQuery, results: list[RivenResult]) -> str:
     if conditions:
         header += f"（{'、'.join(conditions)}）"
 
-    if not results:
+    if not page.results:
         return f"{header}\n未找到符合条件的紫卡。"
 
-    lines = [header, f"共找到 {len(results)} 条，按价格排序：", ""]
+    lines = [header, f"共找到 {page.total} 条，展示第 {page.start_index}-{page.end_index} 条，按价格排序：", ""]
 
-    for i, r in enumerate(results, 1):
+    for i, r in enumerate(page.results, page.start_index):
         price_str = f"{r.price}p" if r.price else "未定价"
         lines.append(f"{i}. {r.mod_name} | {price_str} | {r.re_rolls}次洗卡")
 
@@ -410,5 +467,16 @@ def format_riven_results(query: RivenQuery, results: list[RivenResult]) -> str:
         status_map = {"ingame": "游戏中", "online": "在线", "offline": "离线"}
         status = status_map.get(r.seller_status, r.seller_status)
         lines.append(f"   卖家: {r.seller} ({status})")
+        if r.seller and r.seller_status in {"ingame", "online"}:
+            lines.append(f"   招呼: {build_riven_whisper(r.seller)}")
+
+    hints = []
+    if page.has_next:
+        hints.append("回复“下一组”查看更多")
+    if page.has_prev:
+        hints.append("回复“上一组”返回上一页")
+    if hints:
+        lines.append("")
+        lines.append("；".join(hints) + "。")
 
     return "\n".join(lines)

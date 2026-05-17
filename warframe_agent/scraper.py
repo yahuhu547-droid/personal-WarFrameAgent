@@ -31,6 +31,14 @@ class ScrapedRiven:
     seller: str
 
 
+@dataclass
+class ScrapedRivenPage:
+    rivens: list[ScrapedRiven]
+    total: int
+    page: int
+    page_size: int
+
+
 _browser = None
 _playwright = None
 
@@ -121,7 +129,7 @@ async def scrape_orders(item_url_name: str) -> list[ScrapedOrder]:
     return orders
 
 
-async def scrape_riven_auctions(weapon_url_name: str = "") -> list[ScrapedRiven]:
+async def scrape_riven_auctions(weapon_url_name: str = "", page: int = 1, page_size: int = 20) -> ScrapedRivenPage:
     """抓取裂罅 Mod 拍卖数据"""
     if weapon_url_name:
         api_url = f"https://api.warframe.market/v1/auctions/search?type=riven&weapon_url_name={weapon_url_name}"
@@ -130,10 +138,17 @@ async def scrape_riven_auctions(weapon_url_name: str = "") -> list[ScrapedRiven]
 
     data = await fetch_market_api(api_url)
     if not data:
-        return []
+        return ScrapedRivenPage(rivens=[], total=0, page=max(1, page), page_size=max(1, page_size))
+
+    raw_auctions = data.get("payload", {}).get("auctions", [])
+    total = len(raw_auctions)
+    page_size = max(1, page_size)
+    max_page = max(1, (total + page_size - 1) // page_size)
+    page = min(max(1, page), max_page)
+    start = (page - 1) * page_size
 
     rivens = []
-    for item in data.get("payload", {}).get("auctions", [])[:20]:
+    for item in raw_auctions[start:start + page_size]:
         owner = item.get("owner", {})
         buyout = item.get("buyout_price")
         starting = item.get("starting_price")
@@ -148,7 +163,7 @@ async def scrape_riven_auctions(weapon_url_name: str = "") -> list[ScrapedRiven]
             price=price,
             seller=owner.get("ingame_name", ""),
         ))
-    return rivens
+    return ScrapedRivenPage(rivens=rivens, total=total, page=page, page_size=page_size)
 
 
 async def scrape_item_statistics(item_url_name: str) -> dict | None:

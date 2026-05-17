@@ -7,10 +7,12 @@ from warframe_agent.riven import (
     COMPOUND_KEYWORDS,
     RivenQuery,
     RivenResult,
+    RivenSearchPage,
     _extract_attributes,
     _extract_max_price,
     _extract_weapon_name,
     _looks_like_riven_query,
+    build_riven_whisper,
     format_riven_results,
     parse_riven_query,
     search_rivens,
@@ -85,6 +87,14 @@ class TestExtractAttributes:
     def test_single_attr(self):
         pos, _, _ = _extract_attributes("暴击率紫卡")
         assert "critical_chance" in pos
+
+    def test_critical_damage_does_not_imply_critical_chance(self):
+        pos, _, _ = _extract_attributes("斯特朗紫卡暴击伤害")
+        assert pos == ["critical_damage"]
+
+    def test_critical_damage_alias_does_not_imply_critical_chance(self):
+        pos, _, _ = _extract_attributes("斯特朗紫卡暴伤")
+        assert pos == ["critical_damage"]
 
     def test_explicit_negative(self):
         _, neg, _ = _extract_attributes("负后坐力")
@@ -275,8 +285,35 @@ class TestFilterLogic:
         results = search_rivens(query)
 
         assert [result.seller for result in results] == ["ingame-a", "ingame-b", "online-a"]
+        assert results.total == 3
 
-    def test_negative_attrs_are_sent_to_api(self, monkeypatch):
+    def test_paginates_after_filter_and_sort(self, monkeypatch):
+        from warframe_agent import riven
+
+        def auction(price):
+            return {
+                "item": {
+                    "weapon_url_name": "strun",
+                    "name": f"strun-{price}",
+                    "attributes": [{"url_name": "critical_chance", "value": 90, "positive": True}],
+                    "re_rolls": 0,
+                },
+                "buyout_price": price,
+                "owner": {"ingame_name": f"seller-{price}", "status": "online"},
+            }
+
+        monkeypatch.setattr(riven, "fetch_riven_auctions", lambda *args, **kwargs: [auction(i) for i in range(25, 0, -1)])
+
+        query = RivenQuery(weapon_url_name="strun", positive_attrs=["critical_chance"])
+        page = search_rivens(query, page=2, page_size=10)
+
+        assert page.total == 25
+        assert page.page == 2
+        assert [result.price for result in page.results] == list(range(11, 21))
+        assert page.has_next is True
+        assert page.has_prev is True
+
+    def test_negative_stats_passed_to_api(self, monkeypatch):
         from warframe_agent import riven
 
         captured_urls = []
@@ -294,6 +331,7 @@ class TestFilterLogic:
             captured_urls.append(url)
             return Response()
 
+        riven._riven_cache.clear()
         monkeypatch.setattr(riven.requests, "get", fake_get)
         monkeypatch.setattr(riven, "_wait_for_rate_limit", lambda: None)
 
@@ -351,12 +389,17 @@ class TestFormatOutput:
                 re_rolls=0,
             ),
         ]
-        output = format_riven_results(q, results)
+        output = format_riven_results(q, RivenSearchPage(results=results, total=25, page=1, page_size=10))
         assert "Strun" in output
         assert "20p" in output
         assert "暴击率" in output
         assert "暴击伤害" in output
         assert "TestPlayer" in output
+        assert "共找到 25 条" in output
+        assert "展示第 1-10 条" in output
+        assert "/w TestPlayer Hi!" in output
+        assert "I want to buy" not in output
+        assert "下一组" in output
 
     def test_conditions_display(self):
         q = RivenQuery(weapon_url_name="rubico", positive_attrs=["critical_chance"], no_negative=True, max_price=100)
@@ -365,6 +408,15 @@ class TestFormatOutput:
         assert "正属性" in output
         assert "无负" in output
         assert "100p" in output
+
+    def test_offline_riven_has_no_whisper(self):
+        q = RivenQuery(weapon_url_name="strun")
+        results = [RivenResult(weapon="strun", mod_name="strun-mod", price=20, seller="OfflineSeller", seller_status="offline")]
+        output = format_riven_results(q, results)
+        assert "/w OfflineSeller Hi!" not in output
+
+    def test_riven_whisper_is_short_greeting(self):
+        assert build_riven_whisper("Wlcos") == "/w Wlcos Hi!"
 
 
 # ── API 集成测试（需要网络）──────────────────────────────────────────────────
@@ -387,7 +439,7 @@ class TestRivenAPI:
     def test_search_rivens_real(self):
         query = RivenQuery(weapon_url_name="strun")
         results = search_rivens(query)
-        assert isinstance(results, list)
+        assert hasattr(results, "results")
         if results:
             r = results[0]
             assert r.weapon == "strun"
@@ -425,7 +477,7 @@ class TestChatAgentRivenRouting:
     def test_strun_double_crit_no_neg_routes_to_riven(self):
         from unittest.mock import patch
         agent = self._make_agent()
-        fake_results = [
+        fake_results = RivenSearchPage(results=[
             RivenResult(
                 weapon="strun",
                 mod_name="strun-visicron",
@@ -439,7 +491,7 @@ class TestChatAgentRivenRouting:
                 seller_status="online",
                 re_rolls=3,
             ),
-        ]
+        ], total=1)
         with patch("warframe_agent.riven.fetch_riven_auctions", return_value=[]):
             with patch("warframe_agent.riven.search_rivens", return_value=fake_results):
                 answer = agent.answer("斯特朗紫卡双爆无负")
@@ -464,9 +516,9 @@ class TestChatAgentRivenRouting:
         agent = self._make_agent()
         captured = {}
 
-        def fake_search(query):
+        def fake_search(query, page=1, page_size=10):
             captured["query"] = query
-            return []
+            return RivenSearchPage(results=[], total=0, page=page, page_size=page_size)
 
         with patch("warframe_agent.riven.search_rivens", side_effect=fake_search):
             agent.answer("斯特朗紫卡双爆无负")
@@ -478,9 +530,9 @@ class TestChatAgentRivenRouting:
         agent = self._make_agent()
         captured = {}
 
-        def fake_search(query):
+        def fake_search(query, page=1, page_size=10):
             captured["query"] = query
-            return []
+            return RivenSearchPage(results=[], total=0, page=page, page_size=page_size)
 
         with patch("warframe_agent.riven.search_rivens", side_effect=fake_search):
             agent.answer("斯特朗紫卡双爆无负，全部玩家")
@@ -492,9 +544,9 @@ class TestChatAgentRivenRouting:
         agent = self._make_agent()
         captured = []
 
-        def fake_search(query):
+        def fake_search(query, page=1, page_size=10):
             captured.append(tuple(query.seller_statuses))
-            return []
+            return RivenSearchPage(results=[], total=0, page=page, page_size=page_size)
 
         with patch("warframe_agent.riven.search_rivens", side_effect=fake_search):
             agent.answer("斯特朗紫卡双爆无负")
@@ -502,6 +554,42 @@ class TestChatAgentRivenRouting:
 
         assert captured[0] == ("ingame", "online")
         assert captured[1] == ()
+
+    def test_followup_next_and_prev_pages(self):
+        from unittest.mock import patch
+        agent = self._make_agent()
+        captured = []
+
+        def fake_search(query, page=1, page_size=10):
+            captured.append(page)
+            total = 25
+            safe_page = min(max(1, page), 3)
+            return RivenSearchPage(results=[], total=total, page=safe_page, page_size=page_size)
+
+        with patch("warframe_agent.riven.search_rivens", side_effect=fake_search):
+            agent.answer("斯特朗紫卡双爆无负")
+            agent.answer("下一组")
+            agent.answer("上一组")
+
+        assert captured == [1, 2, 1]
+
+    def test_followup_filter_resets_to_first_page(self):
+        from unittest.mock import patch
+        agent = self._make_agent()
+        captured = []
+
+        def fake_search(query, page=1, page_size=10):
+            captured.append((page, query.no_negative, query.max_price, tuple(query.seller_statuses)))
+            return RivenSearchPage(results=[], total=25, page=page, page_size=page_size)
+
+        with patch("warframe_agent.riven.search_rivens", side_effect=fake_search):
+            agent.answer("斯特朗紫卡双爆")
+            agent.answer("下一组")
+            agent.answer("无负1000p以下")
+
+        assert captured[0][0] == 1
+        assert captured[1][0] == 2
+        assert captured[2] == (1, True, 1000, ("ingame", "online"))
 
     def test_model_riven_parse_rejects_unmentioned_weapon_guess(self):
         from warframe_agent.chat import ChatAgent

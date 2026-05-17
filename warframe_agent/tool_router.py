@@ -165,7 +165,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "query_events",
-            "description": "查询当前游戏活动和事件（Baro 来访、警报、入侵、虚空风暴等）",
+            "description": "查询当前游戏活动和事件（Baro 来访、警报、入侵、虚空风暴、Prime 重生等）",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -261,8 +261,8 @@ TOOLS = [
     },
     {
         "name": "query_events",
-        "description": "查询当前游戏活动和事件（Baro 来访、虚空裂缝、入侵、虚空风暴等）。可选 type 参数过滤：void_fissure=虚空裂缝, baro_visit=虚空商人, invasion=入侵, void_storm=虚空风暴",
-        "parameters": {"type": "事件类型过滤（可选）：void_fissure / baro_visit / invasion / void_storm，不传则返回全部"},
+        "description": "查询当前游戏活动和事件（Baro 来访、虚空裂缝、入侵、虚空风暴、Prime 重生等）。可选 type 参数过滤：void_fissure=虚空裂缝, baro_visit=虚空商人, invasion=入侵, void_storm=虚空风暴, prime_resurgence=Prime 重生",
+        "parameters": {"type": "事件类型过滤（可选）：void_fissure / baro_visit / invasion / void_storm / prime_resurgence，不传则返回全部"},
     },
     {
         "name": "deep_analysis",
@@ -429,9 +429,10 @@ def react_loop(
                 "4. 用户问 Mod 翻转/升级赚钱/内融 → mod_flipper\n"
                 "5. 用户问套装利润/拆件赚差价 → set_profit\n"
                 "6. 用户问投资/预算/ROI → investment_advisor\n"
-                "7. 用户问游戏活动/Baro/警报 → query_events\n"
+                "7. 用户问游戏活动/Baro/警报/Prime 重生 → query_events\n"
                 "   - 用户问虚空裂缝/裂隙/开核桃 → query_events(type='void_fissure')\n"
                 "   - 用户问Baro/虚空商人 → query_events(type='baro_visit')\n"
+                "   - 用户问Prime 重生/resurgence/下一期是谁 → query_events(type='prime_resurgence')\n"
                 "8. 用户要对比多个物品或复杂分析 → plan（分解子任务）\n"
                 "9. 用户问价格趋势/涨跌 → price_trend\n"
                 "10. 用户问紫卡/裂罅/Riven → riven_search\n"

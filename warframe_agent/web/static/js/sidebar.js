@@ -3122,29 +3122,36 @@ async function showPriceAnomalies() {
     document.getElementById('detail-panel')?.classList.add('active');
 
     try {
-        const resp = await fetch('/api/arbitrage');
+        const resp = await fetch('/api/price/anomalies');
+        if (!resp.ok) {
+            const error = await resp.json().catch(() => ({}));
+            throw new Error(error.detail || error.error || `HTTP ${resp.status}`);
+        }
         const data = await resp.json();
-        const items = data.opportunities || [];
+        const items = data.anomalies || [];
 
         let html = `<div class="panel-title-row">
             <span class="panel-title-eyebrow">价格异常</span>
-            <span class="badge ${items.length > 0 ? 'badge-gold' : 'badge-muted'}">${items.length} 机会</span>
+            <span class="badge ${items.length > 0 ? 'badge-gold' : 'badge-muted'}">${items.length} 异常</span>
         </div>`;
 
         if (items.length === 0) {
             html += `<div class="empty-state"><div class="empty-icon">📊</div>
                 <span class="empty-primary">暂无异常</span>
-                <span class="empty-sub">当前市场未发现明显价格异常</span></div>`;
+                <span class="empty-sub">当前关注物品未发现明显价格异常</span></div>`;
         } else {
             html += '<div class="card"><div class="card-body">';
             items.slice(0, 20).forEach(item => {
-                const profitColor = item.profit > 0 ? 'var(--green-success)' : 'var(--red-error)';
+                const deviation = Number(item.deviation_pct || 0);
+                const direction = item.direction || (deviation >= 0 ? 'up' : 'down');
+                const color = direction === 'up' ? 'var(--green-success)' : 'var(--red-error)';
+                const sign = deviation >= 0 ? '+' : '';
                 html += `<div class="fissure-item">
                     <div>
-                        <div class="fissure-node">${item.item || 'Unknown'}</div>
-                        <div class="fissure-mission">买 ${item.buy || 0}p → 卖 ${item.sell || 0}p</div>
+                        <div class="fissure-node">${item.display || item.item_id || 'Unknown'}</div>
+                        <div class="fissure-mission">当前 ${item.current_price ?? '-'}p / 均价 ${item.avg_price ?? '-'}p</div>
                     </div>
-                    <span style="color:${profitColor};font-weight:600;font-family:var(--font-mono)">+${item.profit || 0}p</span>
+                    <span style="color:${color};font-weight:600;font-family:var(--font-mono)">${sign}${deviation.toFixed(1)}%</span>
                 </div>`;
             });
             html += '</div></div>';

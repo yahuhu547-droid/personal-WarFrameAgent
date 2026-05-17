@@ -206,7 +206,8 @@ async def stream_ollama_chat(prompt: str, model: str = config.MODEL_NAME):
 
     client = ollama.AsyncClient()
     async for chunk in await client.generate(model=model, prompt=prompt, stream=True):
-        if text := chunk.get("response"):
+        text = chunk.get("response")
+        if text:
             yield text
 
 

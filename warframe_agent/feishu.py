@@ -18,6 +18,10 @@ from . import config
 logger = logging.getLogger(__name__)
 
 
+def _worker_marker() -> str:
+    return f"WARFRAME_FEISHU_WORKER:{config.DATA_DIR.resolve()}"
+
+
 @dataclass
 class FeishuConfig:
     enabled: bool = False
@@ -63,13 +67,12 @@ class FeishuBot:
     def reply(self, message_id: str, text: str) -> bool:
         try:
             client = self._ensure_client()
-            body = CreateMessageRequestBody.builder() \
+            body = ReplyMessageRequestBody.builder() \
                 .msg_type("text") \
                 .content(json.dumps({"text": text})) \
-                .receive_id(message_id) \
                 .build()
-            request = CreateMessageRequest.builder() \
-                .receive_id_type("message_id") \
+            request = ReplyMessageRequest.builder() \
+                .message_id(message_id) \
                 .request_body(body) \
                 .build()
             response = client.im.v1.message.reply(request)
@@ -221,6 +224,7 @@ class FeishuBot:
             app_id=self.cfg.app_id,
             app_secret=self.cfg.app_secret,
             data_dir=str(config.DATA_DIR).replace("\\", "\\\\"),
+            marker=_worker_marker(),
         )
         log_path = config.DATA_DIR / "feishu_worker.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -257,7 +261,7 @@ class FeishuBot:
             )
             current_pid = str(self._ws_proc.pid) if self._ws_proc else ""
             for line in result.stdout.splitlines():
-                if "lark_oapi" in line and "P2ImMessageReceiveV1" in line:
+                if _worker_marker() in line:
                     # 提取 PID（最后一列数字）
                     parts = line.strip().split()
                     if parts:
@@ -281,8 +285,9 @@ from lark_oapi.api.im.v1.model import P2ImMessageReceiveV1
 
 APP_ID = "{app_id}"
 APP_SECRET = "{app_secret}"
+WORKER_MARKER = "{marker}"
 API_URL = "http://127.0.0.1:8000/api/chat"
-DATA_DIR = r"{data_dir}"
+DATA_DIR = Path(r"{data_dir}")
 
 _client = None
 _service_start_ms = int(time.time() * 1000)  # 服务启动时间（毫秒）

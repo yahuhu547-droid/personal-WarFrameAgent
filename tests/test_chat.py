@@ -2,6 +2,7 @@ import unittest
 
 from warframe_agent.chat import ChatAgent, build_item_context, is_chat_exit
 from warframe_agent.dictionary import ResolveResult
+from warframe_agent.events import EventTracker, GameEvent, PrimeResurgenceRotation, PrimeResurgenceItem
 
 
 class FakeResolver:
@@ -104,6 +105,110 @@ if __name__ == "__main__":
 from warframe_agent.chat import build_system_context
 from warframe_agent.knowledge import MarketKnowledge, ItemKnowledge, CategoryHealth
 from warframe_agent.memory import AgentMemory, TradingPreferences
+
+
+def _prime_resurgence_tracker():
+    tracker = EventTracker()
+    tracker._last_fetch = 9999999999.0
+    tracker._events = [
+        GameEvent(
+            event_type="prime_resurgence",
+            description="Prime 重生: Rhino Prime + Nyx Prime",
+            prime_resurgence=PrimeResurgenceRotation(
+                featured_names=["Rhino Prime", "Nyx Prime"],
+                start_time="2026-05-14 18:00 UTC",
+                end_time="2026-06-11 18:00 UTC",
+                next_featured_names=["Loki Prime", "Ember Prime"],
+                next_start_time="2026-06-11 18:00 UTC",
+                next_end_time="2026-07-09 18:00 UTC",
+                items=[
+                    PrimeResurgenceItem("/Lotus/StoreItems/Powersuits/Rhino/RhinoPrime", "Rhino Prime", "", 3, 0),
+                    PrimeResurgenceItem("/Lotus/StoreItems/Powersuits/Jade/NyxPrime", "Nyx Prime", "", 3, 0),
+                    PrimeResurgenceItem("/Lotus/StoreItems/Weapons/Tenno/Melee/AnkyrosPrime", "Ankyros Prime", "", 2, 0),
+                    PrimeResurgenceItem("/Lotus/StoreItems/Weapons/Tenno/Rifle/BoltorPrime", "Boltor Prime", "", 2, 0),
+                    PrimeResurgenceItem("/Lotus/StoreItems/Weapons/Tenno/Melee/ScindoPrime", "Scindo Prime", "", 3, 0),
+                    PrimeResurgenceItem("/Lotus/StoreItems/Weapons/Tenno/ThrowingWeapons/HikouPrime", "Hikou Prime", "", 2, 0),
+                    PrimeResurgenceItem("/Lotus/StoreItems/Types/Items/MiscItems/NoruPrimeScarf", "Noru Prime Scarf", "", 2, 0),
+                    PrimeResurgenceItem("/Lotus/StoreItems/Types/Items/MiscItems/RhinoPrimeBobbleHead", "Rhino Prime Bobble Head", "", 1, 0),
+                    PrimeResurgenceItem("/Lotus/Types/Game/Projections/T1VoidProjectionRhinoNyxVaultABronze", "T1 Void Projection Rhino Nyx Vault A Bronze", "", 0, 1),
+                    PrimeResurgenceItem("/Lotus/Types/Game/Projections/T2VoidProjectionRhinoNyxVaultABronze", "T2 Void Projection Rhino Nyx Vault A Bronze", "", 0, 1),
+                    PrimeResurgenceItem("/Lotus/Types/Game/Projections/T3VoidProjectionRhinoNyxVaultABronze", "T3 Void Projection Rhino Nyx Vault A Bronze", "", 0, 1),
+                    PrimeResurgenceItem("/Lotus/Types/Game/Projections/T4VoidProjectionRhinoNyxVaultABronze", "T4 Void Projection Rhino Nyx Vault A Bronze", "", 0, 1),
+                ],
+            ),
+        )
+    ]
+    return tracker
+
+
+def test_resurgence_command_formats_current_shop_items_only():
+    agent = ChatAgent(event_tracker=_prime_resurgence_tracker(), model_call=lambda prompt: "unused")
+
+    answer = agent.answer("/重生")
+
+    assert "Prime 重生轮换:" not in answer
+    assert "开始时间:" not in answer
+    assert "下一期:" not in answer
+    assert "可兑换返厂核桃:" not in answer
+    assert "返厂战甲:" in answer
+    assert "Rhino Prime" in answer
+    assert "Nyx Prime" in answer
+    assert "返厂武器:" in answer
+    assert "甲龙双拳 Prime" in answer
+    assert "螺钉步枪 Prime" in answer
+    assert "分裂斩斧 Prime" in answer
+    assert "飞扬 Prime" in answer
+    assert "Scindo Prime" not in answer
+    assert "可通过兑换当前 Prime 重生的古纪 B4、前纪 N6、中纪 R1、后纪 S3刷取" in answer
+    assert "古纪 A" not in answer
+
+def test_resurgence_natural_language_uses_direct_event_answer():
+    agent = ChatAgent(event_tracker=_prime_resurgence_tracker(), model_call=lambda prompt: "unused")
+
+    answer = agent.answer("当前 Prime 重生是谁，下一期是谁")
+
+    assert "Rhino Prime" in answer
+    assert "返厂战甲:" in answer
+    assert "下一期:" not in answer
+    assert "没有找到匹配的物品" not in answer
+
+
+def test_resurgence_command_adds_set_price_when_orders_available():
+    def order_fetcher(item_id):
+        if item_id == "rhino_prime_set":
+            return [
+                {"type": "sell", "platinum": 90, "quantity": 1, "user": {"ingameName": "Seller", "status": "ingame", "reputation": 1}},
+                {"type": "buy", "platinum": 100, "quantity": 1, "user": {"ingameName": "Buyer", "status": "ingame", "reputation": 1}},
+            ]
+        return []
+
+    agent = ChatAgent(
+        event_tracker=_prime_resurgence_tracker(),
+        model_call=lambda prompt: "unused",
+        order_fetcher=order_fetcher,
+    )
+
+    answer = agent.answer("当前 Prime 重生物品")
+
+    assert "Rhino Prime" in answer
+    assert "可通过兑换当前 Prime 重生的古纪 B4、前纪 N6" in answer
+    assert "最高卖出价 100p" in answer
+    assert "最低买入价 90p" in answer
+
+
+def test_resurgence_filters_cosmetics_and_converts_internal_relic_names():
+    agent = ChatAgent(event_tracker=_prime_resurgence_tracker(), model_call=lambda prompt: "unused")
+
+    answer = agent.answer("Prime 重生物品")
+
+    assert "Noru Prime Scarf" not in answer
+    assert "Bobble Head" not in answer
+    assert "T1 Void Projection" not in answer
+    assert "古纪" in answer
+    assert "前纪" in answer
+    assert "中纪" in answer
+    assert "后纪" in answer
+    assert answer.count("Rhino Prime") == 1
 
 
 def test_build_system_context_empty():

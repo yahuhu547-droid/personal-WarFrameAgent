@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -10,6 +11,28 @@ from . import config
 
 EVENT_CACHE_PATH = config.DATA_DIR / "game_events_cache.json"
 EVENT_CACHE_TTL = config.EVENT_REFRESH_INTERVAL  # 30 分钟
+
+
+@dataclass(frozen=True)
+class PrimeResurgenceItem:
+    item_type: str
+    item_name: str
+    market_id: str
+    prime_price: int = 0
+    regular_price: int = 0
+
+
+@dataclass(frozen=True)
+class PrimeResurgenceRotation:
+    featured_item: str = ""
+    featured_names: list[str] = field(default_factory=list)
+    start_time: str = ""
+    end_time: str = ""
+    next_featured_item: str = ""
+    next_featured_names: list[str] = field(default_factory=list)
+    next_start_time: str = ""
+    next_end_time: str = ""
+    items: list[PrimeResurgenceItem] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -43,6 +66,7 @@ class GameEvent:
     impact: str = "neutral"  # "positive" / "negative" / "neutral"
     description: str = ""
     baro_items: list[BaroItem] = field(default_factory=list)
+    prime_resurgence: PrimeResurgenceRotation | None = None
 
 
 # 物品关键词 → 事件影响映射
@@ -117,6 +141,64 @@ def _item_type_to_market_id(item_type: str) -> str:
     if _ITEM_TYPE_MAP is None:
         _ITEM_TYPE_MAP = _build_item_type_map()
     return _ITEM_TYPE_MAP.get(item_type, "")
+
+
+def _item_type_leaf(item_type: str) -> str:
+    return item_type.split("/")[-1].replace(" ", "_")
+
+
+def _readable_prime_name(raw: str) -> str:
+    leaf = _item_type_leaf(raw)
+    leaf = leaf.removeprefix("MPV")
+    leaf = leaf.removesuffix("SinglePack")
+    leaf = leaf.removesuffix("DualPack")
+    leaf = leaf.removesuffix("PrimeSet")
+    words = re.sub(r"(?<!^)(?=[A-Z])", " ", leaf).split()
+    return " ".join(words) if words else leaf
+
+
+def _format_worldstate_time(raw) -> str:
+    ts = _parse_timestamp(raw)
+    if not ts:
+        return str(raw or "")
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _parse_resurgence_item(raw: dict) -> PrimeResurgenceItem | None:
+    item_type = raw.get("ItemType") or raw.get("item") or ""
+    if not item_type:
+        return None
+    return PrimeResurgenceItem(
+        item_type=item_type,
+        item_name=_readable_prime_name(item_type),
+        market_id=_item_type_to_market_id(item_type),
+        prime_price=int(raw.get("PrimePrice") or 0),
+        regular_price=int(raw.get("RegularPrice") or 0),
+    )
+
+
+def _prime_featured_names(featured_item: str) -> list[str]:
+    leaf = _item_type_leaf(featured_item).removeprefix("MPV")
+    leaf = leaf.removesuffix("DualPack").removesuffix("SinglePack")
+    names = [name for name in re.findall(r"[A-Z][a-z]+(?=Prime|[A-Z]|$)", leaf) if name != "Prime"]
+    return [f"{name} Prime" for name in names]
+
+
+def _load_prime_resurgence(data: dict | None) -> PrimeResurgenceRotation | None:
+    if not data:
+        return None
+    return PrimeResurgenceRotation(
+        featured_item=data.get("featured_item", ""),
+        featured_names=data.get("featured_names", []),
+        start_time=data.get("start_time", ""),
+        end_time=data.get("end_time", ""),
+        next_featured_item=data.get("next_featured_item", ""),
+        next_featured_names=data.get("next_featured_names", []),
+        next_start_time=data.get("next_start_time", ""),
+        next_end_time=data.get("next_end_time", ""),
+        items=[PrimeResurgenceItem(**item) for item in data.get("items", [])],
+    )
 
 
 def _build_item_type_map() -> dict[str, str]:
@@ -370,6 +452,70 @@ class EventTracker:
                     description=_INVASION_MAP.get(desc, f"入侵: {desc}"),
                 ))
 
+        # Prime Resurgence（PrimeVaultTraders 商店轮换）
+        for trader in world_state.get("PrimeVaultTraders", []):
+            if not isinstance(trader, dict):
+                continue
+            manifest = trader.get("Manifest") or []
+            items = [item for item in (_parse_resurgence_item(raw) for raw in manifest if isinstance(raw, dict)) if item]
+            schedule = trader.get("ScheduleInfo") or []
+            now_ts = time.time()
+            starts = [_parse_timestamp(trader.get("Activation"))]
+            starts.extend(_parse_timestamp(entry.get("Expiry")) for entry in schedule if isinstance(entry, dict))
+            starts = sorted(ts for ts in starts if ts)
+            current_start_ts = _parse_timestamp(trader.get("Activation"))
+            featured_item = ""
+            featured_names: list[str] = []
+            end_raw = trader.get("Expiry")
+            next_featured_item = ""
+            next_featured_names: list[str] = []
+            next_start_raw = ""
+            next_end_raw = ""
+            previous_expiry_raw = trader.get("Activation")
+            found_current = False
+            for entry in schedule:
+                if not isinstance(entry, dict):
+                    continue
+                expiry_raw = entry.get("Expiry")
+                expiry_ts = _parse_timestamp(expiry_raw)
+                if not expiry_ts:
+                    continue
+                if not found_current and expiry_ts >= now_ts:
+                    end_raw = expiry_raw
+                    featured_item = entry.get("FeaturedItem", "")
+                    featured_names = _prime_featured_names(featured_item)
+                    current_start_ts = _parse_timestamp(previous_expiry_raw)
+                    found_current = True
+                elif found_current:
+                    next_start_raw = previous_expiry_raw
+                    next_end_raw = expiry_raw
+                    next_featured_item = entry.get("FeaturedItem", "")
+                    next_featured_names = _prime_featured_names(next_featured_item)
+                    break
+                previous_expiry_raw = expiry_raw
+            rotation = PrimeResurgenceRotation(
+                featured_item=featured_item,
+                featured_names=featured_names,
+                start_time=_format_worldstate_time(current_start_ts),
+                end_time=_format_worldstate_time(end_raw),
+                next_featured_item=next_featured_item,
+                next_featured_names=next_featured_names,
+                next_start_time=_format_worldstate_time(next_start_raw),
+                next_end_time=_format_worldstate_time(next_end_raw),
+                items=items,
+            )
+            affected = [item.market_id or item.item_name.lower().replace(" ", "_") for item in items]
+            label = " + ".join(featured_names) if featured_names else "当前轮换"
+            events.append(GameEvent(
+                event_type="prime_resurgence",
+                items_affected=affected,
+                start_time=rotation.start_time,
+                end_time=rotation.end_time,
+                impact="positive",
+                description=f"Prime 重生: {label}",
+                prime_resurgence=rotation,
+            ))
+
         # Prime Vault（PrimeVaultAvailabilities 数组）
         for vault in world_state.get("PrimeVaultAvailabilities", []):
             if not isinstance(vault, dict):
@@ -466,6 +612,14 @@ class EventTracker:
         events = self.get_active_events()
         return [e for e in events if e.event_type == "prime_vault"]
 
+    def get_prime_resurgence(self) -> GameEvent | None:
+        """获取当前 Prime 重生轮换。"""
+        events = self.get_active_events()
+        for event in events:
+            if event.event_type == "prime_resurgence":
+                return event
+        return None
+
     def get_vaulted_item_ids(self) -> set[str]:
         """获取当前 Vault 回归中的物品 ID 集合（用于过滤投资分析）。"""
         vault_events = self.get_vault_status()
@@ -486,8 +640,8 @@ class EventTracker:
                     if affected in lower or lower in affected:
                         return event.description
 
-            # Prime Vault
-            if event.event_type in ("prime_vault", "prime_access"):
+            # Prime Vault / Prime Resurgence
+            if event.event_type in ("prime_vault", "prime_access", "prime_resurgence"):
                 if "prime" in lower:
                     return event.description
 
@@ -516,6 +670,26 @@ class EventTracker:
                             }
                             for bi in e.baro_items
                         ] if e.baro_items else [],
+                        "prime_resurgence": {
+                            "featured_item": e.prime_resurgence.featured_item,
+                            "featured_names": e.prime_resurgence.featured_names,
+                            "start_time": e.prime_resurgence.start_time,
+                            "end_time": e.prime_resurgence.end_time,
+                            "next_featured_item": e.prime_resurgence.next_featured_item,
+                            "next_featured_names": e.prime_resurgence.next_featured_names,
+                            "next_start_time": e.prime_resurgence.next_start_time,
+                            "next_end_time": e.prime_resurgence.next_end_time,
+                            "items": [
+                                {
+                                    "item_type": item.item_type,
+                                    "item_name": item.item_name,
+                                    "market_id": item.market_id,
+                                    "prime_price": item.prime_price,
+                                    "regular_price": item.regular_price,
+                                }
+                                for item in e.prime_resurgence.items
+                            ],
+                        } if e.prime_resurgence else None,
                     }
                     for e in self._events
                 ],
@@ -546,6 +720,7 @@ class EventTracker:
                     baro_items=[
                         BaroItem(**bi) for bi in e.get("baro_items", [])
                     ] if e.get("baro_items") else [],
+                    prime_resurgence=_load_prime_resurgence(e.get("prime_resurgence")),
                 )
                 for e in data.get("events", [])
             ]

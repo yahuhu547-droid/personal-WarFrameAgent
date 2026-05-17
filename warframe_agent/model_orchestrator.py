@@ -5,15 +5,16 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Dict, List, Optional, Tuple
 
 from . import config
 from .llm import estimate_complexity
 
 logger = logging.getLogger(__name__)
 
-CloudCall = Callable[[list[dict[str, str]], str], str]
-LocalCall = Callable[[list[dict[str, str]]], str]
+Message = Dict[str, str]
+CloudCall = Callable[[List[Message], str], str]
+LocalCall = Callable[[List[Message]], str]
 
 
 @dataclass(frozen=True)

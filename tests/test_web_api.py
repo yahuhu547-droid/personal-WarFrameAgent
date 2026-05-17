@@ -311,5 +311,33 @@ class TestAliasesAPI(unittest.TestCase):
         self.assertEqual(data["aliases"][0]["item_id"], "arcane_energize")
 
 
+class TestRivenAuctionsAPI(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+
+    @patch("warframe_agent.scraper.scrape_sync")
+    @patch("warframe_agent.scraper.scrape_riven_auctions")
+    def test_riven_auctions_supports_pagination(self, mock_scrape, mock_sync):
+        from warframe_agent.scraper import ScrapedRiven, ScrapedRivenPage
+
+        mock_scrape.return_value = object()
+        mock_sync.return_value = ScrapedRivenPage(
+            rivens=[ScrapedRiven(weapon="strun", mod_name="strun-mod", attributes=[], price=20, seller="Seller")],
+            total=25,
+            page=2,
+            page_size=10,
+        )
+
+        response = self.client.get("/api/riven/auctions?weapon=strun&page=2&page_size=10")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["total"], 25)
+        self.assertEqual(data["page"], 2)
+        self.assertEqual(data["page_size"], 10)
+        self.assertEqual(len(data["rivens"]), 1)
+        mock_scrape.assert_called_once_with("strun", page=2, page_size=10)
+
+
 if __name__ == "__main__":
     unittest.main()

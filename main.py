@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import sys
+from pathlib import Path
 
 from warframe_agent import config
 from warframe_agent.agent import WarframeAgent
@@ -98,7 +99,8 @@ def handle_web() -> None:
     print("\u6d4f\u89c8\u5668\u8bbf\u95ee: http://127.0.0.1:8000")
     print("\u6309 Ctrl+C \u505c\u6b62\u670d\u52a1\u5668")
     try:
-        subprocess.run([sys.executable, "start_web.py"])
+        script = Path(__file__).resolve().parent / "start_web.py"
+        subprocess.run([sys.executable, str(script)])
     except KeyboardInterrupt:
         print("\n\u5df2\u505c\u6b62 Web \u670d\u52a1\u5668\u3002")
 
