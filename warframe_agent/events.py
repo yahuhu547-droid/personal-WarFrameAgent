@@ -11,6 +11,7 @@ from . import config
 
 EVENT_CACHE_PATH = config.DATA_DIR / "game_events_cache.json"
 EVENT_CACHE_TTL = config.EVENT_REFRESH_INTERVAL  # 30 分钟
+CYCLE_CACHE_TTL = min(EVENT_CACHE_TTL, 60)
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,17 @@ class VoidFissure:
 
 
 @dataclass(frozen=True)
+class WorldCycle:
+    cycle: str
+    cycle_display: str
+    state: str
+    state_display: str
+    activation: str = ""
+    expiry: str = ""
+    time_left: str = ""
+
+
+@dataclass(frozen=True)
 class GameEvent:
     event_type: str         # "baro_visit" / "prime_vault" / "alert" / "void_storm" / "invasion"
     items_affected: list[str] = field(default_factory=list)
@@ -83,6 +95,43 @@ _TIER_MAP = {
     "VoidT6": "仲裁 (Arbitration)",
 }
 
+_CYCLE_META = {
+    "earth": ("地球", ("earthCycle", "EarthCycle"), "day"),
+    "cetus": ("希图斯/夜灵平原", ("cetusCycle", "CetusCycle"), "day"),
+    "vallis": ("奥布山谷/金星", ("vallisCycle", "VallisCycle"), "warm"),
+    "cambion": ("魔胎之境", ("cambionCycle", "CambionCycle"), "fass"),
+}
+
+_CYCLE_STATE_DISPLAY = {
+    "day": "白天",
+    "night": "黑夜",
+    "warm": "温暖",
+    "cold": "寒冷",
+    "fass": "Fass",
+    "vome": "Vome",
+}
+
+_CYCLE_STATE_ALIASES = {
+    "day": "day",
+    "night": "night",
+    "warm": "warm",
+    "cold": "cold",
+    "fass": "fass",
+    "vome": "vome",
+    "白天": "day",
+    "白昼": "day",
+    "黑夜": "night",
+    "夜晚": "night",
+    "晚上": "night",
+    "温暖": "warm",
+    "暖": "warm",
+    "热": "warm",
+    "寒冷": "cold",
+    "冷": "cold",
+    "法斯": "fass",
+    "沃姆": "vome",
+}
+
 # 任务类型映射
 _MISSION_TYPE_MAP = {
     "MT_EXTERMINATION": "歼灭",
@@ -100,6 +149,19 @@ _MISSION_TYPE_MAP = {
     "MT_SPY": "间谍",
     "MT_ASSASSINATION": "刺杀",
 }
+
+_LIMITED_EVENT_NAMES = {
+    "jadeshadowsevent": "兽之腹",
+    "jadeshadows": "兽之腹",
+    "thermiafractures": "热美亚裂缝",
+    "thermiafracture": "热美亚裂缝",
+    "friendlyfiretacalert": "利刃豺狼舰队",
+    "corpusrazorbackproject": "利刃豺狼舰队",
+    "razorback": "利刃豺狼舰队",
+    "fomorian": "巨人战舰",
+    "ghoul": "尸鬼净化",
+}
+
 
 # 入侵描述映射
 _INVASION_MAP = {
@@ -257,6 +319,53 @@ def _parse_timestamp(raw) -> float:
         return 0.0
 
 
+def cycle_timestamp(raw) -> float:
+    return _parse_timestamp(raw)
+
+
+def _normalize_cycle_state(cycle: str, raw: dict[str, Any], boolean_key: str, true_state: str, false_state: str) -> str:
+    state = raw.get("state") or raw.get("State")
+    if isinstance(state, str):
+        normalized = _CYCLE_STATE_ALIASES.get(state.strip().lower()) or _CYCLE_STATE_ALIASES.get(state.strip())
+        if normalized:
+            return normalized
+    value = raw.get(boolean_key)
+    if value is None:
+        value = raw.get(boolean_key[0].upper() + boolean_key[1:])
+    if isinstance(value, bool):
+        return true_state if value else false_state
+    if cycle == "cambion" and isinstance(state, str):
+        lowered = state.strip().lower()
+        if "fass" in lowered:
+            return "fass"
+        if "vome" in lowered:
+            return "vome"
+    return ""
+
+
+def _limited_event_name(*values: object) -> str:
+    text = " ".join(str(value or "") for value in values).lower()
+    compact = re.sub(r"[^a-z0-9]+", "", text)
+    for key, name in _LIMITED_EVENT_NAMES.items():
+        if key in compact:
+            return name
+    return ""
+
+
+def _limited_event_description(name: str, raw: dict[str, Any]) -> str:
+    node = _node_name(str(raw.get("Node") or raw.get("VictimNode") or ""))
+    end = _format_worldstate_time(raw.get("Expiry"))
+    parts = [name]
+    if node:
+        parts.append(f"节点: {node}")
+    if end:
+        parts.append(f"结束: {end}")
+    health = raw.get("HealthPct")
+    if isinstance(health, (int, float)):
+        parts.append(f"进度: {health * 100:.0f}%")
+    return " | ".join(parts)
+
+
 def _classify_event(raw: dict) -> GameEvent | None:
     """从原始 API 数据解析事件。"""
     event_type = raw.get("type", "unknown")
@@ -320,7 +429,10 @@ class EventTracker:
         self._events: list[GameEvent] = []
         self._world_state: dict[str, Any] | None = None
         self._last_fetch: float = 0
+        self._cycle_cache: dict[str, WorldCycle] = {}
+        self._cycle_last_fetch: float = 0
         self._fetcher = self._default_fetcher
+        self._cycle_fetcher = self._default_cycle_fetcher
 
     def _default_fetcher(self) -> dict[str, Any]:
         """从 Warframe 官方 API 获取世界状态。"""
@@ -335,8 +447,18 @@ class EventTracker:
         fixed = re.sub(r",\s*]", "]", fixed)
         return json.loads(fixed)
 
+    def _default_cycle_fetcher(self, cycle: str) -> dict[str, Any]:
+        import urllib.request
+        url = f"https://api.warframestat.us/pc/{cycle}Cycle"
+        req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "warframe-agent"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
     def set_fetcher(self, fetcher) -> None:
         self._fetcher = fetcher
+
+    def set_cycle_fetcher(self, fetcher) -> None:
+        self._cycle_fetcher = fetcher
 
     def fetch_world_state(self) -> dict[str, Any] | None:
         """获取世界状态，带容错。"""
@@ -553,10 +675,10 @@ class EventTracker:
 
         return events
 
-    def refresh(self) -> list[GameEvent]:
+    def refresh(self, force: bool = False) -> list[GameEvent]:
         """刷新事件缓存。"""
         now = time.time()
-        if now - self._last_fetch < EVENT_CACHE_TTL and self._events:
+        if not force and now - self._last_fetch < EVENT_CACHE_TTL and self._events:
             return self._events
 
         world_state = self.fetch_world_state()
@@ -570,6 +692,58 @@ class EventTracker:
         # 持久化缓存
         self._save_cache()
         return self._events
+
+    def parse_limited_events(self, world_state: dict[str, Any] | None = None) -> list[GameEvent]:
+        """解析运营限时活动，不包含裂缝、虚空风暴、入侵合集。"""
+        ws = world_state if world_state is not None else self._world_state
+        if not ws:
+            return []
+        events: list[GameEvent] = []
+        seen: set[str] = set()
+
+        for goal in ws.get("Goals", []):
+            if not isinstance(goal, dict):
+                continue
+            name = _limited_event_name(goal.get("Tag"), goal.get("Desc"), goal.get("ToolTip"))
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            events.append(GameEvent(
+                event_type="limited_event",
+                start_time=_format_worldstate_time(goal.get("Activation")),
+                end_time=_format_worldstate_time(goal.get("Expiry")),
+                impact="positive",
+                description=_limited_event_description(name, goal),
+            ))
+
+        alert_names: set[str] = set()
+        for alert in ws.get("Alerts", []) + ws.get("alerts", []):
+            if not isinstance(alert, dict):
+                continue
+            mission = alert.get("MissionInfo") or alert.get("mission") or {}
+            name = _limited_event_name(alert.get("Tag"), mission.get("descText"), mission.get("description"))
+            if name and name not in seen:
+                alert_names.add(name)
+        for name in sorted(alert_names):
+            seen.add(name)
+            events.append(GameEvent(
+                event_type="limited_event",
+                impact="positive",
+                description=name,
+            ))
+
+        resurgence = next((event for event in self.parse_events(ws) if event.event_type == "prime_resurgence"), None)
+        if resurgence:
+            events.append(resurgence)
+
+        return events
+
+    def get_limited_events(self) -> list[GameEvent]:
+        """获取当前运营限时活动。"""
+        now = time.time()
+        if now - self._last_fetch >= EVENT_CACHE_TTL:
+            self.refresh()
+        return self.parse_limited_events()
 
     def parse_fissures(self, world_state: dict[str, Any] | None = None) -> list[VoidFissure]:
         """从世界状态解析结构化裂缝数据。"""
@@ -599,6 +773,83 @@ class EventTracker:
         if now - self._last_fetch >= EVENT_CACHE_TTL:
             self.refresh()
         return self.parse_fissures()
+
+    def parse_cycles(self, world_state: dict[str, Any] | None = None) -> list[WorldCycle]:
+        ws = world_state if world_state is not None else self._world_state
+        if not ws:
+            return []
+        cycles: list[WorldCycle] = []
+        for cycle, (display, keys, default_true_state) in _CYCLE_META.items():
+            raw = next((ws.get(key) for key in keys if isinstance(ws.get(key), dict)), None)
+            if not raw:
+                continue
+            if cycle in ("earth", "cetus"):
+                state = _normalize_cycle_state(cycle, raw, "isDay", "day", "night")
+            elif cycle == "vallis":
+                state = _normalize_cycle_state(cycle, raw, "isWarm", "warm", "cold")
+            else:
+                state = _normalize_cycle_state(cycle, raw, "isFass", "fass", "vome")
+            if not state:
+                state = default_true_state
+            cycles.append(WorldCycle(
+                cycle=cycle,
+                cycle_display=display,
+                state=state,
+                state_display=_CYCLE_STATE_DISPLAY.get(state, state),
+                activation=str(raw.get("activation") or raw.get("Activation") or ""),
+                expiry=str(raw.get("expiry") or raw.get("Expiry") or ""),
+                time_left=str(raw.get("timeLeft") or raw.get("TimeLeft") or ""),
+            ))
+        return cycles
+
+    def _fetch_external_cycles(self) -> list[WorldCycle]:
+        cycles: list[WorldCycle] = []
+        for cycle, (display, _, _) in _CYCLE_META.items():
+            try:
+                raw = self._cycle_fetcher(cycle)
+            except Exception:
+                continue
+            if not isinstance(raw, dict) or not raw:
+                continue
+            parsed = self.parse_cycles({f"{cycle}Cycle": raw})
+            if parsed:
+                cycles.extend(parsed)
+                continue
+            state = _normalize_cycle_state(cycle, raw, "isDay" if cycle in ("earth", "cetus") else "isWarm", "day" if cycle in ("earth", "cetus") else "warm", "night" if cycle in ("earth", "cetus") else "cold")
+            if cycle == "cambion":
+                state = _normalize_cycle_state(cycle, raw, "isFass", "fass", "vome")
+            if not state:
+                continue
+            cycles.append(WorldCycle(
+                cycle=cycle,
+                cycle_display=display,
+                state=state,
+                state_display=_CYCLE_STATE_DISPLAY.get(state, state),
+                activation=str(raw.get("activation") or raw.get("Activation") or ""),
+                expiry=str(raw.get("expiry") or raw.get("Expiry") or ""),
+                time_left=str(raw.get("timeLeft") or raw.get("TimeLeft") or ""),
+            ))
+        return cycles
+
+    def get_cycles(self) -> list[WorldCycle]:
+        now = time.time()
+        if self._cycle_cache and now - self._cycle_last_fetch < CYCLE_CACHE_TTL:
+            return list(self._cycle_cache.values())
+        if not self._world_state or now - self._last_fetch >= CYCLE_CACHE_TTL:
+            self.refresh(force=True)
+        cycles = self.parse_cycles()
+        if not cycles:
+            cycles = self._fetch_external_cycles()
+        if cycles:
+            self._cycle_cache = {cycle.cycle: cycle for cycle in cycles}
+            self._cycle_last_fetch = now
+        return cycles
+
+    def get_cycle(self, cycle: str) -> WorldCycle | None:
+        for world_cycle in self.get_cycles():
+            if world_cycle.cycle == cycle:
+                return world_cycle
+        return None
 
     def get_active_events(self) -> list[GameEvent]:
         """获取活跃事件（优先用缓存）。"""

@@ -2593,6 +2593,28 @@ async def broadcast_fissure_alert(msg: str):
             pass
 
 
+async def broadcast_cycle_alert(msg: str, cycle=None, alert=None):
+    message = {
+        "type": "cycle_alert",
+        "message": msg,
+        "cycle": getattr(cycle, "cycle", ""),
+        "cycle_display": getattr(cycle, "cycle_display", ""),
+        "state": getattr(cycle, "state", ""),
+        "state_display": getattr(cycle, "state_display", ""),
+        "expiry": getattr(cycle, "expiry", ""),
+    }
+    for ws in list(ws_connections):
+        try:
+            await ws.send_json(message)
+        except Exception:
+            pass
+    if push_client.available and push_config.push_alerts:
+        push_client.send_text(
+            f"状态提醒: {getattr(cycle, 'cycle_display', '') or '星球状态'}",
+            msg,
+        )
+
+
 async def broadcast_baro_report(report_text: str):
     message = {"type": "baro_recommendation", "message": report_text}
     for ws in list(ws_connections):
@@ -2603,9 +2625,10 @@ async def broadcast_baro_report(report_text: str):
 
 
 def setup_monitor():
+    loop = asyncio.get_running_loop()
+
     def on_alert_callback(notification: AlertNotification):
         try:
-            loop = asyncio.get_running_loop()
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(broadcast_alert(notification), loop)
         except Exception as exc:
@@ -2613,7 +2636,6 @@ def setup_monitor():
 
     def on_watch_callback(notification: WatchNotification):
         try:
-            loop = asyncio.get_running_loop()
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(broadcast_watch(notification), loop)
         except Exception as exc:
@@ -2621,7 +2643,6 @@ def setup_monitor():
 
     def on_goal_opportunity_callback(opportunity: dict):
         try:
-            loop = asyncio.get_running_loop()
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(broadcast_goal_opportunity(opportunity), loop)
         except Exception as exc:
@@ -2629,7 +2650,6 @@ def setup_monitor():
 
     def on_proactive_push_callback(push: ProactivePush):
         try:
-            loop = asyncio.get_running_loop()
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(broadcast_proactive_push(push), loop)
         except Exception as exc:
@@ -2656,7 +2676,6 @@ def setup_monitor():
         """裂缝匹配时推送到飞书和微信"""
         try:
             # WebSocket 广播
-            loop = asyncio.get_running_loop()
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(broadcast_fissure_alert(msg), loop)
         except Exception as exc:
@@ -2674,10 +2693,27 @@ def setup_monitor():
         except Exception as exc:
             logger.debug("飞书裂缝推送失败: %s", exc)
 
+    def on_cycle_callback(msg: str, cycle, alert):
+        try:
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(broadcast_cycle_alert(msg, cycle, alert), loop)
+        except Exception as exc:
+            logger.debug("cycle WebSocket 回调异常: %s", exc)
+        try:
+            if feishu_bot.available:
+                feishu_cfg = FeishuConfig.load()
+                if feishu_cfg.enabled:
+                    chat_id_path = config.DATA_DIR / "feishu_chat_id.txt"
+                    if chat_id_path.exists():
+                        chat_id = chat_id_path.read_text(encoding="utf-8").strip()
+                        if chat_id:
+                            feishu_bot.send(chat_id, msg)
+        except Exception as exc:
+            logger.debug("飞书状态推送失败: %s", exc)
+
     def on_baro_recommendation_callback(report_text: str):
         """Baro 推荐报告推送到飞书和微信"""
         try:
-            loop = asyncio.get_running_loop()
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(broadcast_baro_report(report_text), loop)
         except Exception as exc:
@@ -2706,6 +2742,7 @@ def setup_monitor():
         on_proactive_push=on_proactive_push_callback,
         on_daily_report=on_daily_report_callback,
         on_fissure=on_fissure_callback,
+        on_cycle=on_cycle_callback,
         on_baro_recommendation=on_baro_recommendation_callback,
         knowledge=knowledge,
     )

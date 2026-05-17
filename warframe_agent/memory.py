@@ -127,6 +127,17 @@ class FissureAlert:
 
 
 @dataclass(frozen=True)
+class CycleAlert:
+    cycle: str
+    target_state: str
+    note: str = ""
+    created_at: float = 0
+
+    def matches_cycle(self, cycle: str, state: str) -> bool:
+        return self.cycle == cycle and self.target_state == state
+
+
+@dataclass(frozen=True)
 class AgentMemory:
     preferences: TradingPreferences
     price_alerts: list[PriceAlert]
@@ -139,6 +150,7 @@ class AgentMemory:
     trade_outcomes: list[TradeOutcome] = field(default_factory=list)
     learned_patterns: list[dict] = field(default_factory=list)
     fissure_alerts: list[FissureAlert] = field(default_factory=list)
+    cycle_alerts: list[CycleAlert] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path = MEMORY_PATH) -> "AgentMemory":
@@ -155,6 +167,7 @@ class AgentMemory:
         goals = [AgentGoal(**g) for g in data.get("active_goals", [])]
         outcomes = [TradeOutcome(**o) for o in data.get("trade_outcomes", [])]
         fissure_alerts = [FissureAlert(**a) for a in data.get("fissure_alerts", [])]
+        cycle_alerts = [CycleAlert(**a) for a in data.get("cycle_alerts", [])]
         return cls(
             preferences=preferences,
             price_alerts=alerts,
@@ -167,6 +180,7 @@ class AgentMemory:
             trade_outcomes=outcomes,
             learned_patterns=list(data.get("learned_patterns", [])),
             fissure_alerts=fissure_alerts,
+            cycle_alerts=cycle_alerts,
         )
 
     @classmethod
@@ -272,6 +286,16 @@ class AgentMemory:
                     "note": a.note,
                 }
                 for a in self.fissure_alerts
+            ]
+        if self.cycle_alerts:
+            result["cycle_alerts"] = [
+                {
+                    "cycle": a.cycle,
+                    "target_state": a.target_state,
+                    "note": a.note,
+                    "created_at": a.created_at,
+                }
+                for a in self.cycle_alerts
             ]
         return result
 
@@ -413,4 +437,19 @@ class AgentMemory:
         if 0 <= index < len(self.fissure_alerts):
             alerts = [a for i, a in enumerate(self.fissure_alerts) if i != index]
             return replace(self, fissure_alerts=alerts)
+        return self
+
+    # ── 开放世界状态订阅 ─────────────────────────────────────
+
+    def with_cycle_alert(self, alert: CycleAlert) -> "AgentMemory":
+        key = (alert.cycle, alert.target_state)
+        for existing in self.cycle_alerts:
+            if (existing.cycle, existing.target_state) == key:
+                return self
+        return replace(self, cycle_alerts=[*self.cycle_alerts, alert])
+
+    def without_cycle_alert(self, index: int) -> "AgentMemory":
+        if 0 <= index < len(self.cycle_alerts):
+            alerts = [a for i, a in enumerate(self.cycle_alerts) if i != index]
+            return replace(self, cycle_alerts=alerts)
         return self

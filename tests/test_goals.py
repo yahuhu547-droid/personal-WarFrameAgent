@@ -15,6 +15,7 @@ from warframe_agent.goals import (
     record_trade_outcome,
 )
 from warframe_agent.memory import AgentMemory
+from warframe_agent.set_profit import SetProfitResult
 
 
 # ── 目标创建 ──────────────────────────────────────────────
@@ -99,6 +100,34 @@ def test_execute_plan_empty(mock_inv, mock_set, mock_mod):
     plan = plan_for_goal(goal)
     results = execute_plan(plan, [], _mock_order_fetcher)
     assert results == []
+
+
+@patch("warframe_agent.goals.scan_all_mod_flips", return_value=[])
+@patch("warframe_agent.goals.scan_all_set_profits")
+@patch("warframe_agent.goals.scan_prime_investments", return_value=[])
+def test_execute_plan_set_profit_uses_base_id(mock_inv, mock_set, mock_mod):
+    mock_set.return_value = [
+        SetProfitResult(
+            base_id="rhino_prime",
+            display_name="Rhino Prime",
+            set_buy_price=80,
+            parts_sell_total=70,
+            set_sell_price=70,
+            parts_buy_total=55,
+            profit_buy_parts_sell_set=15,
+            profit_buy_set_sell_parts=-10,
+            best_strategy="买部件→卖套装",
+            best_profit=15,
+            volume_48h=12,
+            part_count=4,
+        ),
+    ]
+    goal = create_goal("maximize_profit", "测试")
+    plan = plan_for_goal(goal)
+
+    results = execute_plan(plan, [], _mock_order_fetcher)
+
+    assert any(r["source"] == "set_profit" and r["item_id"] == "rhino_prime" for r in results)
 
 
 # ── 反馈学习 ──────────────────────────────────────────────

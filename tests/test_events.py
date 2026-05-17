@@ -72,6 +72,56 @@ def test_parse_no_events():
     assert len(events) == 0
 
 
+def test_parse_cycles_from_lowercase_worldstate():
+    tracker = EventTracker()
+    cycles = tracker.parse_cycles({
+        "earthCycle": {"isDay": False, "activation": "1000", "expiry": "2000"},
+        "cetusCycle": {"state": "day", "expiry": "3000", "timeLeft": "20m"},
+        "vallisCycle": {"isWarm": False, "expiry": "4000"},
+        "cambionCycle": {"state": "vome", "expiry": "5000"},
+    })
+
+    by_cycle = {cycle.cycle: cycle for cycle in cycles}
+    assert by_cycle["earth"].state == "night"
+    assert by_cycle["earth"].state_display == "黑夜"
+    assert by_cycle["cetus"].state == "day"
+    assert by_cycle["vallis"].state == "cold"
+    assert by_cycle["vallis"].state_display == "寒冷"
+    assert by_cycle["cambion"].state == "vome"
+
+
+def test_parse_cycles_from_official_case_worldstate():
+    tracker = EventTracker()
+    cycles = tracker.parse_cycles({
+        "EarthCycle": {"State": "night", "Expiry": "2000"},
+        "VallisCycle": {"State": "warm", "Expiry": "4000"},
+    })
+
+    by_cycle = {cycle.cycle: cycle for cycle in cycles}
+    assert by_cycle["earth"].state_display == "黑夜"
+    assert by_cycle["vallis"].state_display == "温暖"
+
+
+def test_get_cycles_falls_back_to_external_cycle_fetcher():
+    tracker = EventTracker()
+    tracker._world_state = {"Goals": []}
+    tracker._last_fetch = 9999999999.0
+    tracker.set_cycle_fetcher(lambda cycle: {
+        "id": cycle,
+        "state": "night" if cycle == "earth" else "cold",
+        "expiry": "2026-05-17T12:00:00.000Z",
+        "timeLeft": "10m",
+    } if cycle in {"earth", "vallis"} else {})
+
+    cycles = tracker.get_cycles()
+
+    by_cycle = {cycle.cycle: cycle for cycle in cycles}
+    assert by_cycle["earth"].state == "night"
+    assert by_cycle["earth"].state_display == "黑夜"
+    assert by_cycle["vallis"].state == "cold"
+    assert by_cycle["vallis"].state_display == "寒冷"
+
+
 def test_parse_alerts():
     world_state = {
         "voidTrader": {},
@@ -206,7 +256,45 @@ def test_fetch_world_state_failure():
 def test_refresh_uses_cache_on_failure():
     tracker = EventTracker()
     tracker._events = [GameEvent(event_type="alert", description="cached")]
-    tracker._last_fetch = 9999999999.0  # far future → cache valid
+    tracker._last_fetch = 9999999999.0
     events = tracker.get_active_events()
     assert len(events) == 1
     assert events[0].description == "cached"
+
+
+def test_parse_limited_goal_events():
+    world_state = {
+        "Goals": [
+            {
+                "Tag": "JadeShadowsEvent",
+                "Desc": "/Lotus/Language/JadeShadows/JadeShadowsEventName",
+                "ToolTip": "/Lotus/Language/JadeShadows/JadeShadowsShortEventDesc",
+                "Node": "SolNode723",
+                "Activation": {"$date": {"$numberLong": "1777917600000"}},
+                "Expiry": {"$date": {"$numberLong": "1780336800000"}},
+                "HealthPct": 0.39,
+            },
+            {
+                "Tag": "ThermiaFractures",
+                "Desc": "/Lotus/Language/Menu/ThermiaFractures",
+                "Node": "VenusHUB",
+                "Activation": {"$date": {"$numberLong": "1777917600000"}},
+                "Expiry": {"$date": {"$numberLong": "1780336800000"}},
+            },
+        ],
+        "ActiveMissions": [
+            {"Modifier": "VoidT1", "MissionType": "MT_CAPTURE", "Node": "SolNode1"},
+        ],
+        "VoidStorms": [{"Node": "CrewBattleNode1"}],
+        "Invasions": [{"Completed": False, "LocTag": "/Lotus/Language/Menu/CorpusInvasionGeneric"}],
+    }
+
+    tracker = EventTracker()
+    events = tracker.parse_events(world_state)
+    limited = tracker.parse_limited_events(world_state)
+
+    assert any(e.event_type == "void_fissure" for e in events)
+    assert [e.event_type for e in limited] == ["limited_event", "limited_event"]
+    assert "兽之腹" in limited[0].description
+    assert "热美亚裂缝" in limited[1].description
+    assert all("虚空裂缝" not in e.description for e in limited)

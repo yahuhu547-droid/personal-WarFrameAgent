@@ -2,7 +2,7 @@ import unittest
 
 from warframe_agent.chat import ChatAgent, build_item_context, is_chat_exit
 from warframe_agent.dictionary import ResolveResult
-from warframe_agent.events import EventTracker, GameEvent, PrimeResurgenceRotation, PrimeResurgenceItem
+from warframe_agent.events import EventTracker, GameEvent, PrimeResurgenceRotation, PrimeResurgenceItem, WorldCycle
 
 
 class FakeResolver:
@@ -139,6 +139,91 @@ def _prime_resurgence_tracker():
         )
     ]
     return tracker
+
+
+
+def test_cycle_status_and_alert_commands(tmp_path):
+    tracker = EventTracker()
+    tracker._world_state = {
+        "earthCycle": {"isDay": False, "expiry": "2000"},
+        "vallisCycle": {"isWarm": False, "expiry": "4000"},
+    }
+    tracker._last_fetch = 9999999999.0
+    agent = ChatAgent(event_tracker=tracker, model_call=lambda prompt: "unused", memory_path=tmp_path / "memory.json")
+
+    status = agent.answer("/cycle status 金星")
+    assert "奥布山谷/金星当前为寒冷" in status
+
+    added = agent.answer("/cycle add 地球 黑夜")
+    assert "已订阅状态提醒：地球变为黑夜" in added
+    assert "当前已经是目标状态" in added
+
+    listing = agent.answer("/cycle list")
+    assert "地球变为黑夜" in listing
+
+    removed = agent.answer("/cycle remove 1")
+    assert "已取消状态订阅" in removed
+
+
+def test_cycle_natural_language_does_not_fall_through_to_item_lookup(tmp_path):
+    tracker = EventTracker()
+    tracker._world_state = {"vallisCycle": {"isWarm": False, "expiry": "4000"}}
+    tracker._last_fetch = 9999999999.0
+    agent = ChatAgent(event_tracker=tracker, model_call=lambda prompt: "unused", memory_path=tmp_path / "memory.json")
+
+    query_answer = agent.answer("现在金星冷吗")
+    assert "奥布山谷/金星当前为寒冷" in query_answer
+    assert "没有找到匹配的物品" not in query_answer
+
+    alert_answer = agent.answer("金星变寒冷提醒我")
+    assert "奥布山谷/金星变为寒冷" in alert_answer
+    assert agent.memory.cycle_alerts[0].cycle == "vallis"
+    assert agent.memory.cycle_alerts[0].target_state == "cold"
+
+
+def test_activity_query_returns_only_limited_events():
+    tracker = EventTracker()
+    tracker._last_fetch = 9999999999.0
+    tracker._world_state = {
+        "Goals": [
+            {"Tag": "JadeShadowsEvent", "Node": "SolNode723"},
+            {"Tag": "ThermiaFractures", "Node": "VenusHUB"},
+        ],
+        "ActiveMissions": [
+            {"Modifier": "VoidT1", "MissionType": "MT_CAPTURE", "Node": "SolNode1"},
+        ],
+        "VoidStorms": [{"Node": "CrewBattleNode1"}],
+        "Invasions": [{"Completed": False, "LocTag": "/Lotus/Language/Menu/CorpusInvasionGeneric"}],
+    }
+    tracker._events = tracker.parse_events(tracker._world_state)
+    agent = ChatAgent(event_tracker=tracker, model_call=lambda prompt: "unused")
+
+    answer = agent.answer("现在有什么活动")
+
+    assert "兽之腹" in answer
+    assert "热美亚裂缝" in answer
+    assert "虚空裂缝" not in answer
+    assert "虚空风暴" not in answer
+    assert "入侵" not in answer
+
+
+def test_specific_fissure_query_still_returns_fissures():
+    tracker = EventTracker()
+    tracker._last_fetch = 9999999999.0
+    tracker._world_state = {
+        "Goals": [{"Tag": "JadeShadowsEvent", "Node": "SolNode723"}],
+        "ActiveMissions": [
+            {"Modifier": "VoidT1", "MissionType": "MT_CAPTURE", "Node": "SolNode1"},
+        ],
+    }
+    tracker._events = tracker.parse_events(tracker._world_state)
+    agent = ChatAgent(event_tracker=tracker, model_call=lambda prompt: "unused")
+
+    answer = agent.answer("裂隙任务有哪些")
+
+    assert "当前虚空裂缝/裂隙" in answer
+    assert "虚空裂缝" in answer
+    assert "兽之腹" not in answer
 
 
 def test_resurgence_command_formats_current_shop_items_only():

@@ -97,6 +97,7 @@ class PriceMonitor:
         on_proactive_push: Callable[[ProactivePush], None] | None = None,
         on_daily_report: Callable[[str], None] | None = None,
         on_fissure: Callable | None = None,
+        on_cycle: Callable | None = None,
         on_baro_recommendation: Callable[[str], None] | None = None,
         price_db=None,
         knowledge: MarketKnowledge | None = None,
@@ -110,6 +111,7 @@ class PriceMonitor:
         self.on_proactive_push = on_proactive_push
         self.on_daily_report = on_daily_report
         self.on_fissure = on_fissure
+        self.on_cycle = on_cycle
         self.on_baro_recommendation = on_baro_recommendation
         self.price_db = price_db
         self.knowledge = knowledge or MarketKnowledge()
@@ -120,6 +122,8 @@ class PriceMonitor:
         self._watch_notifications: list[WatchNotification] = []
         self._watch_last_notified: dict[str, str] = {}  # item_id -> "YYYY-MM-DD HH:MM"
         self._fissure_notified: dict[str, float] = {}  # dedup key -> timestamp
+        self._cycle_last_state: dict[str, str] = {}
+        self._cycle_notified: dict[str, float] = {}
         self._baro_recommendation_sent: str | None = None  # Baro start_time
         self._spike_notified: dict[str, float] = {}  # item_id -> timestamp
         self._vault_event_pushed: set[str] = set()  # vault event descriptions already pushed
@@ -463,6 +467,42 @@ class PriceMonitor:
                     except Exception as exc:
                         logger.debug("裂缝通知失败: %s", exc)
 
+    def _check_cycle_alerts(self) -> None:
+        from .events import cycle_timestamp
+        memory = AgentMemory.load(self.memory_path)
+        if not memory.cycle_alerts:
+            return
+        cycles = self.event_tracker.get_cycles()
+        if not cycles:
+            return
+        now = time.time()
+        expired_keys = [key for key, ts in self._cycle_notified.items() if now - ts > 86400]
+        for key in expired_keys:
+            del self._cycle_notified[key]
+        for cycle in cycles:
+            previous_state = self._cycle_last_state.get(cycle.cycle)
+            for alert in memory.cycle_alerts:
+                if not alert.matches_cycle(cycle.cycle, cycle.state):
+                    continue
+                if previous_state is None or previous_state == cycle.state:
+                    continue
+                activation_ts = cycle_timestamp(cycle.activation)
+                if activation_ts and alert.created_at and alert.created_at > activation_ts:
+                    continue
+                dedup_key = f"{cycle.cycle}|{cycle.state}|{cycle.activation}|{cycle.expiry}"
+                if dedup_key in self._cycle_notified:
+                    continue
+                self._cycle_notified[dedup_key] = now
+                suffix = f"预计结束: {cycle.expiry}" if cycle.expiry else ""
+                msg = f"{cycle.cycle_display}状态提醒：已变为{cycle.state_display}。{suffix}".rstrip()
+                logger.info("状态订阅匹配: %s", msg)
+                if self.on_cycle:
+                    try:
+                        self.on_cycle(msg, cycle, alert)
+                    except Exception as exc:
+                        logger.debug("状态通知失败: %s", exc)
+            self._cycle_last_state[cycle.cycle] = cycle.state
+
     def _check_baro_recommendation(self) -> None:
         """检测 Baro 活跃时自动分析库存并推送推荐。"""
         events = self.event_tracker.get_active_events()
@@ -698,6 +738,9 @@ class PriceMonitor:
 
                 # 裂缝订阅检查
                 self._check_fissure_alerts()
+
+                # 开放世界状态订阅检查
+                self._check_cycle_alerts()
 
                 # Baro 购买推荐
                 self._check_baro_recommendation()

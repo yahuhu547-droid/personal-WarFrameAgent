@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from warframe_agent.memory import AgentMemory, PriceAlert, TradingPreferences, UserProfile
+from warframe_agent.memory import AgentMemory, CycleAlert, PriceAlert, TradingPreferences, UserProfile
 
 
 class MemoryTests(unittest.TestCase):
@@ -29,6 +29,21 @@ class MemoryTests(unittest.TestCase):
 
         self.assertTrue(alert.matches(40))
         self.assertFalse(alert.matches(50))
+
+    def test_cycle_alert_round_trip_and_dedup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memory.json"
+            alert = CycleAlert("earth", "night", "地球变为黑夜", 123.0)
+            memory = AgentMemory.default().with_cycle_alert(alert).with_cycle_alert(alert)
+            self.assertEqual(len(memory.cycle_alerts), 1)
+            self.assertTrue(memory.cycle_alerts[0].matches_cycle("earth", "night"))
+            memory.save(path)
+            loaded = AgentMemory.load(path)
+
+        self.assertEqual(len(loaded.cycle_alerts), 1)
+        self.assertEqual(loaded.cycle_alerts[0].cycle, "earth")
+        self.assertEqual(loaded.cycle_alerts[0].target_state, "night")
+        self.assertEqual(loaded.without_cycle_alert(0).cycle_alerts, [])
 
 
 class UserProfileTests(unittest.TestCase):

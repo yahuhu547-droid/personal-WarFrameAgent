@@ -9,7 +9,8 @@ from warframe_agent.monitor import (
     ScanResult,
 )
 from warframe_agent.rules import MarketState
-from warframe_agent.memory import AgentMemory, ProactiveSuggestion, TradingPreferences
+from warframe_agent.events import WorldCycle
+from warframe_agent.memory import AgentMemory, CycleAlert, ProactiveSuggestion, TradingPreferences
 
 
 # ── ProactivePush dataclass ──
@@ -36,6 +37,44 @@ def test_proactive_push_with_data():
         data={"key": "value"},
     )
     assert push.data["key"] == "value"
+
+
+def test_check_cycle_alerts_pushes_only_on_transition(tmp_path):
+    memory = AgentMemory.default().with_cycle_alert(CycleAlert("earth", "night", "地球变为黑夜", 1.0))
+    memory.save(tmp_path / "memory.json")
+    pushed = MagicMock()
+    monitor = PriceMonitor(memory_path=tmp_path / "memory.json", on_cycle=pushed)
+    monitor.event_tracker.get_cycles = MagicMock(return_value=[
+        WorldCycle("earth", "地球", "day", "白天", activation="1000", expiry="2000"),
+    ])
+
+    monitor._check_cycle_alerts()
+    pushed.assert_not_called()
+
+    monitor.event_tracker.get_cycles = MagicMock(return_value=[
+        WorldCycle("earth", "地球", "night", "黑夜", activation="3000", expiry="4000"),
+    ])
+    monitor._check_cycle_alerts()
+    pushed.assert_called_once()
+    assert "已变为黑夜" in pushed.call_args[0][0]
+
+    monitor._check_cycle_alerts()
+    pushed.assert_called_once()
+
+
+def test_check_cycle_alerts_skips_current_phase_created_after_activation(tmp_path):
+    memory = AgentMemory.default().with_cycle_alert(CycleAlert("earth", "night", "地球变为黑夜", 3500.0))
+    memory.save(tmp_path / "memory.json")
+    pushed = MagicMock()
+    monitor = PriceMonitor(memory_path=tmp_path / "memory.json", on_cycle=pushed)
+    monitor._cycle_last_state["earth"] = "day"
+    monitor.event_tracker.get_cycles = MagicMock(return_value=[
+        WorldCycle("earth", "地球", "night", "黑夜", activation="3000", expiry="4000"),
+    ])
+
+    monitor._check_cycle_alerts()
+
+    pushed.assert_not_called()
 
 
 # ── _run_proactive_push (rule-based) ──

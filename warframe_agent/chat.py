@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, replace
 from typing import AsyncIterator, Callable, Iterable
 
@@ -360,6 +361,11 @@ class ChatAgent:
             return self._handle_agent_command(stripped)
         if is_watchlist_command(message):
             return self.scan_watchlist()
+        cycle_result = self._try_cycle_intent(message)
+        if cycle_result:
+            self.session.add_exchange(message, cycle_result)
+            self._log_answer(message, cycle_result)
+            return cycle_result
         self._remember_common_question(message)
         baro_followup = self._try_baro_order_followup(message)
         if baro_followup:
@@ -392,7 +398,15 @@ class ChatAgent:
             return result
         # 事件类/交易工具类查询直接走路由器，避免物品匹配误触发交易流程
         if _is_event_query(message) or _is_trading_tool_query(message):
-            routed = self._try_router(message)
+            if _is_event_query(message) and not _is_specific_event_list_query(message):
+                result = self._handle_limited_event_query()
+                self.session.add_exchange(message, result)
+                self._log_answer(message, result)
+                return result
+            if _is_specific_event_list_query(message):
+                routed = self._handle_specific_event_query(message)
+            else:
+                routed = self._try_router(message)
             if routed:
                 self.session.add_exchange(message, routed)
                 self._log_answer(message, routed)
@@ -403,20 +417,7 @@ class ChatAgent:
                 self._log_answer(message, fallback)
                 return fallback
             if _is_event_query(message):
-                # 事件查询路由失败时，尝试直接查询事件
-                try:
-                    from .events import EventTracker
-                    tracker = EventTracker()
-                    tracker.load_cache()
-                    events = tracker.get_active_events()
-                    if events:
-                        fallback = "当前活动:\n" + "\n".join(
-                            f"- {e.description}" for e in events[:10]
-                        )
-                    else:
-                        fallback = "当前没有检测到活跃的游戏活动。"
-                except Exception:
-                    fallback = "游戏活动查询暂时不可用，请稍后重试。"
+                fallback = self._handle_limited_event_query()
                 self._log_answer(message, fallback)
                 return fallback
         warframe_answer = price_warframe_query(message, self.warframe_items, self.order_fetcher)
@@ -495,6 +496,12 @@ class ChatAgent:
             self._log_answer(message, result)
             yield result
             return
+        cycle_result = self._try_cycle_intent(message)
+        if cycle_result:
+            self.session.add_exchange(message, cycle_result)
+            self._log_answer(message, cycle_result)
+            yield cycle_result
+            return
         self._remember_common_question(message)
         baro_followup = self._try_baro_order_followup(message)
         if baro_followup:
@@ -532,7 +539,16 @@ class ChatAgent:
             return
         # 事件类/交易工具类查询直接走路由器，避免物品匹配误触发交易流程
         if _is_event_query(message) or _is_trading_tool_query(message):
-            routed = self._try_router(message)
+            if _is_event_query(message) and not _is_specific_event_list_query(message):
+                result = self._handle_limited_event_query()
+                self.session.add_exchange(message, result)
+                self._log_answer(message, result)
+                yield result
+                return
+            if _is_specific_event_list_query(message):
+                routed = self._handle_specific_event_query(message)
+            else:
+                routed = self._try_router(message)
             if routed:
                 self.session.add_exchange(message, routed)
                 self._log_answer(message, routed)
@@ -544,17 +560,7 @@ class ChatAgent:
                 yield fallback
                 return
             if _is_event_query(message):
-                try:
-                    from .events import EventTracker
-                    tracker = EventTracker()
-                    events = tracker.get_active_events()
-                    if events:
-                        event_text = "\n".join(f"- {e.description}" for e in events[:10])
-                        result = f"当前游戏活动:\n{event_text}"
-                    else:
-                        result = "当前没有检测到特殊活动。"
-                except Exception:
-                    result = "暂时无法获取游戏活动信息。"
+                result = self._handle_limited_event_query()
                 self.session.add_exchange(message, result)
                 self._log_answer(message, result)
                 yield result
@@ -651,6 +657,8 @@ class ChatAgent:
             return self._handle_goal_command(tokens[1:])
         if command == "/fissure":
             return self._handle_fissure_command(tokens[1:])
+        if command == "/cycle":
+            return self._handle_cycle_command(tokens[1:])
         if command == "/trade":
             return self._handle_trade_command(tokens[1:])
         if command == "/relic":
@@ -681,6 +689,10 @@ class ChatAgent:
             "/fissure add 过滤条件  订阅裂缝通知",
             "/fissure remove 序号  取消订阅",
             "/fissure list       查看订阅列表",
+            "/cycle status [地点]  查看开放世界/星球状态",
+            "/cycle add 地点 状态  订阅状态变化提醒",
+            "/cycle list          查看状态订阅",
+            "/cycle remove 序号    取消状态订阅",
             "/trade list         查看最近交易记录",
             "/trade stats        交易盈亏统计",
             "/trade add 物品名 buy 80  手动添加交易",
@@ -718,6 +730,9 @@ class ChatAgent:
         if self.memory.fissure_alerts:
             fissure_str = "、".join(a.note or "全部" for a in self.memory.fissure_alerts[:5])
             lines.append(f"裂缝订阅: {fissure_str}")
+        if self.memory.cycle_alerts:
+            cycle_str = "、".join(a.note or f"{a.cycle} -> {a.target_state}" for a in self.memory.cycle_alerts[:5])
+            lines.append(f"状态订阅: {cycle_str}")
         return "\n".join(lines)
 
     def _handle_favorite_command(self, args: list[str]) -> str:
@@ -1031,6 +1046,140 @@ class ChatAgent:
             lines.append(f"  {i}. {desc}")
         lines.append("\n使用 /fissure remove 序号 取消订阅")
         return "\n".join(lines)
+
+    # ── 开放世界状态订阅命令 ──────────────────────────────────
+
+    _CYCLE_ALIASES = {
+        "地球": "earth", "地球场景": "earth", "earth": "earth",
+        "希图斯": "cetus", "夜灵平原": "cetus", "夜灵平野": "cetus", "平原": "cetus", "cetus": "cetus",
+        "金星": "vallis", "奥布山谷": "vallis", "福尔图娜": "vallis", "金星平原": "vallis", "vallis": "vallis", "orb vallis": "vallis",
+        "魔胎之境": "cambion", "火卫二": "cambion", "殁世幽都": "cambion", "cambion": "cambion",
+    }
+    _CYCLE_DISPLAY = {
+        "earth": "地球",
+        "cetus": "希图斯/夜灵平原",
+        "vallis": "奥布山谷/金星",
+        "cambion": "魔胎之境",
+    }
+    _CYCLE_STATE_ALIASES = {
+        "白天": "day", "白昼": "day", "白日": "day", "day": "day",
+        "黑夜": "night", "夜晚": "night", "晚上": "night", "night": "night",
+        "温暖": "warm", "暖": "warm", "热": "warm", "warm": "warm",
+        "寒冷": "cold", "冷": "cold", "cold": "cold",
+        "fass": "fass", "法斯": "fass",
+        "vome": "vome", "沃姆": "vome",
+    }
+    _CYCLE_STATE_DISPLAY = {
+        "day": "白天", "night": "黑夜", "warm": "温暖", "cold": "寒冷", "fass": "Fass", "vome": "Vome",
+    }
+
+    def _handle_cycle_command(self, args: list[str]) -> str:
+        if not args:
+            return "用法: /cycle status [地点] | /cycle add 地点 状态 | /cycle remove 序号 | /cycle list"
+        sub = args[0].lower()
+        if sub in {"status", "状态", "当前", "查看"}:
+            return self._cycle_status(" ".join(args[1:]))
+        if sub in {"add", "添加", "订阅"}:
+            return self._add_cycle_alert(" ".join(args[1:]))
+        if sub in {"remove", "删除", "取消"}:
+            return self._remove_cycle_alert(args[1:])
+        if sub in {"list", "列表"}:
+            return self._list_cycle_alerts()
+        return "未知的 /cycle 子命令。可用: status, add, remove, list"
+
+    def _find_cycle_alias(self, text: str) -> str:
+        lowered = text.lower()
+        matches = sorted(self._CYCLE_ALIASES.items(), key=lambda item: len(item[0]), reverse=True)
+        for alias, cycle in matches:
+            if alias.lower() in lowered:
+                return cycle
+        return ""
+
+    def _find_cycle_state_alias(self, text: str) -> str:
+        lowered = text.lower()
+        matches = sorted(self._CYCLE_STATE_ALIASES.items(), key=lambda item: len(item[0]), reverse=True)
+        for alias, state in matches:
+            if alias.lower() in lowered:
+                return state
+        return ""
+
+    def _cycle_status(self, location: str = "") -> str:
+        if not self.event_tracker:
+            return "暂时无法获取星球状态。"
+        cycle_filter = self._find_cycle_alias(location) if location else ""
+        cycles = self.event_tracker.get_cycles()
+        if cycle_filter:
+            cycles = [cycle for cycle in cycles if cycle.cycle == cycle_filter]
+        if not cycles:
+            return "暂时无法获取该星球状态。"
+        if len(cycles) == 1:
+            cycle = cycles[0]
+            suffix = f"，预计结束: {cycle.expiry}" if cycle.expiry else ""
+            return f"{cycle.cycle_display}当前为{cycle.state_display}{suffix}。"
+        lines = ["当前开放世界/星球状态:"]
+        for cycle in cycles:
+            suffix = f"，预计结束: {cycle.expiry}" if cycle.expiry else ""
+            lines.append(f"- {cycle.cycle_display}: {cycle.state_display}{suffix}")
+        return "\n".join(lines)
+
+    def _add_cycle_alert(self, text: str) -> str:
+        from .memory import CycleAlert
+        cycle = self._find_cycle_alias(text)
+        target_state = self._find_cycle_state_alias(text)
+        if not cycle or not target_state:
+            return "用法: /cycle add 地点 状态，例如 /cycle add 地球 黑夜 或 /cycle add 金星 寒冷"
+        note = f"{self._CYCLE_DISPLAY.get(cycle, cycle)}变为{self._CYCLE_STATE_DISPLAY.get(target_state, target_state)}"
+        alert = CycleAlert(cycle=cycle, target_state=target_state, note=note, created_at=time.time())
+        before_count = len(self.memory.cycle_alerts)
+        self.memory = self.memory.with_cycle_alert(alert)
+        self._persist_memory()
+        current = self.event_tracker.get_cycle(cycle) if self.event_tracker else None
+        already = current and current.state == target_state
+        if len(self.memory.cycle_alerts) == before_count:
+            prefix = f"已存在状态提醒：{note}。"
+        else:
+            prefix = f"已订阅状态提醒：{note}。"
+        if already:
+            return prefix + "当前已经是目标状态，本阶段不会重复推送，会在下次切换到该状态时提醒。"
+        return prefix + "系统会在状态切换到目标状态时推送。"
+
+    def _remove_cycle_alert(self, args: list[str]) -> str:
+        if not args:
+            return "请指定序号，例如: /cycle remove 1"
+        try:
+            index = int(args[0]) - 1
+        except ValueError:
+            return "序号必须是数字，例如: /cycle remove 1"
+        if 0 <= index < len(self.memory.cycle_alerts):
+            removed = self.memory.cycle_alerts[index]
+            self.memory = self.memory.without_cycle_alert(index)
+            self._persist_memory()
+            return f"已取消状态订阅: {removed.note or '状态提醒'}"
+        return f"序号超出范围，当前共 {len(self.memory.cycle_alerts)} 条订阅"
+
+    def _list_cycle_alerts(self) -> str:
+        alerts = self.memory.cycle_alerts
+        if not alerts:
+            return "当前没有状态订阅。使用 /cycle add 地点 状态 添加订阅。\n示例: /cycle add 地球 黑夜"
+        lines = ["当前状态订阅:"]
+        for i, alert in enumerate(alerts, 1):
+            lines.append(f"  {i}. {alert.note or '状态提醒'}")
+        lines.append("\n使用 /cycle remove 序号 取消订阅")
+        return "\n".join(lines)
+
+    def _try_cycle_intent(self, message: str) -> str | None:
+        cycle = self._find_cycle_alias(message)
+        if not cycle:
+            return None
+        state = self._find_cycle_state_alias(message)
+        lowered = message.lower()
+        wants_alert = any(kw in lowered for kw in ("提醒我", "通知我", "订阅", "提醒", "通知")) and any(kw in lowered for kw in ("变为", "变成", "到", "当", "时", "变"))
+        if wants_alert and state:
+            return self._add_cycle_alert(message)
+        wants_status = any(kw in lowered for kw in ("现在", "当前", "状态", "还有多久", "冷吗", "热吗", "黑夜吗", "白天吗", "晚上吗"))
+        if wants_status:
+            return self._cycle_status(cycle)
+        return None
 
     # ---- /trade 命令 ----
 
@@ -1497,42 +1646,60 @@ class ChatAgent:
                 lines.append(f"   48h成交: {r.volume_48h or '未知'}笔 | 风险: {r.risk_level}")
             return "\n".join(lines)
         if tool_call.name == "query_events":
-            from .events import EventTracker
-            tracker = EventTracker()
-            tracker.load_cache()
-            events = tracker.get_active_events()
-            if not events:
-                return "当前没有活跃的游戏事件"
-            # 按类型过滤
-            filter_type = args.get("type", "").strip()
-            if filter_type:
-                events = [e for e in events if e.event_type == filter_type]
-                if not events:
-                    return f"当前没有 {filter_type} 类型的事件"
-            # 按类型分组展示
-            from collections import Counter
-            type_counts = Counter(e.event_type for e in events)
-            type_names = {
-                "void_fissure": "虚空裂缝", "void_storm": "虚空风暴",
-                "invasion": "入侵", "baro_visit": "虚空商人", "alert": "警报",
-                "prime_resurgence": "Prime 重生", "prime_vault": "Prime Vault",
-            }
-            lines = [f"## 当前游戏事件（共 {len(events)} 条）\n"]
-            # 概览
-            overview = "、".join(f"{type_names.get(t, t)} {c}条" for t, c in type_counts.most_common())
-            lines.append(f"概览: {overview}\n")
-            # 逐条展示
-            for e in events:
-                icon = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(e.impact, "⚪")
-                tname = type_names.get(e.event_type, e.event_type)
-                lines.append(f"- {icon} [{tname}] {e.description}")
-            return "\n".join(lines)
+            return self._handle_limited_event_query()
         if tool_call.name == "deep_analysis":
             item_name = args.get("item_name", message)
             return self._deep_analysis(item_name)
         if tool_call.name == "riven_search":
             return self._handle_riven_search(args)
         return None
+
+    def _handle_limited_event_query(self) -> str:
+        from .events import EventTracker
+        try:
+            tracker = self.event_tracker or EventTracker()
+            if not self.event_tracker:
+                tracker.load_cache()
+            events = tracker.get_limited_events()
+        except Exception as exc:
+            logger.debug("限时活动查询失败: %s", exc)
+            return "暂时无法获取限时活动信息。"
+
+        if not events:
+            return "当前没有检测到热美亚裂缝、兽之腹等限时活动。"
+        lines = ["当前限时活动:"]
+        for event in events:
+            lines.append(f"- {event.description}")
+        return "\n".join(lines)
+
+    def _handle_specific_event_query(self, message: str) -> str:
+        from .events import EventTracker
+        tracker = self.event_tracker or EventTracker()
+        if not self.event_tracker:
+            tracker.load_cache()
+        events = tracker.get_active_events()
+        lower = message.lower()
+        if any(kw in lower for kw in ("裂缝", "裂隙", "fissure")):
+            selected = [event for event in events if event.event_type == "void_fissure"]
+            title = "当前虚空裂缝/裂隙:"
+        elif any(kw in lower for kw in ("风暴", "虚空风暴")):
+            selected = [event for event in events if event.event_type == "void_storm"]
+            title = "当前虚空风暴:"
+        elif any(kw in lower for kw in ("入侵", "invasion")):
+            selected = [event for event in events if event.event_type == "invasion"]
+            title = "当前入侵:"
+        elif any(kw in lower for kw in ("警报", "alert")):
+            selected = [event for event in events if event.event_type == "alert"]
+            title = "当前警报:"
+        else:
+            selected = []
+            title = "当前事件:"
+        if not selected:
+            return f"{title}\n暂无。"
+        lines = [title]
+        for event in selected[:20]:
+            lines.append(f"- {event.description}")
+        return "\n".join(lines)
 
     def _try_deterministic_riven(self, message: str) -> str | None:
         """确定性紫卡路由：直接解析查询，不依赖 LLM 路由。"""
@@ -2514,6 +2681,11 @@ def _is_event_query(message: str) -> bool:
     """判断消息是否为游戏事件查询（应直接走路由器，跳过物品匹配）。"""
     lower = message.lower()
     return any(kw in lower for kw in _EVENT_KEYWORDS)
+
+
+def _is_specific_event_list_query(message: str) -> bool:
+    lower = message.lower()
+    return any(kw in lower for kw in ("裂缝", "裂隙", "fissure", "虚空风暴", "风暴", "入侵", "invasion", "警报", "alert"))
 
 
 _TRADING_TOOL_KEYWORDS = {

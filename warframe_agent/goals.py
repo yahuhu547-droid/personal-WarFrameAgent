@@ -235,12 +235,12 @@ def execute_plan(
                 for r in raw:
                     all_results.append({
                         "source": "set_profit",
-                        "item_id": r.set_item_id,
+                        "item_id": r.base_id,
                         "item_name": r.display_name.split(" / ")[0],
                         "profit": r.best_profit,
-                        "roi_pct": round(r.best_profit / max(r.parts_buy_total, 1) * 100, 1) if hasattr(r, 'parts_buy_total') else 0,
-                        "buy_cost": r.parts_buy_total if hasattr(r, 'parts_buy_total') else 0,
-                        "sell_price": r.set_buy_price if hasattr(r, 'set_buy_price') else 0,
+                        "roi_pct": round(r.best_profit / max(r.parts_buy_total, 1) * 100, 1),
+                        "buy_cost": r.parts_buy_total,
+                        "sell_price": r.set_sell_price or 0,
                         "risk": "medium",
                     })
 
@@ -390,9 +390,9 @@ def decompose_platinum_goal(
     try:
         sets = scan_all_set_profits(items, order_fetcher, min_profit=3, limit=30, scout_fn=scout_set_candidates)
         for r in sets:
-            cost = r.parts_buy_total if hasattr(r, 'parts_buy_total') else 0
+            cost = r.parts_buy_total
             all_results.append({
-                "item_id": r.set_item_id,
+                "item_id": r.base_id,
                 "item_name": r.display_name.split(" / ")[0],
                 "strategy": f"{r.best_strategy}，利润 +{r.best_profit}p",
                 "estimated_profit": r.best_profit,
@@ -657,12 +657,12 @@ def _execute_single_step(
             )
             for r in raw:
                 results.append({
-                    "source": "set_profit", "item_id": r.set_item_id,
+                    "source": "set_profit", "item_id": r.base_id,
                     "item_name": r.display_name.split(" / ")[0],
                     "profit": r.best_profit,
-                    "roi_pct": round(r.best_profit / max(r.parts_buy_total, 1) * 100, 1) if hasattr(r, 'parts_buy_total') else 0,
-                    "buy_cost": r.parts_buy_total if hasattr(r, 'parts_buy_total') else 0,
-                    "sell_price": r.set_buy_price if hasattr(r, 'set_buy_price') else 0,
+                    "roi_pct": round(r.best_profit / max(r.parts_buy_total, 1) * 100, 1),
+                    "buy_cost": r.parts_buy_total,
+                    "sell_price": r.set_sell_price or 0,
                     "risk": "medium",
                 })
         elif action == "scan_investment":

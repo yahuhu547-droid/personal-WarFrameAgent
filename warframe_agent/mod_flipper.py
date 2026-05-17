@@ -27,6 +27,7 @@ ENDO_COST_TABLE: dict[tuple[int, str], int] = {
     (5, "UNCOMMON"): 1280,
     (5, "RARE"): 1280,
     (5, "RARE_LEGACY"): 1280,
+    (5, "LEGENDARY"): 1280,
     (3, "COMMON"): 320,
     (3, "UNCOMMON"): 320,
     (3, "RARE"): 320,
@@ -34,6 +35,17 @@ ENDO_COST_TABLE: dict[tuple[int, str], int] = {
     (2, "UNCOMMON"): 80,
     (2, "RARE"): 80,
 }
+
+HIGH_LIQUIDITY_ARCANES = [
+    "arcane_energize",
+    "arcane_grace",
+    "arcane_guardian",
+    "arcane_barrier",
+    "arcane_avenger",
+    "arcane_velocity",
+    "arcane_precision",
+    "arcane_rage",
+]
 
 
 @dataclass(frozen=True)
@@ -63,34 +75,78 @@ def get_endo_cost(max_rank: int, rarity: str) -> int:
     return 20470
 
 
+def _normalized_tags(item: dict) -> set[str]:
+    return {str(tag).lower() for tag in item.get("tags", [])}
+
+
+def _item_url_name(item: dict) -> str:
+    return item.get("url_name") or item.get("item_id", "")
+
+
+def is_tradeable_mod(item: dict) -> bool:
+    tags = _normalized_tags(item)
+    if "mod" not in tags:
+        return False
+    if not item.get("tradable", False):
+        return False
+    max_rank = item.get("modMaxRank") or item.get("fusionLimit", 0)
+    return max_rank >= 5 and bool(_item_url_name(item))
+
+
+def is_tradeable_arcane(item: dict) -> bool:
+    tags = _normalized_tags(item)
+    url_name = _item_url_name(item).lower()
+    name = (item.get("en_name") or item.get("item_name") or url_name).lower()
+    if not url_name:
+        return False
+    if "arcane_helmet" in tags or "arcane_helmet" in url_name or "helmet" in name:
+        return False
+    if tags.intersection({"skin", "cosmetic", "glyph"}) or any(word in name for word in ("skin", "glyph")):
+        return False
+    return url_name.startswith("arcane_") or "arcane_enhancement" in tags
+
+
+def _candidate_priority(candidate: dict) -> tuple[int, str]:
+    url_name = candidate["url_name"]
+    if url_name in HIGH_LIQUIDITY_ARCANES:
+        return (0, url_name)
+    if candidate.get("is_prime") or url_name.startswith("galvanized_"):
+        return (1, url_name)
+    if candidate.get("is_arcane"):
+        return (2, url_name)
+    return (3, url_name)
+
+
 def get_tradeable_mods(items: list[dict]) -> list[dict]:
-    """从 items_full.json 中筛选可交易的高等级 Mod。"""
+    """从 items_full.json 中筛选可交易的高等级 Mod 与赋能。"""
     mods = []
     for item in items:
-        tags = item.get("tags", [])
-        if "mod" not in tags:
-            continue
-        if not item.get("tradable", False):
-            continue
-        max_rank = item.get("modMaxRank") or item.get("fusionLimit", 0)
-        if max_rank < 5:
-            continue
-        url_name = item.get("url_name") or item.get("item_id", "")
+        url_name = _item_url_name(item)
         if not url_name:
             continue
-        # 判断是否为 Prime/Peculiar Mod
-        name_lower = (item.get("en_name") or "").lower()
+        name = item.get("en_name") or item.get("item_name") or url_name
+        name_lower = name.lower()
         item_id_lower = url_name.lower()
-        is_prime = "primed" in name_lower or "primed" in item_id_lower or "prime" in item_id_lower
+        is_arcane = is_tradeable_arcane(item)
+        if is_arcane:
+            max_rank = item.get("modMaxRank") or item.get("fusionLimit") or 5
+            rarity = item.get("rarity", "LEGENDARY")
+            is_prime = False
+        elif is_tradeable_mod(item):
+            max_rank = item.get("modMaxRank") or item.get("fusionLimit", 0)
+            rarity = item.get("rarity", "RARE")
+            is_prime = "primed" in name_lower or "primed" in item_id_lower or "prime" in item_id_lower
+        else:
+            continue
         mods.append({
             "url_name": url_name,
-            "item_name": item.get("en_name") or item.get("item_name") or url_name,
+            "item_name": name,
             "max_rank": max_rank,
-            "rarity": item.get("rarity", "RARE"),
+            "rarity": rarity,
             "is_prime": is_prime,
+            "is_arcane": is_arcane,
         })
-    # Prime Mod 排在前面
-    mods.sort(key=lambda m: (not m["is_prime"], m["url_name"]))
+    mods.sort(key=_candidate_priority)
     return mods
 
 
@@ -164,12 +220,16 @@ def scan_all_mod_flips(
 ) -> list[ModFlipResult]:
     """扫描所有可交易 Mod，找出翻转机会，按利润排序。"""
     mods = get_tradeable_mods(items)
-    all_candidates = [m for m in mods[:40] if m["url_name"]]
+    high_liquidity = [m for m in mods if m["url_name"] in HIGH_LIQUIDITY_ARCANES]
+    priority_mods = [m for m in mods if m.get("is_prime") or m["url_name"].startswith("galvanized_")]
+    other_arcanes = [m for m in mods if m.get("is_arcane") and m["url_name"] not in HIGH_LIQUIDITY_ARCANES]
+    other_mods = [m for m in mods if not m.get("is_arcane") and not m.get("is_prime") and not m["url_name"].startswith("galvanized_")]
+    all_candidates = [*high_liquidity[:12], *priority_mods[:16], *other_arcanes[:6], *other_mods[:20]]
 
     # 智能预筛选：用云端 LLM 选出最可能盈利的候选
     if scout_fn is not None:
         try:
-            scouted_ids = scout_fn(mods[:40])
+            scouted_ids = scout_fn(all_candidates)
             if scouted_ids:
                 id_set = set(scouted_ids)
                 candidates = [m for m in all_candidates if m["url_name"] in id_set]
@@ -200,6 +260,8 @@ def scan_all_mod_flips(
             if result and result.flip_profit >= min_profit and result.roi_pct >= min_roi_pct:
                 results.append(result)
 
-    # Prime Mod 优先，然后按利润排序
-    results.sort(key=lambda r: (not r.is_prime, -r.flip_profit))
+    results.sort(key=lambda r: (
+        0 if r.item_id in HIGH_LIQUIDITY_ARCANES else 1 if r.is_prime or r.item_id.startswith("galvanized_") else 2,
+        -r.flip_profit,
+    ))
     return results[:limit]

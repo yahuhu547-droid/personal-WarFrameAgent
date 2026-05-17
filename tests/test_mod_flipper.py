@@ -43,6 +43,26 @@ def test_get_tradeable_mods():
     assert mods[1]["url_name"] == "vitality"
 
 
+def test_get_tradeable_mods_includes_arcanes():
+    items = [
+        {"url_name": "arcane_energize", "item_name": "Arcane Energize", "tags": ["legendary", "arcane_enhancement"]},
+        {"url_name": "arcane_grace", "item_name": "Arcane Grace", "tags": ["arcane_enhancement"]},
+        {"url_name": "arcane_helmet", "item_name": "Arcane Helmet", "tags": ["arcane_helmet"]},
+        {"url_name": "arcane_skin", "item_name": "Arcane Skin", "tags": ["skin", "arcane_enhancement"]},
+    ]
+
+    mods = get_tradeable_mods(items)
+
+    ids = [m["url_name"] for m in mods]
+    assert "arcane_energize" in ids
+    assert "arcane_grace" in ids
+    assert "arcane_helmet" not in ids
+    assert "arcane_skin" not in ids
+    energize = next(m for m in mods if m["url_name"] == "arcane_energize")
+    assert energize["max_rank"] == 5
+    assert energize["rarity"] == "LEGENDARY"
+
+
 def test_analyze_mod_flip_success():
     def mock_orders(item_id):
         return [
