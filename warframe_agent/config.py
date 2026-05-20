@@ -43,6 +43,10 @@ MAX_HISTORY_MESSAGES = 20   # session 存储的消息硬上限
 TREND_THRESHOLD_PERCENT = 15    # 趋势变化百分比阈值
 ANOMALY_THRESHOLD_PERCENT = 30  # 异常变化百分比阈值（触发建议）
 PROACTIVE_SUGGESTION_LIMIT = 5  # 最近建议注入 LLM 的条数
+PROACTIVE_OPPORTUNITY_COOLDOWN_HOURS = 12
+PROACTIVE_OPPORTUNITY_MATERIAL_CHANGE_PCT = 25
+PROACTIVE_OPPORTUNITY_MAX_PER_SCAN = 3
+SPREAD_OPPORTUNITY_THRESHOLD_PCT = 40
 
 # 语义 RAG
 EMBEDDING_MODEL = "nomic-embed-text"      # Ollama embedding 模型
@@ -52,6 +56,11 @@ EMBEDDING_ENABLED = True                  # 是否启用语义搜索
 # 推理规划
 MAX_TOOL_ITERATIONS = 3                   # ReAct 循环最大轮数
 REACT_MODEL = "qwen3:8b"                 # ReAct 推理模型
+TOOL_CONTEXT_MAX_CHARS = 2000             # 单个工具结果注入模型上下文的字符预算
+TOOL_CONTEXT_MAX_LINES = 60               # 单个工具结果注入模型上下文的行数预算
+PLAN_CONTEXT_MAX_CHARS = 6000             # plan 聚合结果注入模型上下文的总字符预算
+PLAN_STEP_CONTEXT_MAX_CHARS = 1500        # plan 单步结果注入模型上下文的字符预算
+PLAN_ARGS_MAX_CHARS = 600                 # plan 单步参数摘要注入模型上下文的字符预算
 
 # 深层智能
 PATTERN_DISCOVERY_INTERVAL = 12   # 模式发现周期（每 N 次扫描，≈1 小时）

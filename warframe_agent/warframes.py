@@ -52,6 +52,7 @@ COMMON_WARFRAME_ALIASES = {
     "电男": "volt",
     "犀牛": "rhino",
     "牛": "rhino",
+    "高斯": "gauss",
     "毒妈": "saryn",
     "女枪": "mesa",
     "龙王": "chroma",

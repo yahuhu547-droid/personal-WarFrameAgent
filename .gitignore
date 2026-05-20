@@ -21,10 +21,18 @@ data/feishu_chat_id.txt
 
 # Runtime logs, caches, and local state
 data/*.log
+logs/
+*.log
+*.out.log
+*.err.log
+web_*.log
+web_uvicorn_*.log
 data/conversation_logs.jsonl
 data/*_cache.json
 data/worldstate_raw.json
 data/goals.json
+data/feishu_worker.lock
+data/feishu_processed_ids.json
 *.db-wal
 *.db-shm
 *.db-journal
@@ -34,9 +42,11 @@ data/goals.json
 
 # Test and UI artifacts
 test_results*.json
+.pytest_cache/
 playwright-report/
 test-results/
 screenshots/
+playwright_audit.*
 ui_upgrade_screenshot.png
 
 # Test artifacts and temp files

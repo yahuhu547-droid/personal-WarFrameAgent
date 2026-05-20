@@ -95,13 +95,11 @@ async function loadSidebar() {
         const memory = await fetchMemory();
         renderFavorites(memory.favorites);
         renderAlerts(memory.alerts);
-        updateSidebarStatus('online');
         fetchFavoritesPrices();
         // 同时加载关注列表
         await loadWatchlist();
     } catch (err) {
         console.error('加载记忆失败:', err);
-        updateSidebarStatus('error');
     }
 }
 
@@ -384,13 +382,14 @@ document.getElementById('batch-edit-btn')?.addEventListener('click', toggleBatch
 
 // ===== 更新侧边栏状态 =====
 
-function updateSidebarStatus(status) {
+function updateSidebarStatus(status, detail = '') {
     const statusDot = document.querySelector('.status-dot');
     const statusText = document.querySelector('.status-text');
 
     if (!statusDot || !statusText) return;
 
     statusDot.className = 'status-dot';
+    statusText.title = detail || '';
 
     switch (status) {
         case 'online':
@@ -399,14 +398,19 @@ function updateSidebarStatus(status) {
             break;
         case 'loading':
             statusDot.classList.add('loading');
-            statusText.textContent = '加载中...';
+            statusText.textContent = '状态检查中';
+            break;
+        case 'degraded':
+            statusDot.classList.add('degraded');
+            statusText.textContent = '部分服务异常';
             break;
         case 'error':
             statusDot.classList.add('error');
             statusText.textContent = '连接错误';
             break;
         default:
-            statusText.textContent = '未知状态';
+            statusDot.classList.add('loading');
+            statusText.textContent = '状态检查中';
     }
 }
 
@@ -838,7 +842,6 @@ async function loadFavoritesDashboard(mode) {
                         <span class="detail-label">${buyLabel}</span>
                         <span class="detail-value" style="color:var(--blue-primary)">${price && price.buy_price ? price.buy_price + 'p' : '-'}</span>
                         ${spread !== null ? `<span class="detail-spread ${spreadClass}">差 ${spread}p</span>` : ''}
-                        <button class="copy-whisper-btn" onclick="event.stopPropagation();copyWhisperMessage('seller','${display.split(' / ')[0]}',${price?.sell_price || 0})" title="复制私聊" style="margin-left:auto">📋</button>
                     </div>
                 </div>
             `;
@@ -2320,8 +2323,8 @@ async function showFissureTracker() {
 
         const tierNames = {
             'Lith': '古纪 (Lith)',
-            'Meso': '中纪 (Meso)',
-            'Neo': '前纪 (Neo)',
+            'Meso': '前纪 (Meso)',
+            'Neo': '中纪 (Neo)',
             'Axi': '后纪 (Axi)',
             'Requiem': '安魂 (Requiem)'
         };
@@ -2834,23 +2837,87 @@ document.getElementById('relic-search-btn')?.addEventListener('click', () => {
     showRelicSearch('');
 });
 
-// ===== 复制私聊消息 (借鉴 WarStonks) =====
-function copyWhisperMessage(sellerName, itemName, platinum) {
-    const msg = `/w ${sellerName} Hi! I want to buy: ${itemName} for ${platinum} platinum. (warframe.market)`;
-    navigator.clipboard.writeText(msg).then(() => {
+function copyProvidedWhisperMessage(message) {
+    if (!message) return '';
+    navigator.clipboard.writeText(message).then(() => {
         showToast('已复制私聊消息', 'success');
     }).catch(() => {
-        // Fallback
         const ta = document.createElement('textarea');
-        ta.value = msg;
+        ta.value = message;
         document.body.appendChild(ta);
         ta.select();
         document.execCommand('copy');
         document.body.removeChild(ta);
         showToast('已复制私聊消息', 'success');
     });
-    return msg;
+    return message;
 }
+
+function escapeHtmlAttr(text) {
+    return escapeHtml(text).replace(/`/g, '&#96;');
+}
+
+function copyTradePlanWhisperFromButton(btn) {
+    return copyProvidedWhisperMessage(btn?.dataset?.whisper || '');
+}
+
+function safeWarframeMarketUrl(url) {
+    const text = String(url || '').trim();
+    if (text.startsWith('https://warframe.market/items/') || text.startsWith('https://warframe.market/profile/')) {
+        return text;
+    }
+    return '';
+}
+
+function renderTradePlanStep(step, index) {
+    const marketUrl = safeWarframeMarketUrl(step.market_url);
+    const profileUrl = safeWarframeMarketUrl(step.profile_url);
+    const whisper = String(step.whisper || '');
+    const rankText = step.rank === null || step.rank === undefined ? '' : ` · R${escapeHtml(step.rank)}`;
+    return `<div class="trade-plan-step">
+        <div class="trade-plan-step-main">
+            <span class="trade-plan-step-index">${index}</span>
+            <span class="trade-plan-step-label">${escapeHtml(step.label || step.display_name || step.item_id || '-')}</span>
+            <span class="trade-plan-step-player">${escapeHtml(step.player || '-')}</span>
+            <span class="trade-plan-step-price">${escapeHtml(step.unit_price ?? '-')}p × ${escapeHtml(step.quantity ?? 1)} = ${escapeHtml(step.subtotal ?? '-')}p${rankText}</span>
+        </div>
+        <div class="trade-plan-step-actions">
+            ${marketUrl ? `<a href="${escapeHtml(marketUrl)}" target="_blank" rel="noopener">市场 ↗</a>` : ''}
+            ${profileUrl ? `<a href="${escapeHtml(profileUrl)}" target="_blank" rel="noopener">Profile ↗</a>` : ''}
+            ${whisper ? `<button type="button" class="copy-whisper-btn" data-whisper="${escapeHtmlAttr(whisper)}" onclick="copyTradePlanWhisperFromButton(this)">复制私聊</button>` : ''}
+        </div>
+    </div>`;
+}
+
+function renderTradePlanSection(title, steps) {
+    const list = Array.isArray(steps) ? steps : [];
+    if (!list.length) return '';
+    return `<div class="trade-plan-section">
+        <div class="trade-plan-section-title">${escapeHtml(title)}</div>
+        ${list.map((step, index) => renderTradePlanStep(step, index + 1)).join('')}
+    </div>`;
+}
+
+function renderTradePlanCard(plan) {
+    if (!plan || typeof plan !== 'object') return '';
+    const marketUrl = safeWarframeMarketUrl(plan.market_url || (plan.item_id ? `https://warframe.market/items/${plan.item_id}` : ''));
+    return `<div class="trade-plan-card">
+        <div class="trade-plan-summary">
+            <span class="trade-plan-strategy">${escapeHtml(plan.display_strategy || plan.strategy || '交易计划')}</span>
+            <span class="trade-plan-profit">+${escapeHtml(plan.profit ?? 0)}p</span>
+            <span>成本 ${escapeHtml(plan.total_cost ?? 0)}p</span>
+            <span>收入 ${escapeHtml(plan.total_revenue ?? 0)}p</span>
+            <span>ROI ${escapeHtml(plan.roi_pct ?? 0)}%</span>
+            ${plan.required_quantity ? `<span>数量 ${escapeHtml(plan.required_quantity)}</span>` : ''}
+            ${marketUrl ? `<a href="${escapeHtml(marketUrl)}" target="_blank" rel="noopener">整套市场 ↗</a>` : ''}
+        </div>
+        ${renderTradePlanSection('你需要买入', plan.buy_steps)}
+        ${renderTradePlanSection('你可以卖给', plan.sell_steps)}
+    </div>`;
+}
+
+window.copyTradePlanWhisperFromButton = copyTradePlanWhisperFromButton;
+window.renderTradePlanCard = renderTradePlanCard;
 
 // ===== 虚空裂隙面板 (借鉴 WarStonks) =====
 async function showFissures() {
@@ -2962,16 +3029,18 @@ async function showRelicDrops(tier, relicName) {
                         'Common': { bg: 'rgba(180, 83, 9, 0.15)', color: '#b45309', border: 'rgba(180, 83, 9, 0.3)' },
                     };
                     const rc = rarityColors[r.rarity] || rarityColors['Common'];
+                    const itemName = r.itemName || '';
+                    const rarityKey = String(r.rarity || 'common').toLowerCase().replace(/[^a-z]/g, '') || 'common';
 
-                    html += `<div class="fissure-item" onclick="queryItemPrice('${r.itemName}')" style="cursor:pointer" title="点击查询价格">
+                    html += `<div class="fissure-item" onclick="queryItemPrice('${escapeJsString(itemName)}')" style="cursor:pointer" title="点击查询价格">
                         <div style="display:flex;align-items:center;gap:8px">
-                            <span class="rarity-dot ${r.rarity?.toLowerCase() || 'common'}"></span>
+                            <span class="rarity-dot ${escapeHtml(rarityKey)}"></span>
                             <div>
-                                <div class="fissure-node">${r.itemName}</div>
-                                <div class="fissure-mission">${r.rarityZh || r.rarity}</div>
+                                <div class="fissure-node">${escapeHtml(itemName)}</div>
+                                <div class="fissure-mission">${escapeHtml(r.rarityZh || r.rarity || '')}</div>
                             </div>
                         </div>
-                        <span style="font-family:var(--font-mono);font-size:13px;font-weight:600;color:${rc.color};background:${rc.bg};padding:2px 8px;border-radius:12px;border:1px solid ${rc.border}">${r.chance}%</span>
+                        <span style="font-family:var(--font-mono);font-size:13px;font-weight:600;color:${rc.color};background:${rc.bg};padding:2px 8px;border-radius:12px;border:1px solid ${rc.border}">${escapeHtml(r.chance ?? '-')}%</span>
                     </div>`;
                 });
                 html += `</div>`;
@@ -2991,16 +3060,18 @@ async function showRelicDrops(tier, relicName) {
                     'Common': { bg: 'rgba(180, 83, 9, 0.15)', color: '#b45309', border: 'rgba(180, 83, 9, 0.3)' },
                 };
                 const rc = rarityColors[r.rarity] || rarityColors['Common'];
+                const itemName = r.itemName || '';
+                const rarityKey = String(r.rarity || 'common').toLowerCase().replace(/[^a-z]/g, '') || 'common';
 
-                html += `<div class="fissure-item" onclick="queryItemPrice('${r.itemName}')" style="cursor:pointer" title="点击查询价格">
+                html += `<div class="fissure-item" onclick="queryItemPrice('${escapeJsString(itemName)}')" style="cursor:pointer" title="点击查询价格">
                     <div style="display:flex;align-items:center;gap:8px">
-                        <span class="rarity-dot ${r.rarity?.toLowerCase() || 'common'}"></span>
+                        <span class="rarity-dot ${escapeHtml(rarityKey)}"></span>
                         <div>
-                            <div class="fissure-node">${r.itemName}</div>
-                            <div class="fissure-mission">${r.rarityZh || r.rarity}</div>
+                            <div class="fissure-node">${escapeHtml(itemName)}</div>
+                            <div class="fissure-mission">${escapeHtml(r.rarityZh || r.rarity || '')}</div>
                         </div>
                     </div>
-                    <span style="font-family:var(--font-mono);font-size:13px;font-weight:600;color:${rc.color};background:${rc.bg};padding:2px 8px;border-radius:12px;border:1px solid ${rc.border}">${r.chance}%</span>
+                    <span style="font-family:var(--font-mono);font-size:13px;font-weight:600;color:${rc.color};background:${rc.bg};padding:2px 8px;border-radius:12px;border:1px solid ${rc.border}">${escapeHtml(r.chance ?? '-')}%</span>
                 </div>`;
             });
         }
@@ -3009,19 +3080,22 @@ async function showRelicDrops(tier, relicName) {
             <strong>精炼等级说明：</strong>
             <ul style="margin:8px 0 0 16px;list-style:disc">
                 <li><strong>完好 (Intact)</strong> — 无需消耗，稀有掉率 2%</li>
-                <li><strong>卓越 (Exceptional)</strong> — 消耗 25 虚空之尘，稀有掉率 4%</li>
-                <li><strong>无瑕 (Flawless)</strong> — 消耗 50 虚空之尘，稀有掉率 6%</li>
-                <li><strong>光辉 (Radiant)</strong> — 消耗 100 虚空之尘，稀有掉率 10%</li>
+                <li><strong>卓越 (Exceptional)</strong> — 消耗 25 虚空光体（Void Traces），稀有掉率 4%</li>
+                <li><strong>无瑕 (Flawless)</strong> — 消耗 50 虚空光体（Void Traces），稀有掉率 6%</li>
+                <li><strong>光辉 (Radiant)</strong> — 消耗 100 虚空光体（Void Traces），稀有掉率 10%</li>
             </ul>
-            <p style="margin-top:8px"><strong>组队建议：</strong>4人组队每人开不同遗物，效率最高</p>
+            <p style="margin-top:8px"><strong>组队建议：</strong>泛刷多个奖励可分带不同遗物；定向刷某个稀有奖励时，建议 4 人同带对应光辉遗物。</p>
         </div>`;
+
+        html += '<div id="relic-value-analysis" style="margin-top:12px"><div class="loading-spinner" style="padding:8px"><p style="font-size:12px;color:var(--text-tertiary)">加载价值分析...</p></div></div>';
 
         // 加载遗物来源
         html += '<div id="relic-sources" style="margin-top:12px"><div class="loading-spinner" style="padding:8px"><p style="font-size:12px;color:var(--text-tertiary)">加载掉落来源...</p></div></div>';
 
         content.innerHTML = html;
 
-        // 异步加载来源数据
+        // 异步加载来源和价值数据
+        loadRelicValue(tier, relicName);
         loadRelicSources(data.displayName || `${tier} ${relicName}`);
     } catch (err) {
         content.innerHTML = `<div class="empty-state"><div class="empty-icon">🔮</div>
@@ -3039,6 +3113,57 @@ function switchRelicState(btn, state) {
     document.querySelectorAll('.relic-state-panel').forEach(p => p.style.display = 'none');
     const panel = document.getElementById(`relic-state-${state}`);
     if (panel) panel.style.display = 'block';
+}
+
+async function loadRelicValue(tier, relicName) {
+    const container = document.getElementById('relic-value-analysis');
+    if (!container) return;
+
+    try {
+        const resp = await fetch(`/api/relic/value/${encodeURIComponent(tier)}/${encodeURIComponent(relicName)}`);
+        const data = await resp.json();
+        if (!resp.ok || data.error) {
+            container.innerHTML = `<div style="padding:12px;background:rgba(0,0,0,0.2);border-radius:8px;font-size:12px;color:var(--text-tertiary)">
+                <strong>价值分析：</strong>${escapeHtml(data.error || '暂不可用')}
+            </div>`;
+            return;
+        }
+
+        const rewards = data.rewards || [];
+        const topPlat = data.topPlatinumReward;
+        const topDucat = data.topDucatEfficiencyReward;
+        let html = `<div style="padding:12px;background:rgba(0,0,0,0.2);border-radius:8px;font-size:12px">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+                <strong style="color:var(--gold-primary)">价值分析</strong>
+                <span class="badge badge-green">EV ${escapeHtml((data.expectedPlatinum ?? 0).toFixed ? data.expectedPlatinum.toFixed(2) : data.expectedPlatinum)}p</span>
+                <span class="badge badge-gold">${escapeHtml((data.expectedDucats ?? 0).toFixed ? data.expectedDucats.toFixed(2) : data.expectedDucats)} 杜卡德</span>
+            </div>
+            <div style="color:var(--text-secondary);margin-bottom:8px">${escapeHtml(data.summaryRecommendation || '')}</div>`;
+
+        rewards.forEach(r => {
+            const isTopPlat = r.marketId && r.marketId === topPlat;
+            const isTopDucat = r.marketId && r.marketId === topDucat;
+            const flags = [isTopPlat ? '最佳白金' : '', isTopDucat ? '最佳杜卡德' : ''].filter(Boolean).join(' · ');
+            const warnings = (r.warnings || []).map(w => escapeHtml(w)).join('；');
+            html += `<div class="fissure-item" style="cursor:default">
+                <div style="min-width:0">
+                    <div class="fissure-node">${escapeHtml(r.itemName || r.marketId || '-')}</div>
+                    <div class="fissure-mission">${escapeHtml(r.rarity || '-')} · 掉率 ${escapeHtml(((r.dropRate || 0) * 100).toFixed(1))}%${flags ? ` · ${escapeHtml(flags)}` : ''}</div>
+                    ${warnings ? `<div class="fissure-mission">${warnings}</div>` : ''}
+                </div>
+                <div style="text-align:right;font-family:var(--font-mono);font-size:12px;color:var(--text-secondary)">
+                    <div>${r.valuationPrice == null ? '估值未知' : `${escapeHtml(r.valuationPrice)}p`}</div>
+                    <div>${r.ducatValue == null ? '杜卡德未知' : `${escapeHtml(r.ducatValue)}D`}${r.ducatsPerPlat == null ? '' : ` · ${escapeHtml(r.ducatsPerPlat)}D/p`}</div>
+                </div>
+            </div>`;
+        });
+        html += '</div>';
+        container.innerHTML = html;
+    } catch (err) {
+        container.innerHTML = `<div style="padding:12px;background:rgba(0,0,0,0.2);border-radius:8px;font-size:12px;color:var(--text-tertiary)">
+            <strong>价值分析：</strong>${escapeHtml(err.message || '加载失败')}
+        </div>`;
+    }
 }
 
 // 加载遗物来源
@@ -3116,13 +3241,13 @@ async function loadRelicSources(relicDisplayName) {
 // ===== 价格异常检测 (借鉴 WarStonks 套利扫描) =====
 async function showPriceAnomalies() {
     document.getElementById('more-menu')?.classList.remove('active');
-    const content = document.getElementById('detail-content');
+    const content = openDetailPanel('扫描价格异常...');
     if (!content) return;
-    content.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>扫描价格异常...</p></div>';
-    document.getElementById('detail-panel')?.classList.add('active');
+    const ver = getPanelVersion();
 
     try {
         const resp = await fetch('/api/price/anomalies');
+        if (getPanelVersion() !== ver) return;
         if (!resp.ok) {
             const error = await resp.json().catch(() => ({}));
             throw new Error(error.detail || error.error || `HTTP ${resp.status}`);
@@ -3142,28 +3267,494 @@ async function showPriceAnomalies() {
         } else {
             html += '<div class="card"><div class="card-body">';
             items.slice(0, 20).forEach(item => {
-                const deviation = Number(item.deviation_pct || 0);
-                const direction = item.direction || (deviation >= 0 ? 'up' : 'down');
-                const color = direction === 'up' ? 'var(--green-success)' : 'var(--red-error)';
+                const deviation = Number(item.deviation || 0);
+                const anomalyType = item.type || (deviation >= 0 ? 'spike' : 'drop');
+                const color = anomalyType === 'spike' ? 'var(--green-success)' : 'var(--red-error)';
                 const sign = deviation >= 0 ? '+' : '';
                 html += `<div class="fissure-item">
                     <div>
                         <div class="fissure-node">${item.display || item.item_id || 'Unknown'}</div>
                         <div class="fissure-mission">当前 ${item.current_price ?? '-'}p / 均价 ${item.avg_price ?? '-'}p</div>
                     </div>
-                    <span style="color:${color};font-weight:600;font-family:var(--font-mono)">${sign}${deviation.toFixed(1)}%</span>
+                    <span style="color:${color};font-weight:600;font-family:var(--font-mono)">${item.type_display || ''} ${sign}${deviation.toFixed(1)}%</span>
                 </div>`;
             });
             html += '</div></div>';
         }
+        if (getPanelVersion() !== ver) return;
         content.innerHTML = html;
     } catch (err) {
+        if (getPanelVersion() !== ver) return;
         content.innerHTML = `<div class="empty-state"><div class="empty-icon">📊</div>
             <span class="empty-primary">扫描失败</span><span class="empty-sub">${err.message}</span></div>`;
     }
 }
 
 document.getElementById('anomaly-btn')?.addEventListener('click', () => showPriceAnomalies());
+
+// ===== 长期交易记忆观察面板 =====
+const TRADING_MEMORY_TABS = {
+    'market-snapshots': {
+        label: '市场快照',
+        endpoint: '/api/trading-memory/market-snapshots',
+        responseKey: 'market_snapshots',
+        typeParam: 'source',
+        typeLabel: '来源',
+        placeholder: 'price_monitor.scan'
+    },
+    'recommendations': {
+        label: '推荐记录',
+        endpoint: '/api/trading-memory/recommendations',
+        responseKey: 'recommendations',
+        typeParam: 'recommendation_type',
+        typeLabel: '推荐类型',
+        placeholder: 'baro'
+    },
+    'push-history': {
+        label: '推送历史',
+        endpoint: '/api/trading-memory/push-history',
+        responseKey: 'push_history',
+        typeParam: 'push_type',
+        typeLabel: '推送类型',
+        placeholder: 'opportunity'
+    },
+    'recall-trace': {
+        label: '召回 Trace',
+        endpoint: '/api/memory/recall',
+        responseKey: 'items',
+        typeParam: 'intent',
+        typeLabel: '意图',
+        placeholder: 'price_check'
+    }
+};
+
+let tradingMemoryActiveTab = 'market-snapshots';
+let tradingMemoryRequestSeq = 0;
+
+function showTradingMemoryPanel(tab = 'market-snapshots') {
+    document.getElementById('more-menu')?.classList.remove('active');
+    tradingMemoryActiveTab = TRADING_MEMORY_TABS[tab] ? tab : 'market-snapshots';
+    const content = openDetailPanel('加载长期交易记忆...');
+    if (!content) return;
+    renderTradingMemoryShell(content, tradingMemoryActiveTab);
+    fetchTradingMemoryTab(tradingMemoryActiveTab);
+}
+
+function renderTradingMemoryShell(content, activeTab) {
+    const config = TRADING_MEMORY_TABS[activeTab];
+    content.innerHTML = `
+        <div class="trading-memory-panel">
+            <div class="panel-title-row">
+                <div>
+                    <span class="panel-title-eyebrow">长期交易记忆</span>
+                    <div class="trading-memory-subtitle">只读观察 market snapshots、recommendations、push history 与 recall trace</div>
+                </div>
+                <span id="trading-memory-count" class="badge badge-muted">${escapeHtml(config.label)} · 加载中</span>
+            </div>
+            <div class="mode-toggle trading-memory-tabs">
+                ${Object.entries(TRADING_MEMORY_TABS).map(([key, tabConfig]) => `
+                    <button class="mode-toggle-btn ${key === activeTab ? 'active' : ''}" id="trading-memory-tab-${key}" data-tab="${key}" type="button">
+                        ${escapeHtml(tabConfig.label)}
+                    </button>
+                `).join('')}
+            </div>
+            <div class="wiki-filters trading-memory-filters">
+                ${activeTab === 'recall-trace' ? '<input id="memory-recall-query-filter" class="wiki-search-input" type="text" placeholder="query" autocomplete="off">' : ''}
+                <input id="${activeTab === 'recall-trace' ? 'memory-recall-item-filter' : 'trading-memory-item-filter'}" class="wiki-search-input" type="text" placeholder="item_name" autocomplete="off">
+                <input id="trading-memory-type-filter" class="wiki-search-input" type="text" placeholder="${escapeHtml(config.typeLabel)}：${escapeHtml(config.placeholder)}" autocomplete="off">
+                ${activeTab !== 'recall-trace' ? `<select id="trading-memory-since-filter" aria-label="时间范围">
+                    <option value="all">全部</option>
+                    <option value="24h">24h</option>
+                    <option value="7d">7d</option>
+                    <option value="30d">30d</option>
+                </select>` : ''}
+                <select id="trading-memory-limit-filter" aria-label="数量">
+                    ${activeTab === 'recall-trace' ? `
+                    <option value="5">5</option>
+                    <option value="10">10</option>
+                    <option value="20" selected>20</option>` : `
+                    <option value="25">25</option>
+                    <option value="50">50</option>
+                    <option value="100" selected>100</option>`}
+                </select>
+                <button id="trading-memory-refresh-btn" class="detail-action-btn" type="button">刷新</button>
+            </div>
+            <div id="trading-memory-results" class="trading-memory-list">
+                <div class="loading-spinner"><div class="spinner"></div><p>加载${escapeHtml(config.label)}...</p></div>
+            </div>
+        </div>
+    `;
+    bindTradingMemoryControls(content);
+}
+
+function bindTradingMemoryControls(content) {
+    content.querySelectorAll('.trading-memory-tabs [data-tab]').forEach(button => {
+        button.addEventListener('click', () => {
+            const tab = button.dataset.tab;
+            if (!TRADING_MEMORY_TABS[tab] || tab === tradingMemoryActiveTab) return;
+            tradingMemoryActiveTab = tab;
+            const nextContent = document.getElementById('detail-content');
+            if (!nextContent) return;
+            renderTradingMemoryShell(nextContent, tradingMemoryActiveTab);
+            fetchTradingMemoryTab(tradingMemoryActiveTab);
+        });
+    });
+    content.querySelector('#trading-memory-refresh-btn')?.addEventListener('click', () => {
+        fetchTradingMemoryTab(tradingMemoryActiveTab);
+    });
+    content.querySelectorAll('#trading-memory-item-filter, #memory-recall-query-filter, #memory-recall-item-filter, #trading-memory-type-filter').forEach(input => {
+        input.addEventListener('keydown', event => {
+            if (event.key === 'Enter') {
+                fetchTradingMemoryTab(tradingMemoryActiveTab);
+            }
+        });
+    });
+}
+
+async function fetchTradingMemoryTab(tab) {
+    const config = TRADING_MEMORY_TABS[tab];
+    if (!config) return;
+    const results = document.getElementById('trading-memory-results');
+    const countBadge = document.getElementById('trading-memory-count');
+    if (!results) return;
+    const panelVersion = getPanelVersion();
+    const requestSeq = ++tradingMemoryRequestSeq;
+    results.innerHTML = `<div class="loading-spinner"><div class="spinner"></div><p>加载${escapeHtml(config.label)}...</p></div>`;
+    if (countBadge) {
+        countBadge.className = 'badge badge-muted';
+        countBadge.textContent = `${config.label} · 加载中`;
+    }
+    try {
+        const response = await fetch(buildTradingMemoryUrl(tab, getTradingMemoryFilters(tab)));
+        if (getPanelVersion() !== panelVersion || requestSeq !== tradingMemoryRequestSeq) return;
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.detail || error.error || `HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        if (getPanelVersion() !== panelVersion || requestSeq !== tradingMemoryRequestSeq) return;
+        const records = Array.isArray(data[config.responseKey]) ? data[config.responseKey] : [];
+        const count = Number.isFinite(Number(data.count)) ? Number(data.count) : records.length;
+        if (countBadge) {
+            countBadge.className = `badge ${count > 0 ? 'badge-gold' : 'badge-muted'}`;
+            countBadge.textContent = `${config.label} · ${count} 条`;
+        }
+        if (tab === 'market-snapshots') {
+            results.innerHTML = renderMarketSnapshots(records);
+        } else if (tab === 'recommendations') {
+            results.innerHTML = renderRecommendations(records);
+        } else if (tab === 'push-history') {
+            results.innerHTML = renderPushHistory(records);
+        } else {
+            results.innerHTML = renderRecallTrace(records, data.query_summary || {}, data.score_breakdown || {});
+        }
+    } catch (err) {
+        if (getPanelVersion() !== panelVersion || requestSeq !== tradingMemoryRequestSeq) return;
+        results.innerHTML = renderTradingMemoryError(`加载${config.label}失败`, err.message);
+        if (countBadge) {
+            countBadge.className = 'badge badge-red';
+            countBadge.textContent = `${config.label} · 错误`;
+        }
+    }
+}
+
+function getTradingMemoryFilters(tab) {
+    const itemName = (tab === 'recall-trace'
+        ? document.getElementById('memory-recall-item-filter')?.value.trim()
+        : document.getElementById('trading-memory-item-filter')?.value.trim()) || '';
+    const typeValue = document.getElementById('trading-memory-type-filter')?.value.trim() || '';
+    const sinceValue = document.getElementById('trading-memory-since-filter')?.value || 'all';
+    const limitValue = document.getElementById('trading-memory-limit-filter')?.value || (tab === 'recall-trace' ? '20' : '100');
+    const filters = { limit: tab === 'recall-trace' ? Math.min(Number(limitValue) || 20, 20) : limitValue };
+    if (tab === 'recall-trace') {
+        const query = document.getElementById('memory-recall-query-filter')?.value.trim() || '';
+        filters.query = query;
+        if (itemName) filters.item_name = itemName;
+        if (typeValue) filters.intent = typeValue;
+        return filters;
+    }
+    if (itemName) filters.item_name = itemName;
+    if (typeValue && TRADING_MEMORY_TABS[tab]) filters[TRADING_MEMORY_TABS[tab].typeParam] = typeValue;
+    const since = tradingMemorySinceIso(sinceValue);
+    if (since) filters.since = since;
+    return filters;
+}
+
+function buildTradingMemoryUrl(tab, filters) {
+    const config = TRADING_MEMORY_TABS[tab];
+    const params = new URLSearchParams();
+    Object.entries(filters || {}).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && String(value).trim() !== '') {
+            params.set(key, String(value));
+        }
+    });
+    const query = params.toString();
+    return query ? `${config.endpoint}?${query}` : config.endpoint;
+}
+
+function tradingMemorySinceIso(value) {
+    const now = new Date();
+    const hours = { '24h': 24, '7d': 24 * 7, '30d': 24 * 30 }[value];
+    if (!hours) return '';
+    return new Date(now.getTime() - hours * 60 * 60 * 1000).toISOString();
+}
+
+function formatTradingMemoryDate(timestamp) {
+    if (!timestamp) return '-';
+    try {
+        return formatDate(timestamp);
+    } catch (_) {
+        return String(timestamp);
+    }
+}
+
+function renderMarketSnapshots(records) {
+    if (!records.length) return renderTradingMemoryEmpty('暂无市场快照', 'PriceMonitor 写入 market snapshot 后会显示在这里');
+    return records.map(record => `
+        <div class="card trading-memory-record">
+            <div class="card-body">
+                <div class="trading-memory-record-header">
+                    <div>
+                        <div class="trading-memory-name">${escapeHtml(record.item_name || record.item_id || '-')}</div>
+                        <div class="trading-memory-meta">${escapeHtml(record.source || '-')} · ${escapeHtml(formatTradingMemoryDate(record.timestamp))}</div>
+                    </div>
+                    <span class="badge badge-blue">市场快照</span>
+                </div>
+                <div class="trading-memory-prices">
+                    <span>卖 ${renderPlatinum(record.sell_price)}</span>
+                    <span>买 ${renderPlatinum(record.buy_price)}</span>
+                    <span>价差 ${renderPlatinum(record.spread)}</span>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function renderRecommendations(records) {
+    if (!records.length) return renderTradingMemoryEmpty('暂无推荐记录', 'Baro 或机会推荐写入后会显示在这里');
+    return records.map(record => `
+        <div class="card trading-memory-record">
+            <div class="card-body">
+                <div class="trading-memory-record-header">
+                    <div>
+                        <div class="trading-memory-name">${escapeHtml(record.display_name || record.item_name || record.market_id || '-')}</div>
+                        <div class="trading-memory-meta">${escapeHtml(record.recommendation_type || '-')} · ${escapeHtml(formatTradingMemoryDate(record.timestamp))}</div>
+                    </div>
+                    <span class="badge badge-gold">${escapeHtml(record.source || record.event_type || '推荐')}</span>
+                </div>
+                ${record.reason ? `<div class="trading-memory-message">${escapeHtml(record.reason)}</div>` : ''}
+                ${record.event_description ? `<div class="trading-memory-meta">事件：${escapeHtml(record.event_description)}</div>` : ''}
+                <div class="trading-memory-prices">
+                    <span>最高买 ${renderPlatinum(record.best_buy_price)}</span>
+                    <span>最低卖 ${renderPlatinum(record.best_sell_price)}</span>
+                    ${record.ducat_cost !== null && record.ducat_cost !== undefined ? `<span>${escapeHtml(record.ducat_cost)} 杜卡德</span>` : ''}
+                    ${record.credit_cost !== null && record.credit_cost !== undefined ? `<span>${escapeHtml(record.credit_cost)} 星币</span>` : ''}
+                    ${record.rank !== null && record.rank !== undefined ? `<span>等级 ${escapeHtml(record.rank)} / ${escapeHtml(record.max_rank ?? '-')}</span>` : ''}
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function renderPushHistory(records) {
+    if (!records.length) return renderTradingMemoryEmpty('暂无推送历史', '主动推送或事件推送写入后会显示在这里');
+    return records.map(record => {
+        const affected = Array.isArray(record.items_affected) ? record.items_affected : [];
+        return `
+            <div class="card trading-memory-record">
+                <div class="card-body">
+                    <div class="trading-memory-record-header">
+                        <div>
+                            <div class="trading-memory-name">${escapeHtml(record.item_display || record.item_name || record.item_id || '-')}</div>
+                            <div class="trading-memory-meta">${escapeHtml(record.push_type || '-')} · ${escapeHtml(record.source || '-')} · ${escapeHtml(formatTradingMemoryDate(record.timestamp))}</div>
+                        </div>
+                        <span class="badge badge-green">优先级 ${escapeHtml(record.priority ?? '-')}</span>
+                    </div>
+                    ${record.message ? `<div class="trading-memory-message">${escapeHtml(record.message)}</div>` : ''}
+                    ${record.action_suggestion ? `<div class="trading-memory-meta">建议：${escapeHtml(record.action_suggestion)}</div>` : ''}
+                    ${record.event_description ? `<div class="trading-memory-meta">事件：${escapeHtml(record.event_description)}</div>` : ''}
+                    ${affected.length ? `<div class="trading-memory-chips">${affected.map(item => `<span class="badge badge-muted">${escapeHtml(item)}</span>`).join('')}</div>` : ''}
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderRecallTrace(records, querySummary, scoreBreakdown) {
+    if (!records.length) return renderTradingMemoryEmpty('暂无召回 Trace', '有交易记忆后可在这里解释召回原因');
+    const summary = querySummary || {};
+    const header = `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-name">查询摘要</div>
+        <div class="trading-memory-meta">item=${escapeHtml(summary.item_name || '-')} · intent=${escapeHtml(summary.intent || '-')} · max_score=${escapeHtml(scoreBreakdown.max_score ?? '-')}</div>
+    </div></div>`;
+    return header + records.map(record => {
+        const facts = renderRecallKeyValues(record.summary || {});
+        const trace = renderRecallKeyValues(record.trace || {});
+        return `<div class="card trading-memory-record">
+            <div class="card-body">
+                <div class="trading-memory-record-header">
+                    <div>
+                        <div class="trading-memory-name">${escapeHtml(record.item_name || '-')}</div>
+                        <div class="trading-memory-meta">${escapeHtml(record.source || '-')} #${escapeHtml(record.record_id ?? '-')} · ${escapeHtml(formatTradingMemoryDate(record.timestamp))}</div>
+                    </div>
+                    <span class="badge badge-blue">score ${escapeHtml(record.score ?? '-')}</span>
+                </div>
+                <div class="trading-memory-prices">
+                    <span>relevance=${escapeHtml(record.relevance ?? '-')}</span>
+                    <span>recency=${escapeHtml(record.recency ?? '-')}</span>
+                    <span>salience=${escapeHtml(record.salience ?? '-')}</span>
+                </div>
+                <div class="trading-memory-message">facts: ${facts}</div>
+                <div class="trading-memory-meta">trace: ${trace}</div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function renderRecallKeyValues(value) {
+    if (!value || typeof value !== 'object') return '-';
+    return Object.entries(value).map(([key, item]) => `${escapeHtml(key)}=${escapeHtml(Array.isArray(item) ? item.join(',') : item)}`).join(' · ');
+}
+
+function renderPlatinum(value) {
+    return value === null || value === undefined || value === '' ? '-' : `${escapeHtml(value)}p`;
+}
+
+function renderTradingMemoryEmpty(title, subtitle) {
+    return `<div class="empty-state">
+        <div class="empty-state-icon">TM</div>
+        <div class="empty-state-text">${escapeHtml(title)}</div>
+        <div class="empty-state-sub">${escapeHtml(subtitle || '')}</div>
+    </div>`;
+}
+
+function renderTradingMemoryError(title, detail) {
+    return `<div class="empty-state">
+        <div class="empty-state-icon">!</div>
+        <div class="empty-state-text">${escapeHtml(title)}</div>
+        <div class="empty-state-sub">${escapeHtml(detail || '请稍后重试')}</div>
+    </div>`;
+}
+
+document.getElementById('trading-memory-btn')?.addEventListener('click', () => showTradingMemoryPanel());
+
+// ===== 工具观测面板 =====
+async function showToolObservabilityPanel() {
+    document.getElementById('more-menu')?.classList.remove('active');
+    const content = openDetailPanel('加载工具观测...');
+    if (!content) return;
+    content.innerHTML = `
+        <div class="tool-observability-panel">
+            <div class="panel-title-row">
+                <div>
+                    <span class="panel-title-eyebrow">工具观测</span>
+                    <div class="trading-memory-subtitle">只读查看最近工具调用和统计摘要</div>
+                </div>
+                <span id="tool-observability-count" class="badge badge-muted">加载中</span>
+            </div>
+            <div class="wiki-filters trading-memory-filters">
+                <input id="tool-observability-name-filter" class="wiki-search-input" type="text" placeholder="tool_name" autocomplete="off">
+                <select id="tool-observability-ok-filter" aria-label="调用状态">
+                    <option value="all">全部</option>
+                    <option value="true">成功</option>
+                    <option value="false">失败</option>
+                </select>
+                <select id="tool-observability-limit-filter" aria-label="数量">
+                    <option value="25">25</option>
+                    <option value="50" selected>50</option>
+                    <option value="100">100</option>
+                </select>
+                <button id="tool-observability-refresh-btn" class="detail-action-btn" type="button">刷新</button>
+            </div>
+            <div id="tool-observability-stats" class="trading-memory-list"></div>
+            <div class="trading-memory-section-title">调用历史</div>
+            <div id="tool-observability-history" class="trading-memory-list">
+                <div class="loading-spinner"><div class="spinner"></div><p>加载工具调用...</p></div>
+            </div>
+        </div>
+    `;
+    content.querySelector('#tool-observability-refresh-btn')?.addEventListener('click', fetchToolObservability);
+    content.querySelector('#tool-observability-name-filter')?.addEventListener('keydown', event => {
+        if (event.key === 'Enter') fetchToolObservability();
+    });
+    await fetchToolObservability();
+}
+
+async function fetchToolObservability() {
+    const name = document.getElementById('tool-observability-name-filter')?.value.trim() || '';
+    const ok = document.getElementById('tool-observability-ok-filter')?.value || 'all';
+    const limit = document.getElementById('tool-observability-limit-filter')?.value || '50';
+    const params = new URLSearchParams({ limit });
+    if (name) params.set('tool_name', name);
+    if (ok !== 'all') params.set('ok', ok);
+    const statsParams = new URLSearchParams({ limit });
+    if (name) statsParams.set('tool_name', name);
+    const countBadge = document.getElementById('tool-observability-count');
+    const statsEl = document.getElementById('tool-observability-stats');
+    const historyEl = document.getElementById('tool-observability-history');
+    if (!statsEl || !historyEl) return;
+    try {
+        const [historyRes, statsRes] = await Promise.all([
+            fetch(`/api/tool-calls/history?${params.toString()}`),
+            fetch(`/api/tool-calls/stats?${statsParams.toString()}`),
+        ]);
+        if (!historyRes.ok) throw new Error(`history HTTP ${historyRes.status}`);
+        if (!statsRes.ok) throw new Error(`stats HTTP ${statsRes.status}`);
+        const history = await historyRes.json();
+        const stats = await statsRes.json();
+        const items = Array.isArray(history.items) ? history.items : [];
+        if (countBadge) {
+            countBadge.className = `badge ${items.length ? 'badge-gold' : 'badge-muted'}`;
+            countBadge.textContent = `${items.length} 条`;
+        }
+        statsEl.innerHTML = renderToolObservabilityStats(stats);
+        historyEl.innerHTML = renderToolObservabilityHistory(items);
+    } catch (error) {
+        if (countBadge) {
+            countBadge.className = 'badge badge-red';
+            countBadge.textContent = '错误';
+        }
+        statsEl.innerHTML = '';
+        historyEl.innerHTML = renderTradingMemoryError('加载工具观测失败', error.message);
+    }
+}
+
+function renderToolObservabilityStats(stats) {
+    const top = Array.isArray(stats.top_tools) ? stats.top_tools : [];
+    return `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-record-header">
+            <div>
+                <div class="trading-memory-name">统计摘要</div>
+                <div class="trading-memory-meta">total=${escapeHtml(stats.total_calls ?? 0)} · success=${escapeHtml(stats.success_count ?? 0)} · failure=${escapeHtml(stats.failure_count ?? 0)}</div>
+            </div>
+            <span class="badge badge-blue">成功率 ${escapeHtml(stats.success_rate ?? 0)}</span>
+        </div>
+        <div class="trading-memory-prices">
+            <span>avg=${escapeHtml(stats.duration_ms?.avg ?? '-')}ms</span>
+            <span>min=${escapeHtml(stats.duration_ms?.min ?? '-')}ms</span>
+            <span>max=${escapeHtml(stats.duration_ms?.max ?? '-')}ms</span>
+        </div>
+        ${top.length ? `<div class="trading-memory-chips">${top.map(item => `<span class="badge badge-muted">${escapeHtml(item.tool_name)} · ${escapeHtml(item.total_calls)}</span>`).join('')}</div>` : ''}
+    </div></div>`;
+}
+
+function renderToolObservabilityHistory(items) {
+    if (!items.length) return renderTradingMemoryEmpty('暂无工具调用', '有工具调用日志后会显示在这里');
+    return items.map(item => `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-record-header">
+            <div>
+                <div class="trading-memory-name">${escapeHtml(item.tool_name || '-')}</div>
+                <div class="trading-memory-meta">${escapeHtml(item.tool_timestamp || item.conversation_timestamp || '-')}</div>
+            </div>
+            <span class="badge ${item.ok === false ? 'badge-red' : item.ok === true ? 'badge-green' : 'badge-muted'}">${item.ok === false ? 'failed' : item.ok === true ? 'ok' : 'unknown'}</span>
+        </div>
+        <div class="trading-memory-prices"><span>duration=${escapeHtml(item.duration_ms ?? '-')}ms</span></div>
+        <div class="trading-memory-message">args: ${renderRecallKeyValues(item.args_summary || {})}</div>
+        ${item.error_summary ? `<div class="trading-memory-meta">error: ${escapeHtml(item.error_summary)}</div>` : ''}
+    </div></div>`).join('');
+}
+
+document.getElementById('tool-observability-btn')?.addEventListener('click', () => showToolObservabilityPanel());
 
 // ===== 通用扫描轮询 =====
 async function _pollScan(url, content, onDone, onError) {
@@ -3249,7 +3840,12 @@ function renderModFlipPage(content) {
                     <span>内融: ${(item.endo_cost / 1000).toFixed(1)}k</span>
                     <span>每千内融: ${item.plat_per_1k_endo}p</span>
                     <span>48h量: ${item.volume_48h ?? '?'}</span>
+                    ${item.market_url ? `<a href="${escapeHtml(item.market_url)}" target="_blank" rel="noopener" style="color:var(--accent-color);text-decoration:none;">市场 ↗</a>` : ''}
                 </div>
+                ${item.trade_plan ? renderTradePlanCard(item.trade_plan) : ((item.r0_seller || item.max_rank_buyer) ? `<div style="font-size:0.75em;color:var(--text-secondary);display:flex;gap:10px;flex-wrap:wrap;">
+                    ${item.r0_seller ? `<span>买入卖家: ${escapeHtml(item.r0_seller.player)} ${item.r0_seller.price}p</span>` : ''}
+                    ${item.max_rank_buyer ? `<span>满级买家: ${escapeHtml(item.max_rank_buyer.player)} ${item.max_rank_buyer.price}p</span>` : ''}
+                </div>` : '')}
             </div>`;
         });
         html += '</div></div>';
@@ -3316,11 +3912,23 @@ async function loadSetProfit(minProfit = 3) {
                         <span style="color:${profitColor};font-weight:700;font-family:var(--font-mono);font-size:1.1em;">+${item.best_profit}p</span>
                     </div>
                     <div style="display:flex;gap:12px;font-size:0.8em;color:var(--text-secondary);flex-wrap:wrap;">
-                        <span>策略: ${item.best_strategy}</span>
-                        <span>套装价: ${item.set_sell_price ?? '-'}p</span>
-                        <span>部件总和: ${item.parts_sell_total}p</span>
+                        <span>策略: ${escapeHtml(item.best_strategy || item.trade_plan?.display_strategy || '-')}</span>
+                        <span>成本: ${item.best_cost ?? '-'}p</span>
+                        <span>收入: ${item.best_revenue ?? '-'}p</span>
+                        <span>ROI: ${escapeHtml(item.roi_pct ?? 0)}%</span>
+                        <span>机会分: ${escapeHtml(item.opportunity_score ?? 0)}</span>
+                        <span>流动性: ${escapeHtml(item.liquidity_score ?? 0)}</span>
+                        <span>风险: ${escapeHtml(item.risk_level || '-')}</span>
                         <span>48h量: ${item.volume_48h ?? '?'}</span>
+                        ${item.market_url ? `<a href="${escapeHtml(item.market_url)}" target="_blank" rel="noopener" style="color:var(--accent-color);text-decoration:none;">整套市场 ↗</a>` : ''}
                     </div>
+                    ${item.trade_plan ? renderTradePlanCard(item.trade_plan) : `${(item.set_seller || item.set_buyer) ? `<div style="font-size:0.75em;color:var(--text-secondary);display:flex;gap:10px;flex-wrap:wrap;">
+                        ${item.set_seller ? `<span>整套卖家: ${escapeHtml(item.set_seller.player)} ${item.set_seller.price}p</span>` : ''}
+                        ${item.set_buyer ? `<span>整套买家: ${escapeHtml(item.set_buyer.player)} ${item.set_buyer.price}p</span>` : ''}
+                    </div>` : ''}
+                    ${item.part_details && item.part_details.length ? `<div style="font-size:0.75em;color:var(--text-secondary);display:flex;gap:8px;flex-wrap:wrap;">
+                        ${item.part_details.map(part => `<a href="${escapeHtml(part.market_url)}" target="_blank" rel="noopener" style="color:var(--accent-color);text-decoration:none;">${escapeHtml(part.name)} ↗</a>`).join('')}
+                    </div>` : ''}`}
                 </div>`;
             });
             html += '</div></div>';
@@ -3393,6 +4001,10 @@ function renderInvestPage(content) {
                     <span>48h量: ${item.volume_48h ?? '?'}</span>
                     <span style="color:${riskColor}">${riskIcon} ${item.risk_level}</span>
                 </div>`;
+
+            if (item.trade_plan) {
+                html += renderTradePlanCard(item.trade_plan);
+            }
 
             // 部件明细（可折叠）
             if (item.part_details && item.part_details.length > 0) {

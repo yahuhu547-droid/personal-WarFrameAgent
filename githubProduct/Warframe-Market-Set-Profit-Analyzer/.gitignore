@@ -1,0 +1,54 @@
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Local tooling files
+.claude/
+CLAUDE.md
+AGENTS.md
+INITIAL.md
+.bmad/
+_bmad/
+
+# Local-only repository artifacts
+docs/local/
+.github/workflows/
+
+# Python cache and test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+
+# Packaging
+.Python
+build/
+dist/
+*.egg-info/
+
+# Local configuration
+.env
+
+# Run artifacts
+*.log
+runs/*.csv
+runs/**/*.csv
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

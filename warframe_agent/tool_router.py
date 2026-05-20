@@ -6,275 +6,15 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from . import config
+from .tool_context import format_plan_results_for_model, tool_result_model_context
+from .tool_registry import create_default_tool_registry
 
 
-# Ollama 原生工具格式（function calling）
-TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "query_price",
-            "description": "查询单个物品的实时市场价格（卖价、收价、价差）",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "item_name": {"type": "string", "description": "物品名称（中文、英文或 market_id）"},
-                },
-                "required": ["item_name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_set",
-            "description": "查询 Prime 套装价格，对比整套购买 vs 拆件购买",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "warframe_name": {"type": "string", "description": "战甲或武器名称"},
-                },
-                "required": ["warframe_name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_missing_parts",
-            "description": "计算补齐 Prime 套装还需要多少钱",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "warframe_name": {"type": "string", "description": "战甲或武器名称"},
-                    "owned_parts": {"type": "string", "description": "已有部件列表"},
-                },
-                "required": ["warframe_name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "scan_favorites",
-            "description": "扫描关注物品和价格提醒的当前状态",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_alert",
-            "description": "设置价格提醒，当物品价格达到阈值时通知",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "item_name": {"type": "string", "description": "物品名称"},
-                    "direction": {"type": "string", "description": "below 或 above"},
-                    "price": {"type": "integer", "description": "目标价格"},
-                },
-                "required": ["item_name", "direction", "price"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "price_trend",
-            "description": "查看物品的价格历史趋势",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "item_name": {"type": "string", "description": "物品名称"},
-                },
-                "required": ["item_name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "mod_flipper",
-            "description": "扫描可交易 Mod 的翻转利润，找出最值得低级买、满级卖的 Mod，按每千内融利润排序",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "min_profit": {"type": "integer", "description": "最低利润阈值（白金），默认 5"},
-                    "limit": {"type": "integer", "description": "返回结果数量，默认 20"},
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_profit",
-            "description": "分析 Prime 套装利润，对比整套买卖 vs 拆件买卖，按利润排序",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "min_profit": {"type": "integer", "description": "最低利润阈值（白金），默认 5"},
-                    "limit": {"type": "integer", "description": "返回结果数量，默认 20"},
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "investment_advisor",
-            "description": "投资顾问：根据预算扫描物品翻转机会，按 ROI 排序，过滤低成交量和超预算项",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "budget": {"type": "integer", "description": "可用预算（白金），默认 1000"},
-                    "min_roi": {"type": "number", "description": "最低 ROI 百分比，默认 10"},
-                    "limit": {"type": "integer", "description": "返回结果数量，默认 15"},
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "plan",
-            "description": "将复杂请求分解为多个子任务并按顺序执行。用于对比多个物品、投资分析、多步骤查询。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "goal": {"type": "string", "description": "用户目标简述"},
-                    "steps": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "tool": {"type": "string", "description": "子任务工具名"},
-                                "args": {"type": "object", "description": "工具参数"},
-                                "purpose": {"type": "string", "description": "步骤目的"},
-                            },
-                            "required": ["tool", "args"],
-                        },
-                        "description": "子任务列表",
-                    },
-                },
-                "required": ["goal", "steps"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_events",
-            "description": "查询当前游戏活动和事件（Baro 来访、警报、入侵、虚空风暴、Prime 重生等）",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "deep_analysis",
-            "description": "深度分析单个物品的多维度数据（价格趋势、风险评估、投资建议），使用云端大模型推理",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "item_name": {"type": "string", "description": "物品名称（中文、英文或 market_id）"},
-                },
-                "required": ["item_name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "riven_search",
-            "description": "搜索紫卡(Riven)拍卖信息。当用户提到紫卡、裂罅、Riven，或查询武器的紫卡时使用。支持指定正属性、负属性、价格上限。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "weapon": {"type": "string", "description": "武器名称，如 斯特朗、soma、rubico"},
-                    "positive": {"type": "string", "description": "期望的正属性，如 双爆、暴击率+暴击伤害"},
-                    "negative": {"type": "string", "description": "期望的负属性，如 无负、后坐力"},
-                    "max_price": {"type": "integer", "description": "最高价格(白金)"},
-                },
-                "required": ["weapon"],
-            },
-        },
-    },
-]
-
-
-TOOLS = [
-    {
-        "name": "query_price",
-        "description": "查询单个物品的实时市场价格（卖价、收价、价差）",
-        "parameters": {"item_name": "物品名称（中文、英文或 market_id）"},
-    },
-    {
-        "name": "query_set",
-        "description": "查询 Prime 套装价格，对比整套购买 vs 拆件购买",
-        "parameters": {"warframe_name": "战甲或武器名称"},
-    },
-    {
-        "name": "query_missing_parts",
-        "description": "计算补齐 Prime 套装还需要多少钱",
-        "parameters": {"warframe_name": "战甲或武器名称", "owned_parts": "已有部件列表"},
-    },
-    {
-        "name": "scan_favorites",
-        "description": "扫描关注物品和价格提醒的当前状态",
-        "parameters": {},
-    },
-    {
-        "name": "set_alert",
-        "description": "设置价格提醒，当物品价格达到阈值时通知",
-        "parameters": {"item_name": "物品名称", "direction": "below 或 above", "price": "目标价格"},
-    },
-    {
-        "name": "price_trend",
-        "description": "查看物品的价格历史趋势",
-        "parameters": {"item_name": "物品名称"},
-    },
-    {
-        "name": "general_chat",
-        "description": "一般性 Warframe 交易问题或闲聊，不需要调用特定工具",
-        "parameters": {"message": "用户消息"},
-    },
-    {
-        "name": "mod_flipper",
-        "description": "扫描 Mod 翻转利润，按每千内融利润排序",
-        "parameters": {"min_profit": "最低利润", "limit": "结果数量"},
-    },
-    {
-        "name": "set_profit",
-        "description": "分析 Prime 套装利润，按利润排序",
-        "parameters": {"min_profit": "最低利润", "limit": "结果数量"},
-    },
-    {
-        "name": "investment_advisor",
-        "description": "投资顾问：按预算和 ROI 扫描翻转机会",
-        "parameters": {"budget": "预算", "min_roi": "最低ROI%", "limit": "结果数量"},
-    },
-    {
-        "name": "plan",
-        "description": "将复杂请求分解为多个子任务并按顺序执行",
-        "parameters": {"goal": "用户目标", "steps": "子任务列表"},
-    },
-    {
-        "name": "query_events",
-        "description": "查询当前游戏活动和事件（Baro 来访、虚空裂缝、入侵、虚空风暴、Prime 重生等）。可选 type 参数过滤：void_fissure=虚空裂缝, baro_visit=虚空商人, invasion=入侵, void_storm=虚空风暴, prime_resurgence=Prime 重生",
-        "parameters": {"type": "事件类型过滤（可选）：void_fissure / baro_visit / invasion / void_storm / prime_resurgence，不传则返回全部"},
-    },
-    {
-        "name": "deep_analysis",
-        "description": "深度分析单个物品的多维度数据，使用云端大模型推理",
-        "parameters": {"item_name": "物品名称"},
-    },
-    {
-        "name": "riven_search",
-        "description": "搜索紫卡(Riven)拍卖信息。当用户提到紫卡、裂罅、Riven时使用。支持指定正属性、负属性、价格上限。",
-        "parameters": {"weapon": "武器名称", "positive": "期望正属性(如双爆)", "negative": "期望负属性(如无负)", "max_price": "最高价格"},
-    },
-]
+_DEFAULT_REGISTRY = create_default_tool_registry()
+TOOL_SCHEMAS = _DEFAULT_REGISTRY.list_tool_schemas()
+TOOLS = _DEFAULT_REGISTRY.list_tools()
+CORE_READ_ONLY_TOOLS = {"query_price", "price_trend", "query_set", "query_events", "riven_search", "relic_value", "farming_route"}
+MAX_CANDIDATE_TOOLS = 6
 
 
 @dataclass(frozen=True)
@@ -315,25 +55,15 @@ def _parse_plan(tc: ToolCall) -> ExecutionPlan | None:
     return ExecutionPlan(goal=goal, steps=steps) if steps else None
 
 
-def _format_plan_results(goal: str, results: list[tuple[PlanStep, str | None]]) -> str:
+def _format_plan_results(goal: str, results: list[tuple[PlanStep, Any]]) -> str:
     """将所有步骤结果格式化为 LLM 可推理的聚合文本。"""
-    parts = [f"## 执行计划: {goal}\n"]
-    for i, (step, result) in enumerate(results, 1):
-        parts.append(f"### 步骤 {i}: {step.purpose or step.tool}")
-        parts.append(f"工具: {step.tool}({json.dumps(step.arguments, ensure_ascii=False)})")
-        if result:
-            parts.append(f"结果:\n{result}")
-        else:
-            parts.append("结果: 执行失败或无结果")
-        parts.append("")
-    parts.append("请根据以上所有步骤的结果，综合回答用户的问题。")
-    return "\n".join(parts)
+    return format_plan_results_for_model(goal, results)
 
 
 def execute_plan(
     plan: ExecutionPlan,
-    tool_executor: Callable[[ToolCall], str | None],
-) -> list[tuple[PlanStep, str | None]]:
+    tool_executor: Callable[[ToolCall], Any],
+) -> list[tuple[PlanStep, Any]]:
     """顺序执行 plan 的每一步，收集 (step, result) 对。"""
     results = []
     for step in plan.steps:
@@ -343,13 +73,49 @@ def execute_plan(
     return results
 
 
-def build_router_prompt(message: str) -> str:
+def select_candidate_tools(message: str, max_tools: int = MAX_CANDIDATE_TOOLS) -> set[str]:
+    lowered = message.lower()
+    candidates: list[str]
+    looks_like_relic_name = bool(re.search(r"\b(lith|meso|neo|axi|requiem)\s+[a-z0-9]+\b", lowered)) or any(token in lowered for token in ("古纪", "前纪", "中纪", "后纪", "遗珍"))
+    relic_value_intent = any(token in lowered for token in ("价值", "估值", "收益", "期望", "值不值得", "值得开", "效率", "杜卡特", "杜卡德", "ducat"))
+    if any(token in lowered for token in ("紫卡", "裂罅", "riven")):
+        candidates = ["riven_search", "riven_expert"]
+    elif (looks_like_relic_name or any(token in lowered for token in ("遗物", "核桃", "开核桃"))) and relic_value_intent:
+        candidates = ["relic_value", "query_events", "event_expert"]
+    elif any(token in lowered for token in ("去哪刷", "哪里刷", "怎么刷", "刷取", "掉落", "来源", "哪个裂缝", "适合开", "开这个核桃")):
+        candidates = ["farming_route", "query_events", "relic_value", "event_expert"]
+    elif any(token in lowered for token in ("baro", "虚空商人", "奸商", "裂缝", "裂隙", "开核桃", "活动", "入侵", "虚空风暴", "重生", "返厂", "resurgence", "vault", "午夜电波", "电波", "nightwave", "仲裁", "arbitration", "突击", "sortie", "darvo", "每日特惠", "每日优惠", "扎里曼", "zariman", "赏金", "bounty", "平原", "希图斯", "金星", "火卫二", "周期")):
+        candidates = ["query_events", "event_expert"]
+    elif any(token in lowered for token in ("专家", "分析")):
+        candidates = ["market_expert", "query_price", "price_trend", "plan", "query_set", "set_profit"]
+    elif any(token in lowered for token in ("对比", "比较", "分别", "多个")):
+        candidates = ["plan", "query_price", "price_trend", "market_expert", "query_set", "set_profit"]
+    elif any(token in lowered for token in ("投资", "预算", "roi", "倒卖", "翻转", "利润", "赚", "套利")):
+        candidates = ["investment_advisor", "mod_flipper", "set_profit", "market_expert", "query_price", "price_trend"]
+    elif any(token in lowered for token in ("prime", "套装", "缺", "补齐", "拆件", "整套")):
+        candidates = ["query_set", "query_missing_parts", "set_profit", "query_price", "price_trend"]
+    elif any(token in lowered for token in ("趋势", "涨", "跌", "历史")):
+        candidates = ["price_trend", "query_price", "market_expert"]
+    elif any(token in lowered for token in ("扫", "扫描", "收藏", "关注", "提醒")):
+        candidates = ["scan_favorites", "set_alert", "query_price", "price_trend"]
+    else:
+        candidates = ["query_price", "price_trend", "query_set", "query_events", "riven_search"]
+    valid = _DEFAULT_REGISTRY.candidate_names()
+    return {name for name in candidates[:max_tools] if name in valid}
+
+
+def build_router_prompt(
+    message: str,
+    candidate_tools: set[str] | None = None,
+    budget_chars: int | None = None,
+) -> str:
+    tools = _DEFAULT_REGISTRY.list_tools(names=candidate_tools) if candidate_tools is not None else TOOLS
     tools_desc = "\n".join(
         f"- {t['name']}: {t['description']}"
         + (f" (参数: {', '.join(t['parameters'].keys())})" if t['parameters'] else "")
-        for t in TOOLS
+        for t in tools
     )
-    return (
+    prompt = (
         "你是一个工具路由器。根据用户消息，选择最合适的工具并提取参数。\n"
         "只返回一个 JSON 对象，格式: {\"tool\": \"工具名\", \"args\": {参数}}\n"
         "不要返回其他内容，不要解释。\n\n"
@@ -357,9 +123,14 @@ def build_router_prompt(message: str) -> str:
         f"用户消息: {message}\n"
         "JSON:"
     )
+    if budget_chars is not None and len(prompt) > budget_chars:
+        suffix = "\nJSON:"
+        available = max(0, budget_chars - len(suffix) - 20)
+        prompt = f"{prompt[:available]}\n[已裁剪]" + suffix
+    return prompt
 
 
-def parse_tool_call(response: str) -> ToolCall | None:
+def parse_tool_call(response: str, valid_names: set[str] | None = None) -> ToolCall | None:
     cleaned = response.strip()
     cleaned = re.sub(r"```json\s*", "", cleaned)
     cleaned = re.sub(r"```\s*$", "", cleaned)
@@ -385,8 +156,8 @@ def parse_tool_call(response: str) -> ToolCall | None:
     except json.JSONDecodeError:
         return None
     tool_name = data.get("tool", "")
-    valid_names = {t["name"] for t in TOOLS}
-    if tool_name not in valid_names:
+    allowed_names = valid_names or {t["name"] for t in TOOLS}
+    if tool_name not in allowed_names:
         return None
     # 提取参数：优先 args 字段，否则取除 tool 外的所有顶层字段
     args = data.get("args", {})
@@ -397,10 +168,11 @@ def parse_tool_call(response: str) -> ToolCall | None:
 
 def react_loop(
     message: str,
-    tool_executor: Callable[[ToolCall], str | None],
+    tool_executor: Callable[[ToolCall], Any],
     model_call: Callable[[list[dict]], str] | None = None,
     max_iterations: int = config.MAX_TOOL_ITERATIONS,
     model: str = config.REACT_MODEL,
+    candidate_tools: set[str] | None = None,
 ) -> str | None:
     """ReAct 循环：使用 Ollama 原生 tool calling 进行多步推理。
 
@@ -414,8 +186,10 @@ def react_loop(
     Returns:
         最终回答字符串，或 None 表示回退到旧路由
     """
+    selected_tools = candidate_tools or select_candidate_tools(message)
     if model_call is None:
-        model_call = _default_model_call
+        tool_schemas = _DEFAULT_REGISTRY.list_tool_schemas(names=selected_tools)
+        model_call = lambda messages: _default_model_call(messages, tool_schemas=tool_schemas)
 
     messages: list[dict[str, str]] = [
         {
@@ -431,8 +205,12 @@ def react_loop(
                 "6. 用户问投资/预算/ROI → investment_advisor\n"
                 "7. 用户问游戏活动/Baro/警报/Prime 重生 → query_events\n"
                 "   - 用户问虚空裂缝/裂隙/开核桃 → query_events(type='void_fissure')\n"
-                "   - 用户问Baro/虚空商人 → query_events(type='baro_visit')\n"
-                "   - 用户问Prime 重生/resurgence/下一期是谁 → query_events(type='prime_resurgence')\n"
+                "   - 用户问遗物/核桃价值、收益、期望、杜卡德效率或值不值得开 → relic_value\n"
+                "   - 用户问某 Prime 部件去哪刷、某遗物怎么刷、哪个裂缝适合开某核桃 → farming_route\n"
+                "   - 用户问Baro/虚空商人/奸商 → query_events(type='baro_visit')\n"
+                "   - 用户问Prime 重生/返厂/resurgence/下一期是谁 → query_events(type='prime_resurgence')\n"
+                "   - 用户问午夜电波/仲裁/突击/Darvo/每日特惠/赏金/扎里曼但数据源缺字段 → query_events 并说明暂不支持，不要编造\n"
+                "   - 用户问平原/希图斯/金星/火卫二周期 → query_events 或确定性周期状态\n"
                 "8. 用户要对比多个物品或复杂分析 → plan（分解子任务）\n"
                 "9. 用户问价格趋势/涨跌 → price_trend\n"
                 "10. 用户问紫卡/裂罅/Riven → riven_search\n"
@@ -448,7 +226,7 @@ def react_loop(
                 "## 工具结果处理\n"
                 "- 收到工具返回结果后，直接基于结果生成最终回答，不要再次调用工具\n"
                 "- 用中文组织回答，简洁明了\n"
-                "- 如果工具返回了数据列表，完整展示，不要只挑一条"
+                "- 基于工具结果保留关键事实回答；工具上下文可能已压缩，不要编造被省略的细节"
             ),
         },
         {"role": "user", "content": message},
@@ -461,9 +239,10 @@ def react_loop(
             return None
 
         # 检查是否有 tool_calls
-        tool_calls = _extract_tool_calls(response)
+        tool_calls = _extract_tool_calls(response, valid_names=selected_tools)
         if not tool_calls:
-            # 没有工具调用，视为最终回答
+            if _looks_like_tool_call_response(response):
+                return None
             return response.strip() if response.strip() else None
 
         # 检查是否有 plan 调用 — 优先处理
@@ -483,13 +262,31 @@ def react_loop(
             result = tool_executor(tc)
             messages.append({
                 "role": "tool",
-                "content": result or f"工具 {tc.name} 执行失败或无结果",
+                "content": tool_result_model_context(tc.name, result, fallback=f"工具 {tc.name} 执行失败或无结果"),
             })
 
     return None
 
 
-def _extract_tool_calls(response: str) -> list[ToolCall]:
+def _looks_like_tool_call_response(response: str) -> bool:
+    cleaned = response.strip()
+    cleaned = re.sub(r"```json\s*", "", cleaned)
+    cleaned = re.sub(r"```\s*$", "", cleaned)
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL).strip()
+    if not cleaned or not cleaned.startswith(("{", "[")):
+        return False
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return False
+    if isinstance(data, dict):
+        return "tool" in data
+    if isinstance(data, list):
+        return any(isinstance(item, dict) and "tool" in item for item in data)
+    return False
+
+
+def _extract_tool_calls(response: str, valid_names: set[str] | None = None) -> list[ToolCall]:
     """从 LLM 响应中提取工具调用（支持 JSON 和 function_call 格式）"""
     calls = []
     # 尝试解析 JSON 数组格式
@@ -505,7 +302,7 @@ def _extract_tool_calls(response: str) -> list[ToolCall]:
             arr = json.loads(cleaned)
             for item in arr:
                 if isinstance(item, dict) and "tool" in item:
-                    tc = parse_tool_call(json.dumps(item))
+                    tc = parse_tool_call(json.dumps(item), valid_names=valid_names)
                     if tc:
                         calls.append(tc)
             if calls:
@@ -514,18 +311,18 @@ def _extract_tool_calls(response: str) -> list[ToolCall]:
             pass
 
     # 尝试单个 {"tool": ..., "args": ...}
-    tc = parse_tool_call(cleaned)
+    tc = parse_tool_call(cleaned, valid_names=valid_names)
     if tc:
         calls.append(tc)
     return calls
 
 
-def _default_model_call(messages: list[dict]) -> str:
+def _default_model_call(messages: list[dict], tool_schemas: list[dict] | None = None) -> str:
     try:
         import ollama
     except ImportError as exc:
         raise RuntimeError("Ollama Python package is not installed") from exc
-    response = ollama.chat(model=config.REACT_MODEL, messages=messages, tools=TOOL_SCHEMAS)
+    response = ollama.chat(model=config.REACT_MODEL, messages=messages, tools=tool_schemas or TOOL_SCHEMAS)
     msg = response.get("message", {})
     content = msg.get("content", "")
     # Ollama 原生 tool calls — 序列化为 JSON 格式供 _extract_tool_calls 解析

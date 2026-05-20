@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Literal
@@ -13,7 +14,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Requ
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from pathlib import Path
 
 from .. import config
@@ -22,15 +23,28 @@ from ..dictionary import normalize_lookup_key, normalize_market_id
 from ..market import fetch_orders, fetch_orders_async, best_sellers, best_buyers, get_max_rank_from_orders
 from ..goals import create_goal, plan_for_goal, execute_plan, record_trade_outcome
 from ..memory import AgentMemory, PriceAlert, MEMORY_PATH
+from ..memory_recall import MemoryRecallService
 from ..monitor import PriceMonitor, AlertNotification, WatchNotification, EnrichedNotification, ProactivePush
 from ..names import display_item_name
 from ..price_history import PriceHistoryDB
 from ..trade_history import TradeHistoryDB
+from ..trading_memory import TradingMemoryDB
+from ..conversation_log import query_tool_call_history, query_tool_call_stats
 from ..formatter import build_whisper
-from ..push import WxPusher, PushConfig, should_send_daily_report, WXPUSHER_QR_API
-from ..feishu import FeishuBot, FeishuConfig
+from ..game_data import GameDataStore
+from ..push import WxPusher, PushConfig, format_trade_plan_push, should_send_daily_report, WXPUSHER_QR_API
+from ..relic_value import RelicValueReport, analyze_relic_value
+from ..farming_route import analyze_farming_route, report_to_api
+from ..feishu import FeishuBot, FeishuConfig, build_trade_plan_card_elements
+from ..events import EventTracker
 
 logger = logging.getLogger(__name__)
+_WEB_STARTED_AT = time.time()
+_RUNTIME_SENSITIVE_KEY_RE = re.compile(
+    r"(?im)\b(password|token|secret|api_key|apikey|authorization|cookie|app_secret|chat_id)\b\s*[:=]\s*([^\s\r\n,;]+)"
+)
+_RUNTIME_BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+_RUNTIME_ERROR_MAX_CHARS = 300
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -95,6 +109,7 @@ chat_agent = ChatAgent()
 monitor = PriceMonitor()
 price_db = PriceHistoryDB()
 trade_db = TradeHistoryDB()
+game_data = GameDataStore()
 ws_connections: list[WebSocket] = []
 
 # WxPusher 微信推送
@@ -253,311 +268,9 @@ def inject_custom_aliases() -> None:
 
 # ===== 杜卡特计算器 =====
 
-# 杜卡特价值映射 (Prime 部件稀有度 → 杜卡特值)
-# 基于 Warframe 游戏内实际杜卡特价值
-DUCAT_RARITY_MAP = {
-    "common": 15,      # 铜色 (Bronze)
-    "uncommon": 45,    # 银色 (Silver)
-    "rare": 100,       # 金色 (Gold)
-    "legendary": 100,  # 传说级
-}
-
-# 常见 Prime 部件的杜卡特价值（静态映射，作为备用）
-STATIC_DUCAT_VALUES = {
-    # 战甲 Prime 部件
-    "ash_prime_blueprint": 45,
-    "ash_prime_chassis": 45,
-    "ash_prime_neuroptics": 45,
-    "ash_prime_systems": 45,
-    "atlas_prime_blueprint": 45,
-    "atlas_prime_chassis": 45,
-    "atlas_prime_neuroptics": 45,
-    "atlas_prime_systems": 45,
-    "banshee_prime_blueprint": 45,
-    "banshee_prime_chassis": 45,
-    "banshee_prime_neuroptics": 45,
-    "banshee_prime_systems": 45,
-    "baruuk_prime_blueprint": 45,
-    "baruuk_prime_chassis": 45,
-    "baruuk_prime_neuroptics": 45,
-    "baruuk_prime_systems": 45,
-    "chroma_prime_blueprint": 45,
-    "chroma_prime_chassis": 45,
-    "chroma_prime_neuroptics": 45,
-    "chroma_prime_systems": 45,
-    "ember_prime_blueprint": 45,
-    "ember_prime_chassis": 45,
-    "ember_prime_neuroptics": 45,
-    "ember_prime_systems": 45,
-    "equinox_prime_blueprint": 45,
-    "equinox_prime_chassis": 45,
-    "equinox_prime_neuroptics": 45,
-    "equinox_prime_systems": 45,
-    "frost_prime_blueprint": 45,
-    "frost_prime_chassis": 45,
-    "frost_prime_neuroptics": 45,
-    "frost_prime_systems": 45,
-    "gara_prime_blueprint": 45,
-    "gara_prime_chassis": 45,
-    "gara_prime_neuroptics": 45,
-    "gara_prime_systems": 45,
-    "garuda_prime_blueprint": 45,
-    "garuda_prime_chassis": 45,
-    "garuda_prime_neuroptics": 45,
-    "garuda_prime_systems": 45,
-    "gauss_prime_blueprint": 45,
-    "gauss_prime_chassis": 45,
-    "gauss_prime_neuroptics": 45,
-    "gauss_prime_systems": 45,
-    "grendel_prime_blueprint": 45,
-    "grendel_prime_chassis": 45,
-    "grendel_prime_neuroptics": 45,
-    "grendel_prime_systems": 45,
-    "harrow_prime_blueprint": 45,
-    "harrow_prime_chassis": 45,
-    "harrow_prime_neuroptics": 45,
-    "harrow_prime_systems": 45,
-    "hildryn_prime_blueprint": 45,
-    "hildryn_prime_chassis": 45,
-    "hildryn_prime_neuroptics": 45,
-    "hildryn_prime_systems": 45,
-    "hydroid_prime_blueprint": 45,
-    "hydroid_prime_chassis": 45,
-    "hydroid_prime_neuroptics": 45,
-    "hydroid_prime_systems": 45,
-    "inaros_prime_blueprint": 45,
-    "inaros_prime_chassis": 45,
-    "inaros_prime_neuroptics": 45,
-    "inaros_prime_systems": 45,
-    "ivara_prime_blueprint": 45,
-    "ivara_prime_chassis": 45,
-    "ivara_prime_neuroptics": 45,
-    "ivara_prime_systems": 45,
-    "khora_prime_blueprint": 45,
-    "khora_prime_chassis": 45,
-    "khora_prime_neuroptics": 45,
-    "khora_prime_systems": 45,
-    "limbo_prime_blueprint": 45,
-    "limbo_prime_chassis": 45,
-    "limbo_prime_neuroptics": 45,
-    "limbo_prime_systems": 45,
-    "loki_prime_blueprint": 45,
-    "loki_prime_chassis": 45,
-    "loki_prime_neuroptics": 45,
-    "loki_prime_systems": 45,
-    "mag_prime_blueprint": 45,
-    "mag_prime_chassis": 45,
-    "mag_prime_neuroptics": 45,
-    "mag_prime_systems": 45,
-    "mesa_prime_blueprint": 45,
-    "mesa_prime_chassis": 45,
-    "mesa_prime_neuroptics": 45,
-    "mesa_prime_systems": 45,
-    "mirage_prime_blueprint": 45,
-    "mirage_prime_chassis": 45,
-    "mirage_prime_neuroptics": 45,
-    "mirage_prime_systems": 45,
-    "nekros_prime_blueprint": 45,
-    "nekros_prime_chassis": 45,
-    "nekros_prime_neuroptics": 45,
-    "nekros_prime_systems": 45,
-    "nezha_prime_blueprint": 45,
-    "nezha_prime_chassis": 45,
-    "nezha_prime_neuroptics": 45,
-    "nezha_prime_systems": 45,
-    "nidus_prime_blueprint": 45,
-    "nidus_prime_chassis": 45,
-    "nidus_prime_neuroptics": 45,
-    "nidus_prime_systems": 45,
-    "nova_prime_blueprint": 45,
-    "nova_prime_chassis": 45,
-    "nova_prime_neuroptics": 45,
-    "nova_prime_systems": 45,
-    "nyx_prime_blueprint": 45,
-    "nyx_prime_chassis": 45,
-    "nyx_prime_neuroptics": 45,
-    "nyx_prime_systems": 45,
-    "oberon_prime_blueprint": 45,
-    "oberon_prime_chassis": 45,
-    "oberon_prime_neuroptics": 45,
-    "oberon_prime_systems": 45,
-    "octavia_prime_blueprint": 45,
-    "octavia_prime_chassis": 45,
-    "octavia_prime_neuroptics": 45,
-    "octavia_prime_systems": 45,
-    "protea_prime_blueprint": 45,
-    "protea_prime_chassis": 45,
-    "protea_prime_neuroptics": 45,
-    "protea_prime_systems": 45,
-    "revenant_prime_blueprint": 45,
-    "revenant_prime_chassis": 45,
-    "revenant_prime_neuroptics": 45,
-    "revenant_prime_systems": 45,
-    "rhino_prime_blueprint": 45,
-    "rhino_prime_chassis": 45,
-    "rhino_prime_neuroptics": 45,
-    "rhino_prime_systems": 45,
-    "saryn_prime_blueprint": 45,
-    "saryn_prime_chassis": 45,
-    "saryn_prime_neuroptics": 45,
-    "saryn_prime_systems": 45,
-    "sevagoth_prime_blueprint": 45,
-    "sevagoth_prime_chassis": 45,
-    "sevagoth_prime_neuroptics": 45,
-    "sevagoth_prime_systems": 45,
-    "titania_prime_blueprint": 45,
-    "titania_prime_chassis": 45,
-    "titania_prime_neuroptics": 45,
-    "titania_prime_systems": 45,
-    "trinity_prime_blueprint": 45,
-    "trinity_prime_chassis": 45,
-    "trinity_prime_neuroptics": 45,
-    "trinity_prime_systems": 45,
-    "valkyr_prime_blueprint": 45,
-    "valkyr_prime_chassis": 45,
-    "valkyr_prime_neuroptics": 45,
-    "valkyr_prime_systems": 45,
-    "vauban_prime_blueprint": 45,
-    "vauban_prime_chassis": 45,
-    "vauban_prime_neuroptics": 45,
-    "vauban_prime_systems": 45,
-    "volt_prime_blueprint": 45,
-    "volt_prime_chassis": 45,
-    "volt_prime_neuroptics": 45,
-    "volt_prime_systems": 45,
-    "wisp_prime_blueprint": 45,
-    "wisp_prime_chassis": 45,
-    "wisp_prime_neuroptics": 45,
-    "wisp_prime_systems": 45,
-    "wukong_prime_blueprint": 45,
-    "wukong_prime_chassis": 45,
-    "wukong_prime_neuroptics": 45,
-    "wukong_prime_systems": 45,
-    "xaku_prime_blueprint": 45,
-    "xaku_prime_chassis": 45,
-    "xaku_prime_neuroptics": 45,
-    "xaku_prime_systems": 45,
-    "zephyr_prime_blueprint": 45,
-    "zephyr_prime_chassis": 45,
-    "zephyr_prime_neuroptics": 45,
-    "zephyr_prime_systems": 45,
-    # 武器 Prime 部件 (常见示例)
-    "braton_prime_blueprint": 45,
-    "braton_prime_barrel": 45,
-    "braton_prime_receiver": 45,
-    "braton_prime_stock": 45,
-    "burston_prime_blueprint": 45,
-    "burston_prime_barrel": 45,
-    "burston_prime_receiver": 45,
-    "burston_prime_stock": 45,
-    "latron_prime_blueprint": 45,
-    "latron_prime_barrel": 45,
-    "latron_prime_receiver": 45,
-    "latron_prime_stock": 45,
-    "soma_prime_blueprint": 45,
-    "soma_prime_barrel": 45,
-    "soma_prime_receiver": 45,
-    "soma_prime_stock": 45,
-    "tenora_prime_blueprint": 45,
-    "tenora_prime_barrel": 45,
-    "tenora_prime_receiver": 45,
-    "tenora_prime_stock": 45,
-    "tigris_prime_blueprint": 45,
-    "tigris_prime_barrel": 45,
-    "tigris_prime_receiver": 45,
-    "tigris_prime_stock": 45,
-    "hek_prime_blueprint": 45,
-    "hek_prime_barrel": 45,
-    "hek_prime_receiver": 45,
-    "hek_prime_stock": 45,
-    "boar_prime_blueprint": 45,
-    "boar_prime_barrel": 45,
-    "boar_prime_receiver": 45,
-    "boar_prime_stock": 45,
-    "lex_prime_blueprint": 45,
-    "lex_prime_barrel": 45,
-    "lex_prime_receiver": 45,
-    "aklex_prime_link": 45,
-    "vasto_prime_blueprint": 45,
-    "vasto_prime_barrel": 45,
-    "vasto_prime_receiver": 45,
-    "akvasto_prime_link": 45,
-    "bronco_prime_blueprint": 45,
-    "bronco_prime_barrel": 45,
-    "bronco_prime_receiver": 45,
-    "fragor_prime_blueprint": 45,
-    "fragor_prime_handle": 45,
-    "fragor_prime_head": 45,
-    "galatine_prime_blueprint": 45,
-    "galatine_prime_blade": 45,
-    "galatine_prime_handle": 45,
-    "gram_prime_blueprint": 45,
-    "gram_prime_blade": 45,
-    "gram_prime_handle": 45,
-    "nami_skyla_prime_blueprint": 45,
-    "nami_skyla_prime_blade": 45,
-    "nami_skyla_prime_handle": 45,
-    "nikana_prime_blueprint": 45,
-    "nikana_prime_blade": 45,
-    "nikana_prime_hilt": 45,
-    "orthos_prime_blueprint": 45,
-    "orthos_prime_blade": 45,
-    "orthos_prime_handle": 45,
-    "reaper_prime_blueprint": 45,
-    "reaper_prime_blade": 45,
-    "reaper_prime_handle": 45,
-    "tipedo_prime_blueprint": 45,
-    "tipedo_prime_ornament": 45,
-    "tipedo_prime_staff": 45,
-    # 赋能 (Arcane) - 100 杜卡特
-    "arcane_energize": 100,
-    "arcane_grace": 100,
-    "arcane_barrier": 100,
-    "arcane_avenger": 100,
-    "arcane_guardian": 100,
-    "arcane_velocity": 100,
-    "arcane_precision": 100,
-    "arcane_rage": 100,
-    "arcane_strike": 100,
-    "arcane_ultimatum": 100,
-    "arcane_fury": 100,
-    "arcane_acceleration": 100,
-    "arcane_arachne": 100,
-    "arcane_bodyguard": 100,
-    "arcane_consequence": 100,
-    "arcane_deflection": 100,
-    "arcane_healing": 100,
-    "arcane_ice": 100,
-    "arcane_phantasm": 100,
-    "arcane_resistance": 100,
-    "arcane_trickery": 100,
-    "arcane_victory": 100,
-}
-
-
 def get_ducat_value(item_id: str) -> int | None:
     """获取物品的杜卡特价值"""
-    # 首先检查静态映射
-    if item_id in STATIC_DUCAT_VALUES:
-        return STATIC_DUCAT_VALUES[item_id]
-
-    # 根据物品ID模式推断杜卡特价值
-    item_id_lower = item_id.lower()
-
-    # Prime 部件通常是 45 杜卡特
-    if "_prime_" in item_id_lower:
-        # 战甲 Prime 部件
-        if any(part in item_id_lower for part in ["blueprint", "chassis", "neuroptics", "systems"]):
-            return 45
-        # 武器 Prime 部件
-        if any(part in item_id_lower for part in ["barrel", "receiver", "stock", "blade", "handle", "hilt", "head", "link", "ornament", "staff"]):
-            return 45
-
-    # 赋能 (Arcane) 通常是 100 杜卡特
-    if "arcane_" in item_id_lower:
-        return 100
-
-    return None
+    return game_data.get_ducat_value(item_id)
 
 
 def calculate_ducat_efficiency(platinum_price: int | None, ducat_value: int | None) -> dict | None:
@@ -606,6 +319,21 @@ class ApiRequestModel(BaseModel):
         return text
 
 
+class ItemListRequest(ApiRequestModel):
+    items: list[str] = Field(min_length=1, max_length=10)
+
+    @field_validator("items", mode="before")
+    @classmethod
+    def normalize_items(cls, value):
+        cleaned = []
+        for item in value:
+            text = cls._strip_text(str(item), "item")
+            if len(text) > 120:
+                raise ValueError("item 过长")
+            cleaned.append(text)
+        return cleaned
+
+
 class ChatRequest(ApiRequestModel):
     message: str = Field(min_length=1, max_length=2000)
 
@@ -617,6 +345,144 @@ class ChatRequest(ApiRequestModel):
 
 class ChatResponse(BaseModel):
     reply: str
+
+
+def _masked_secret(value: str) -> str:
+    if not value:
+        return ""
+    return value[:5] + "***" + value[-4:] if len(value) > 9 else "***"
+
+
+def _runtime_redact_text(value: Any, max_chars: int = _RUNTIME_ERROR_MAX_CHARS) -> str:
+    text = _RUNTIME_BEARER_RE.sub("[REDACTED]", str(value or ""))
+    text = _RUNTIME_SENSITIVE_KEY_RE.sub("[REDACTED]", text)
+    if len(text) > max_chars:
+        return f"{text[:max_chars]}... [len={len(text)}]"
+    return text
+
+
+def _safe_feishu_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "enabled",
+        "configured",
+        "available",
+        "managed_pid",
+        "managed_running",
+        "exit_code",
+        "lock_file_exists",
+        "lock_pid",
+        "log_file_exists",
+        "log_size_bytes",
+        "log_modified_at",
+    }
+    return {key: snapshot.get(key) for key in allowed if key in snapshot}
+
+
+def _wxpusher_status_snapshot() -> dict[str, Any]:
+    cfg = getattr(push_client, "config", None)
+    enabled = bool(getattr(cfg, "enabled", False))
+    configured = bool(getattr(cfg, "app_token", "") and getattr(cfg, "uids", []))
+    return {
+        "enabled": enabled,
+        "configured": configured,
+        "available": bool(getattr(push_client, "available", False)),
+        "push_alerts": bool(getattr(cfg, "push_alerts", False)),
+        "push_watches": bool(getattr(cfg, "push_watches", False)),
+        "push_proactive": bool(getattr(cfg, "push_proactive", False)),
+        "push_daily_report": bool(getattr(cfg, "push_daily_report", False)),
+        "uid_count": len(getattr(cfg, "uids", []) or []),
+    }
+
+
+def _safe_runtime_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _runtime_redact_text(value, max_chars=160)
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, list):
+        return [_safe_runtime_value(item) for item in value[:5]]
+    if isinstance(value, dict):
+        safe = {}
+        for key, item in list(value.items())[:12]:
+            key_text = str(key)
+            if _RUNTIME_SENSITIVE_KEY_RE.search(f"{key_text}=x"):
+                continue
+            safe[key_text] = _safe_runtime_value(item)
+        return safe
+    return _runtime_redact_text(repr(value), max_chars=120)
+
+
+def _safe_tool_call_record(record: dict[str, Any]) -> dict[str, Any]:
+    safe_record = {
+        "tool_name": _runtime_redact_text(record.get("tool_name"), max_chars=80),
+        "tool_timestamp": _runtime_redact_text(record.get("tool_timestamp"), max_chars=80),
+        "conversation_timestamp": _runtime_redact_text(record.get("conversation_timestamp"), max_chars=80),
+        "ok": record.get("ok"),
+        "duration_ms": record.get("duration_ms"),
+        "args_summary": _safe_runtime_value(record.get("args_summary")),
+        "contexts": _safe_runtime_value(record.get("contexts")),
+    }
+    error = record.get("error")
+    if error:
+        safe_record["error_summary"] = _runtime_redact_text(error)
+    return safe_record
+
+
+def _recent_tool_calls_status_snapshot(limit: int = 10) -> dict[str, Any]:
+    try:
+        records = query_tool_call_history(limit=limit)
+    except Exception as exc:
+        return {"count": 0, "items": [], "error_summary": _runtime_redact_text(exc)}
+    items = [_safe_tool_call_record(record) for record in records]
+    return {"count": len(items), "items": items}
+
+
+def _background_tasks_status_snapshot() -> dict[str, Any]:
+    _evict_old_bg_tasks()
+    tasks = []
+    for task_id, task in sorted(_bg_tasks.items()):
+        safe_task = {
+            "task_id": task_id,
+            "status": task.get("status", "unknown"),
+            "created_at": task.get("created_at"),
+            "age_seconds": max(0, int(_time.time() - task.get("created_at", _time.time()))),
+        }
+        if "goal_id" in task:
+            safe_task["goal_id"] = task.get("goal_id")
+        result = task.get("result")
+        if isinstance(result, dict):
+            if "total" in result:
+                safe_task["result_total"] = result.get("total")
+            if "results" in result and isinstance(result.get("results"), list):
+                safe_task["result_count"] = len(result.get("results") or [])
+        if task.get("status") == "error":
+            safe_task["error_summary"] = _runtime_redact_text(task.get("error"))
+        tasks.append(safe_task)
+    return {
+        "total": len(tasks),
+        "running": sum(1 for task in tasks if task.get("status") == "running"),
+        "error": sum(1 for task in tasks if task.get("status") == "error"),
+        "done": sum(1 for task in tasks if task.get("status") == "done"),
+        "tasks": tasks,
+    }
+
+
+def _validation_error_message(exc: ValidationError) -> str:
+    errors = exc.errors()
+    if not errors:
+        return "请求格式无效"
+    return str(errors[0].get("msg") or "请求格式无效")
+
+
+def _parse_chat_request_payload(payload: Any) -> tuple[ChatRequest | None, str | None]:
+    if not isinstance(payload, dict):
+        return None, "请求必须是 JSON object"
+    try:
+        return ChatRequest.model_validate(payload), None
+    except ValidationError as exc:
+        return None, _validation_error_message(exc)
 
 
 class MemoryResponse(BaseModel):
@@ -778,11 +644,18 @@ class PushConfigRequest(ApiRequestModel):
 @app.get("/api/push/config")
 async def get_push_config() -> JSONResponse:
     cfg = PushConfig.load()
-    data = cfg.__dict__.copy()
-    # 隐藏 token 中间部分
-    if data.get("app_token"):
-        t = data["app_token"]
-        data["app_token_masked"] = t[:5] + "***" + t[-4:] if len(t) > 9 else "***"
+    app_token = getattr(cfg, "app_token", "") or ""
+    data = {
+        "enabled": bool(getattr(cfg, "enabled", False)),
+        "uids": list(getattr(cfg, "uids", []) or []),
+        "push_alerts": bool(getattr(cfg, "push_alerts", True)),
+        "push_watches": bool(getattr(cfg, "push_watches", True)),
+        "push_proactive": bool(getattr(cfg, "push_proactive", True)),
+        "push_daily_report": bool(getattr(cfg, "push_daily_report", True)),
+        "report_time": getattr(cfg, "report_time", "09:00") or "09:00",
+        "app_token_configured": bool(app_token),
+        "app_token_masked": _masked_secret(app_token),
+    }
     return JSONResponse(data)
 
 
@@ -879,9 +752,13 @@ class FeishuConfigRequest(ApiRequestModel):
 @app.get("/api/feishu/config")
 async def get_feishu_config() -> JSONResponse:
     cfg = FeishuConfig.load()
-    data = cfg.__dict__.copy()
-    if data.get("app_secret"):
-        data["app_secret_masked"] = "***" + data["app_secret"][-4:] if len(data["app_secret"]) > 4 else "***"
+    app_secret = getattr(cfg, "app_secret", "") or ""
+    data = {
+        "enabled": bool(getattr(cfg, "enabled", False)),
+        "app_id": getattr(cfg, "app_id", "") or "",
+        "app_secret_configured": bool(app_secret),
+        "app_secret_masked": _masked_secret(app_secret),
+    }
     return JSONResponse(data)
 
 
@@ -1421,7 +1298,7 @@ async def get_ducats(item_id: str) -> JSONResponse:
         return JSONResponse({
             "item_id": item_id,
             "has_ducat": False,
-            "message": "该物品无杜卡特价值"
+            "message": "暂无可靠杜卡特数据，建议以 Warframe.market 白金价格为准"
         })
 
     # 获取当前市场价格
@@ -1459,28 +1336,34 @@ async def get_ducats_batch(request: ItemListRequest) -> JSONResponse:
     results = []
     for item_id in request.items[:10]:  # 限制最多10个
         ducat_value = get_ducat_value(item_id)
-        if ducat_value is not None:
-            try:
-                orders = await fetch_orders_async(item_id)
-                rank_filter = get_max_rank_from_orders(orders)
-                sellers = best_sellers(orders, limit=1, rank_filter=rank_filter)
-                sell_price = sellers[0].platinum if sellers else None
-            except Exception:
-                sell_price = None
+        result = {
+            "item_id": item_id,
+            "display": display_item_name(item_id),
+            "has_ducat": ducat_value is not None,
+        }
 
-            result = {
-                "item_id": item_id,
-                "display": display_item_name(item_id),
-                "ducat_value": ducat_value,
-                "sell_price": sell_price,
-            }
-
-            if sell_price and sell_price > 0:
-                efficiency = calculate_ducat_efficiency(sell_price, ducat_value)
-                if efficiency:
-                    result["efficiency"] = efficiency
-
+        if ducat_value is None:
+            result["message"] = "暂无可靠杜卡特数据，建议以 Warframe.market 白金价格为准"
             results.append(result)
+            continue
+
+        try:
+            orders = await fetch_orders_async(item_id)
+            rank_filter = get_max_rank_from_orders(orders)
+            sellers = best_sellers(orders, limit=1, rank_filter=rank_filter)
+            sell_price = sellers[0].platinum if sellers else None
+        except Exception:
+            sell_price = None
+
+        result["ducat_value"] = ducat_value
+        result["sell_price"] = sell_price
+
+        if sell_price and sell_price > 0:
+            efficiency = calculate_ducat_efficiency(sell_price, ducat_value)
+            if efficiency:
+                result["efficiency"] = efficiency
+
+        results.append(result)
 
     return JSONResponse({"items": results})
 
@@ -1582,6 +1465,183 @@ async def get_trades_by_item(item_id: str, limit: int = Query(10, ge=1, le=100))
             for t in trades
         ]
     })
+
+
+# ===== 长期交易记忆只读 API =====
+
+
+def _query_trading_memory(method_name: str, **kwargs):
+    db = TradingMemoryDB.open_readonly_if_exists()
+    if db is None:
+        return []
+    try:
+        method = getattr(db, method_name)
+        return method(**kwargs)
+    finally:
+        db.close()
+
+
+def _query_memory_recall(query: str, item_name: str = "", intent: str = "", tool_names: list[str] | None = None, limit: int = 5) -> dict[str, Any]:
+    db = TradingMemoryDB.open_readonly_if_exists()
+    if db is None:
+        return {"query_summary": {"item_name": "", "intent": "", "tool_names": []}, "items": [], "count": 0, "score_breakdown": {"count": 0, "max_score": 0.0}}
+    try:
+        result = MemoryRecallService(db).recall(query, item_name=item_name, intent=intent, tool_names=tool_names or [], limit=limit)
+        items = [
+            {
+                "source": item.source,
+                "record_id": item.record_id,
+                "timestamp": item.timestamp,
+                "item_name": item.item_name,
+                "score": item.score,
+                "relevance": item.relevance,
+                "recency": item.recency,
+                "salience": item.salience,
+                "summary": item.summary,
+                "trace": item.trace,
+            }
+            for item in result.items
+        ]
+        return {
+            "query_summary": result.query_summary,
+            "items": items,
+            "count": len(items),
+            "score_breakdown": result.score_breakdown,
+        }
+    finally:
+        db.close()
+
+
+def _serialize_market_snapshot_memory(record) -> dict[str, Any]:
+    payload = record.payload or {}
+    return {
+        "id": record.id,
+        "timestamp": record.timestamp,
+        "item_name": record.item_name,
+        "source": record.source,
+        "item_id": payload.get("item_id"),
+        "sell_price": payload.get("sell_price"),
+        "buy_price": payload.get("buy_price"),
+        "spread": payload.get("spread"),
+    }
+
+
+def _serialize_recommendation_memory(record) -> dict[str, Any]:
+    payload = record.payload or {}
+    return {
+        "id": record.id,
+        "timestamp": record.timestamp,
+        "item_name": record.item_name,
+        "recommendation_type": record.recommendation_type,
+        "reason": record.reason,
+        "source": payload.get("source"),
+        "event_type": payload.get("event_type"),
+        "event_description": payload.get("event_description"),
+        "baro_start_time": payload.get("baro_start_time"),
+        "baro_end_time": payload.get("baro_end_time"),
+        "market_id": payload.get("market_id"),
+        "display_name": payload.get("item_name"),
+        "ducat_cost": payload.get("ducat_cost"),
+        "credit_cost": payload.get("credit_cost"),
+        "rank": payload.get("rank"),
+        "max_rank": payload.get("max_rank"),
+        "item_kind": payload.get("item_kind"),
+        "best_buy_price": payload.get("best_buy_price"),
+        "best_sell_price": payload.get("best_sell_price"),
+    }
+
+
+def _serialize_push_history_memory(record) -> dict[str, Any]:
+    metadata = record.metadata or {}
+    items_affected = metadata.get("items_affected")
+    if not isinstance(items_affected, list):
+        items_affected = []
+    return {
+        "id": record.id,
+        "timestamp": record.timestamp,
+        "push_type": record.push_type,
+        "item_name": record.item_name,
+        "message": record.message,
+        "source": metadata.get("source"),
+        "item_id": metadata.get("item_id"),
+        "item_display": metadata.get("item_display"),
+        "priority": metadata.get("priority"),
+        "action_suggestion": metadata.get("action_suggestion"),
+        "suggestion_type": metadata.get("suggestion_type"),
+        "event_type": metadata.get("event_type"),
+        "event_description": metadata.get("event_description"),
+        "items_affected": [item for item in items_affected if isinstance(item, str)],
+    }
+
+
+@app.get("/api/memory/recall")
+async def get_memory_recall(
+    query: str = Query("", max_length=500),
+    item_name: str = Query("", max_length=120),
+    intent: str = Query("", max_length=120),
+    tool_names: str = Query("", max_length=500),
+    limit: int = Query(5, ge=1, le=20),
+) -> JSONResponse:
+    tools = [name.strip() for name in tool_names.split(",") if name.strip()]
+    result = await asyncio.to_thread(_query_memory_recall, query, item_name, intent, tools, limit)
+    return JSONResponse(result)
+
+
+@app.get("/api/trading-memory/market-snapshots")
+async def get_trading_memory_market_snapshots(
+    item_name: str | None = None,
+    source: str | None = None,
+    since: str | None = None,
+    limit: int = Query(100, ge=1, le=500),
+) -> JSONResponse:
+    records = await asyncio.to_thread(
+        _query_trading_memory,
+        "get_market_snapshots",
+        item_name=item_name,
+        source=source,
+        since=since,
+        limit=limit,
+    )
+    snapshots = [_serialize_market_snapshot_memory(record) for record in records]
+    return JSONResponse({"market_snapshots": snapshots, "count": len(snapshots)})
+
+
+@app.get("/api/trading-memory/recommendations")
+async def get_trading_memory_recommendations(
+    item_name: str | None = None,
+    recommendation_type: str | None = None,
+    since: str | None = None,
+    limit: int = Query(100, ge=1, le=500),
+) -> JSONResponse:
+    records = await asyncio.to_thread(
+        _query_trading_memory,
+        "get_recommendations",
+        item_name=item_name,
+        recommendation_type=recommendation_type,
+        since=since,
+        limit=limit,
+    )
+    recommendations = [_serialize_recommendation_memory(record) for record in records]
+    return JSONResponse({"recommendations": recommendations, "count": len(recommendations)})
+
+
+@app.get("/api/trading-memory/push-history")
+async def get_trading_memory_push_history(
+    item_name: str | None = None,
+    push_type: str | None = None,
+    since: str | None = None,
+    limit: int = Query(100, ge=1, le=500),
+) -> JSONResponse:
+    records = await asyncio.to_thread(
+        _query_trading_memory,
+        "get_push_history",
+        item_name=item_name,
+        push_type=push_type,
+        since=since,
+        limit=limit,
+    )
+    pushes = [_serialize_push_history_memory(record) for record in records]
+    return JSONResponse({"push_history": pushes, "count": len(pushes)})
 
 
 # ===== 套利检测 API =====
@@ -1688,6 +1748,10 @@ async def mod_flipper_endpoint(
                     "endo_cost": r.endo_cost, "plat_per_1k_endo": round(r.plat_per_1k_endo, 2),
                     "value_score": round(r.value_score, 2), "volume_48h": r.volume_48h,
                     "max_rank": r.max_rank, "rarity": r.rarity, "is_prime": r.is_prime,
+                    "market_url": r.market_url, "r0_seller": r.r0_seller,
+                    "max_rank_buyer": r.max_rank_buyer,
+                    "required_quantity": r.required_quantity,
+                    "trade_plan": r.trade_plan,
                 }
                 for r in results
             ]
@@ -1737,6 +1801,15 @@ async def set_profit_endpoint(
                     "profit_buy_set_sell_parts": r.profit_buy_set_sell_parts,
                     "best_strategy": r.best_strategy, "best_profit": r.best_profit,
                     "volume_48h": r.volume_48h, "part_count": r.part_count,
+                    "best_cost": r.best_cost, "best_revenue": r.best_revenue,
+                    "roi_pct": r.roi_pct, "liquidity_score": r.liquidity_score,
+                    "risk_level": r.risk_level, "risk_score": r.risk_score,
+                    "opportunity_score": r.opportunity_score,
+                    "supply_count": r.supply_count, "demand_count": r.demand_count,
+                    "set_item_id": r.set_item_id, "market_url": r.market_url,
+                    "part_details": r.part_details or [], "set_seller": r.set_seller,
+                    "set_buyer": r.set_buyer,
+                    "trade_plan": r.trade_plan,
                 }
                 for r in results
             ]
@@ -1787,6 +1860,7 @@ async def investment_endpoint(
                     "total_profit": r.total_profit, "volume_48h": r.volume_48h,
                     "risk_level": r.risk_level, "part_details": r.part_details,
                     "set_item_id": r.set_item_id,
+                    "trade_plan": r.trade_plan,
                 }
                 for r in results
             ]
@@ -1813,6 +1887,77 @@ async def scan_status(task_id: str) -> JSONResponse:
     elif task["status"] == "error":
         resp["error"] = task["error"]
     return JSONResponse(resp)
+
+
+@app.get("/api/scheduler/status")
+async def scheduler_status() -> JSONResponse:
+    return JSONResponse(monitor.scheduler_status_snapshot())
+
+
+@app.get("/api/tool-calls/history")
+async def tool_call_history(
+    tool_name: str | None = Query(None, max_length=80),
+    ok: bool | None = None,
+    session_id: str | None = Query(None, max_length=120),
+    limit: int = Query(50, ge=1, le=500),
+) -> JSONResponse:
+    try:
+        records = await asyncio.to_thread(query_tool_call_history, limit=limit, tool_name=tool_name, ok=ok, session_id=session_id)
+        items = [_safe_tool_call_record(record) for record in records]
+        return JSONResponse({"items": items, "count": len(items)})
+    except Exception as exc:
+        return JSONResponse({"items": [], "count": 0, "error_summary": _runtime_redact_text(exc)}, status_code=200)
+
+
+@app.get("/api/tool-calls/stats")
+async def tool_call_stats(
+    tool_name: str | None = Query(None, max_length=80),
+    session_id: str | None = Query(None, max_length=120),
+    limit: int = Query(500, ge=1, le=2000),
+) -> JSONResponse:
+    try:
+        stats = await asyncio.to_thread(query_tool_call_stats, limit=limit, tool_name=tool_name, session_id=session_id)
+        return JSONResponse(stats)
+    except Exception as exc:
+        return JSONResponse({"total_calls": 0, "success_count": 0, "failure_count": 0, "unknown_count": 0, "success_rate": 0.0, "duration_ms": {"count": 0, "avg": None, "min": None, "max": None}, "by_tool": {}, "top_tools": [], "error_summary": _runtime_redact_text(exc)}, status_code=200)
+
+
+@app.get("/api/runtime/status")
+async def runtime_status() -> JSONResponse:
+    try:
+        scheduler_snapshot = monitor.scheduler_status_snapshot()
+        feishu_snapshot = _safe_feishu_snapshot(feishu_bot.status_snapshot())
+        daily_report_snapshot = monitor.daily_report_status_snapshot()
+        wxpusher_snapshot = _wxpusher_status_snapshot()
+        background_tasks_snapshot = _background_tasks_status_snapshot()
+        recent_tool_calls_snapshot = _recent_tool_calls_status_snapshot()
+        status = "ok"
+        if not scheduler_snapshot.get("running"):
+            status = "degraded"
+        if (
+            feishu_snapshot.get("enabled")
+            and feishu_snapshot.get("configured")
+            and not feishu_snapshot.get("managed_running")
+        ):
+            status = "degraded"
+        if background_tasks_snapshot.get("error"):
+            status = "degraded"
+        return JSONResponse({
+            "status": status,
+            "web": {
+                "started_at": _WEB_STARTED_AT,
+                "uptime_seconds": max(0, int(time.time() - _WEB_STARTED_AT)),
+            },
+            "feishu": feishu_snapshot,
+            "wxpusher": wxpusher_snapshot,
+            "scheduler": scheduler_snapshot,
+            "daily_report": daily_report_snapshot,
+            "background_tasks": background_tasks_snapshot,
+            "recent_tool_calls": recent_tool_calls_snapshot,
+        })
+    except Exception as exc:
+        logger.warning("运行态状态查询失败: %s", exc)
+        return JSONResponse({"status": "error", "error": "runtime status unavailable"}, status_code=200)
 
 
 # ===== 目标引擎 API =====
@@ -2115,21 +2260,6 @@ class ProfitCalcRequest(ApiRequestModel):
     @classmethod
     def validate_item_id(cls, value: str) -> str:
         return cls._normalize_item_id(value)
-
-
-class ItemListRequest(ApiRequestModel):
-    items: list[str] = Field(min_length=1, max_length=10)
-
-    @field_validator("items", mode="before")
-    @classmethod
-    def normalize_items(cls, value):
-        cleaned = []
-        for item in value:
-            text = cls._strip_text(str(item), "item")
-            if len(text) > 120:
-                raise ValueError("item 过长")
-            cleaned.append(text)
-        return cleaned
 
 
 class AliasRequest(ApiRequestModel):
@@ -2441,7 +2571,18 @@ async def websocket_chat(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            message = json.loads(data).get("message", "")
+            try:
+                payload = json.loads(data)
+            except json.JSONDecodeError:
+                await websocket.send_json({"status": "error", "message": "请求必须是有效 JSON"})
+                continue
+
+            request, validation_error = _parse_chat_request_payload(payload)
+            if request is None:
+                await websocket.send_json({"status": "error", "message": validation_error or "message 无效"})
+                continue
+
+            message = request.message
             await websocket.send_json({"status": "processing"})
             # 真正的流式输出：逐 token 从 LLM 获取
             full_reply = []
@@ -2560,6 +2701,13 @@ async def broadcast_goal_opportunity(opportunity: dict):
 
 
 async def broadcast_proactive_push(push: ProactivePush):
+    current_push_config = PushConfig.load()
+    if push.push_type == "opportunity" and not current_push_config.push_proactive:
+        return
+    raw_data = push.data if isinstance(push.data, dict) else {}
+    trade_plan = raw_data.get("trade_plan")
+    safe_summary = trade_plan.get("safe_summary") if isinstance(trade_plan, dict) else None
+    payload_data = {key: value for key, value in raw_data.items() if key != "trade_plan"}
     message = {
         "type": "proactive_push",
         "item_id": push.item_id,
@@ -2568,20 +2716,47 @@ async def broadcast_proactive_push(push: ProactivePush):
         "priority": push.priority,
         "message": push.message,
         "action_suggestion": push.action_suggestion,
-        "data": push.data,
+        "data": payload_data,
+        "trade_plan": trade_plan,
+        "safe_summary": safe_summary,
     }
-    for ws in list(ws_connections):
+    websocket_tasks = [ws.send_json(message) for ws in list(ws_connections)]
+    if websocket_tasks:
+        await asyncio.gather(*websocket_tasks, return_exceptions=True)
+    delivery_tasks = []
+    if push_client.available and current_push_config.push_proactive and push.priority <= 2:
+        if isinstance(trade_plan, dict):
+            delivery_tasks.append(asyncio.to_thread(
+                push_client.send_markdown,
+                f"交易机会: {push.item_display}",
+                format_trade_plan_push(trade_plan),
+            ))
+        else:
+            delivery_tasks.append(asyncio.to_thread(
+                push_client.send_text,
+                f"交易机会: {push.item_display}",
+                f"{push.message}\n建议: {push.action_suggestion}",
+            ))
+    if push.push_type == "opportunity" and isinstance(trade_plan, dict) and feishu_bot.available:
         try:
-            await ws.send_json(message)
-        except Exception:
-            pass
-    # 微信推送（仅高优先级）
-    if push_client.available and push_config.push_proactive and push.priority <= 2:
-        await asyncio.to_thread(
-            push_client.send_text,
-            f"交易机会: {push.item_display}",
-            f"{push.message}\n建议: {push.action_suggestion}",
-        )
+            feishu_cfg = FeishuConfig.load()
+            chat_id_path = config.DATA_DIR / "feishu_chat_id.txt"
+            if feishu_cfg.enabled and chat_id_path.exists():
+                chat_id = chat_id_path.read_text(encoding="utf-8").strip()
+                if chat_id:
+                    delivery_tasks.append(asyncio.to_thread(
+                        feishu_bot.send_card,
+                        chat_id,
+                        f"交易机会: {push.item_display}",
+                        build_trade_plan_card_elements(trade_plan),
+                    ))
+        except Exception as exc:
+            logger.debug("飞书交易机会推送失败: %s", exc)
+    if delivery_tasks:
+        results = await asyncio.gather(*delivery_tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                logger.debug("主动推送发送失败: %s", result)
 
 
 async def broadcast_fissure_alert(msg: str):
@@ -2745,6 +2920,7 @@ def setup_monitor():
         on_cycle=on_cycle_callback,
         on_baro_recommendation=on_baro_recommendation_callback,
         knowledge=knowledge,
+        trading_memory_db=TradingMemoryDB(),
     )
     monitor.start()
 
@@ -3091,6 +3267,77 @@ async def get_relic_sources(relic_name: str):
         "sources": sources[:30],  # 最多返回30个来源
         "total": len(sources),
     })
+
+
+@app.get("/api/relic/value/{tier}/{relic_name}")
+async def get_relic_value(tier: str, relic_name: str):
+    """获取指定遗物的市场价值、杜卡德效率和期望收益。"""
+    from ..relics import get_relic_db
+
+    tier_name = tier.capitalize()
+    query = f"{tier_name} {relic_name}".strip()
+    db = get_relic_db()
+    await asyncio.to_thread(db.load, _load_items_full())
+    info = db.find_by_relic(query)
+    if not info:
+        return JSONResponse({"error": "遗物不存在", "relicName": relic_name, "tier": tier_name}, status_code=404)
+    report = await asyncio.to_thread(analyze_relic_value, info, fetch_orders, game_data)
+    return JSONResponse(_relic_value_report_to_api(report, relic_name=relic_name, tier=tier_name))
+
+
+def _relic_value_report_to_api(report: RelicValueReport, relic_name: str | None = None, tier: str | None = None) -> dict:
+    rewards = []
+    for reward in report.reward_values:
+        rewards.append({
+            "itemName": reward.part_name,
+            "marketId": reward.market_id,
+            "rarity": reward.rarity,
+            "dropRate": reward.drop_rate,
+            "lowestSellPrice": reward.lowest_sell_price,
+            "highestBuyPrice": reward.highest_buy_price,
+            "valuationPrice": reward.valuation_price,
+            "valuationSource": reward.valuation_source,
+            "ducatValue": reward.ducat_value,
+            "ducatsPerPlat": reward.ducats_per_plat,
+            "expectedPlatinum": reward.expected_platinum,
+            "expectedDucats": reward.expected_ducats,
+            "recommendation": reward.recommendation,
+            "warnings": reward.data_warnings,
+        })
+    return {
+        "tier": tier or report.tier,
+        "relicName": relic_name or report.relic_name,
+        "displayName": report.relic_name,
+        "vaultStatus": "vaulted" if report.is_vaulted else "available",
+        "expectedPlatinum": report.expected_platinum,
+        "expectedDucats": report.expected_ducats,
+        "summaryRecommendation": report.summary_recommendation,
+        "topPlatinumReward": report.top_platinum_reward.market_id if report.top_platinum_reward else None,
+        "topDucatEfficiencyReward": report.top_ducat_efficiency_reward.market_id if report.top_ducat_efficiency_reward else None,
+        "rewards": rewards,
+    }
+
+
+@app.get("/api/farming-route")
+async def get_farming_route(target: str = Query(min_length=1, max_length=120)) -> JSONResponse:
+    """获取 Prime 部件或遗物的刷取路线推荐。"""
+    from ..relics import get_relic_db
+
+    db = get_relic_db()
+    await asyncio.to_thread(db.load, _load_items_full())
+    try:
+        fissures = await asyncio.to_thread(EventTracker().get_active_fissures)
+    except Exception:
+        fissures = []
+    report = await asyncio.to_thread(
+        analyze_farming_route,
+        target,
+        db,
+        game_data,
+        fissures,
+        fetch_orders,
+    )
+    return JSONResponse(report_to_api(report))
 
 
 @app.get("/api/relic/drops/{tier}/{relic_name}")

@@ -10,6 +10,11 @@ ITEMS = [
     {"item_id": "volt_prime_chassis_blueprint", "zh_name": "Volt Prime 机体 蓝图", "en_name": "Volt Prime Chassis Blueprint", "tags": ["component", "prime", "warframe", "blueprint"]},
     {"item_id": "volt_prime_neuroptics_blueprint", "zh_name": "Volt Prime 头部神经光元 蓝图", "en_name": "Volt Prime Neuroptics Blueprint", "tags": ["component", "prime", "warframe", "blueprint"]},
     {"item_id": "volt_prime_systems_blueprint", "zh_name": "Volt Prime 系统 蓝图", "en_name": "Volt Prime Systems Blueprint", "tags": ["component", "prime", "warframe", "blueprint"]},
+    {"item_id": "gauss_prime_set", "zh_name": "高斯 Prime 一套", "en_name": "Gauss Prime Set", "tags": ["set", "prime", "warframe"]},
+    {"item_id": "gauss_prime_blueprint", "zh_name": "高斯 Prime 蓝图", "en_name": "Gauss Prime Blueprint", "tags": ["blueprint", "prime", "warframe"]},
+    {"item_id": "gauss_prime_chassis_blueprint", "zh_name": "高斯 Prime 机体 蓝图", "en_name": "Gauss Prime Chassis Blueprint", "tags": ["component", "prime", "warframe", "blueprint"]},
+    {"item_id": "gauss_prime_neuroptics_blueprint", "zh_name": "高斯 Prime 头部神经光元 蓝图", "en_name": "Gauss Prime Neuroptics Blueprint", "tags": ["component", "prime", "warframe", "blueprint"]},
+    {"item_id": "gauss_prime_systems_blueprint", "zh_name": "高斯 Prime 系统 蓝图", "en_name": "Gauss Prime Systems Blueprint", "tags": ["component", "prime", "warframe", "blueprint"]},
 ]
 
 
@@ -45,6 +50,21 @@ class WarframeSetTests(unittest.TestCase):
         self.assertEqual(query.query_type, "set")
         self.assertEqual(query.item_ids()[0], "volt_prime_set")
         self.assertIn("volt_prime_systems_blueprint", query.item_ids())
+
+    def test_parse_gauss_chinese_prime_set_query(self):
+        query = parse_warframe_query("高斯 prime 多少钱", ITEMS)
+
+        self.assertIsNotNone(query)
+        self.assertEqual(query.base_id, "gauss_prime")
+        self.assertEqual(query.query_type, "set")
+        self.assertEqual(query.item_ids()[0], "gauss_prime_set")
+
+    def test_parse_gauss_english_prime_set_query(self):
+        query = parse_warframe_query("Gauss Prime price", ITEMS)
+
+        self.assertIsNotNone(query)
+        self.assertEqual(query.base_id, "gauss_prime")
+        self.assertEqual(query.item_ids()[0], "gauss_prime_set")
 
     def test_price_set_compares_direct_set_and_parts_totals(self):
         text = price_warframe_query("伏特p一套现在多少钱", ITEMS, orders_for)

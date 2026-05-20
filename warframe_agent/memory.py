@@ -21,6 +21,14 @@ _CATEGORY_KEYWORDS = {
 }
 
 
+OPPORTUNITY_FILTERS = {"all", "mod", "arcane"}
+
+
+def normalize_opportunity_filter(value: str | None) -> str:
+    normalized = (value or "all").strip().lower()
+    return normalized if normalized in OPPORTUNITY_FILTERS else "all"
+
+
 @dataclass(frozen=True)
 class ProactiveSuggestion:
     item_id: str
@@ -28,6 +36,20 @@ class ProactiveSuggestion:
     priority: int  # 1=critical, 2=important, 3=info
     message: str
     timestamp: str = ""
+    data: dict = field(default_factory=dict)
+
+
+def _suggestion_identity(suggestion: ProactiveSuggestion) -> tuple:
+    data = suggestion.data or {}
+    dedupe_key = data.get("dedupe_key")
+    if dedupe_key:
+        return ("dedupe", dedupe_key)
+    return (
+        suggestion.item_id,
+        suggestion.suggestion_type,
+        data.get("source", ""),
+        data.get("strategy", ""),
+    )
 
 
 @dataclass(frozen=True)
@@ -79,6 +101,10 @@ class TradingPreferences:
     platform: str = "pc"
     crossplay: bool = True
     max_results: int = 5
+    opportunity_filter: str = "all"
+
+    def __post_init__(self):
+        object.__setattr__(self, "opportunity_filter", normalize_opportunity_filter(self.opportunity_filter))
 
 
 @dataclass(frozen=True)
@@ -204,6 +230,7 @@ class AgentMemory:
                 "platform": self.preferences.platform,
                 "crossplay": self.preferences.crossplay,
                 "max_results": self.preferences.max_results,
+                "opportunity_filter": self.preferences.opportunity_filter,
             },
             "price_alerts": [
                 {
@@ -242,6 +269,7 @@ class AgentMemory:
                     "priority": s.priority,
                     "message": s.message,
                     "timestamp": s.timestamp,
+                    "data": s.data,
                 }
                 for s in self.recent_suggestions
             ]
@@ -307,7 +335,9 @@ class AgentMemory:
         return replace(self, user_profile=profile)
 
     def with_suggestion(self, suggestion: ProactiveSuggestion, limit: int = 20) -> "AgentMemory":
-        suggestions = [*self.recent_suggestions, suggestion]
+        key = _suggestion_identity(suggestion)
+        suggestions = [s for s in self.recent_suggestions if _suggestion_identity(s) != key]
+        suggestions.append(suggestion)
         return replace(self, recent_suggestions=suggestions[-limit:])
 
     def with_updated_preferences(
@@ -316,6 +346,7 @@ class AgentMemory:
         platform: str | None = None,
         crossplay: bool | None = None,
         max_results: int | None = None,
+        opportunity_filter: str | None = None,
     ) -> "AgentMemory":
         return replace(
             self,
@@ -323,6 +354,7 @@ class AgentMemory:
                 platform=self.preferences.platform if platform is None else platform,
                 crossplay=self.preferences.crossplay if crossplay is None else crossplay,
                 max_results=self.preferences.max_results if max_results is None else max_results,
+                opportunity_filter=self.preferences.opportunity_filter if opportunity_filter is None else opportunity_filter,
             ),
         )
 
@@ -336,6 +368,8 @@ class AgentMemory:
                 return self.with_updated_preferences(max_results=int(value))
             except ValueError:
                 return self
+        if key == "opportunity_filter":
+            return self.with_updated_preferences(opportunity_filter=value)
         return self
 
     def with_favorite_item(self, item_id: str) -> "AgentMemory":

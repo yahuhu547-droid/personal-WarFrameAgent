@@ -199,6 +199,7 @@ def execute_plan(
     plan: GoalExecutionPlan,
     items: list[dict],
     order_fetcher: Callable[[str], list[dict]] = fetch_orders,
+    opportunity_filter: str = "all",
 ) -> list[dict]:
     """执行计划中的所有步骤，收集结果。"""
     all_results = []
@@ -212,6 +213,7 @@ def execute_plan(
                     min_roi_pct=step.params.get("min_roi_pct", 100),
                     limit=step.params.get("limit", 20),
                     scout_fn=scout_mod_candidates,
+                    opportunity_filter=opportunity_filter,
                 )
                 for r in raw:
                     all_results.append({
@@ -225,7 +227,7 @@ def execute_plan(
                         "risk": "medium",
                     })
 
-            elif step.action == "scan_set_profit":
+            elif step.action == "scan_set_profit" and opportunity_filter == "all":
                 raw = scan_all_set_profits(
                     items, order_fetcher,
                     min_profit=step.params.get("min_profit", 5),
@@ -244,7 +246,7 @@ def execute_plan(
                         "risk": "medium",
                     })
 
-            elif step.action == "scan_investment":
+            elif step.action == "scan_investment" and opportunity_filter == "all":
                 budget = step.params.get("budget", 500)
                 raw = scan_prime_investments(
                     items, order_fetcher,

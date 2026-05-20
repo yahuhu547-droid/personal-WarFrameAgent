@@ -1,6 +1,7 @@
 from warframe_agent.baro import (
     analyze_baro_inventory,
     format_baro_order_details,
+    format_baro_order_details_for_model,
     format_baro_report,
     parse_baro_rank_request,
 )
@@ -135,6 +136,36 @@ def test_baro_order_details_include_profile_links_and_ranked_whispers():
     assert '(Rank 10)" for 95 platinum. (warframe.market)' in details
 
 
+def test_baro_order_details_model_context_excludes_player_links_and_whispers():
+    recommendations = analyze_baro_inventory(
+        _baro_event(),
+        _orders,
+        rank_request=10,
+        item_info_lookup=lambda item_id: ITEM_META.get(item_id),
+    )
+    primed_flow = next(r for r in recommendations if r.market_id == "primed_flow")
+
+    context = format_baro_order_details_for_model(primed_flow, seller_limit=1, buyer_limit=2)
+
+    assert "tool=baro_order_followup" in context
+    assert "item=川流不息 Prime" in context
+    assert "rank=10" in context
+    assert "buyer_count=2" in context
+    assert "best_buy=80p" in context
+    assert "seller_count=1" in context
+    assert "best_sell=95p" in context
+    for forbidden in [
+        "BuyerR10",
+        "BuyerR10B",
+        "SellerR10",
+        "https://warframe.market/profile",
+        "/w ",
+        "raw buyers",
+        "raw sellers",
+    ]:
+        assert forbidden not in context
+
+
 def test_order_detail_limits_default_to_five_highest_buyers_for_link_followup():
     from warframe_agent.baro import parse_order_detail_limits
 
@@ -207,6 +238,26 @@ def test_chat_baro_link_followup_defaults_to_five_highest_buy_price_players():
     assert "买家 5. BuyerR10E | 76p" in followup
     assert "BuyerR10" in followup
     assert "卖家 1." not in followup
+
+
+def test_chat_baro_link_followup_session_history_is_safe():
+    agent = ChatAgent(
+        order_fetcher=_orders,
+        event_tracker=FakeBaroTracker(),
+        model_call=lambda prompt: "unused",
+    )
+    agent._baro_item_info_lookup = lambda item_id: ITEM_META.get(item_id)
+
+    agent.answer("虚空商人满级mod价格")
+    followup = agent.answer("给我第一个玩家链接")
+
+    assert "BuyerR10" in followup
+    assert "https://warframe.market/profile/BuyerR10" in followup
+    stored_reply = agent.session.history[-1][1]
+    assert "tool=baro_order_followup" in stored_reply
+    assert "best_buy=80p" in stored_reply
+    for forbidden in ["BuyerR10", "SellerR10", "https://warframe.market/profile", "/w "]:
+        assert forbidden not in stored_reply
 
 
 def test_chat_baro_items_wording_uses_fast_path(monkeypatch):

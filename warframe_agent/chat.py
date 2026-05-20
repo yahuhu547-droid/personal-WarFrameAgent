@@ -10,19 +10,24 @@ from typing import AsyncIterator, Callable, Iterable
 import requests
 
 from . import config
+from .experts import ExpertRequest, run_expert
 from .dictionary import ItemResolver, normalize_lookup_key
 from .events import EventTracker
 from .formatter import build_whisper
 from .game_data import GameDataStore
 from .knowledge import MarketKnowledge
 from .market import MarketOrder, best_buyers, best_sellers, fetch_orders
-from .memory import AgentMemory
-from .names import display_item_name, load_item_data
+from .memory import AgentMemory, normalize_opportunity_filter
+from .memory_recall import MemoryRecallService
+from .names import display_item_name, english_name, load_item_data
 from .price_history import PriceHistoryDB
+from .push import PushConfig
 from .rag import smart_search_rag
 from .session import SessionContext, is_followup
 from .riven import _looks_like_riven_query
-from .tool_router import build_router_prompt, parse_tool_call
+from .tool_context import wrap_untrusted_model_text
+from .tool_router import build_router_prompt, parse_tool_call, select_candidate_tools
+from .tool_registry import ToolResult, create_default_tool_registry
 from .trade_intent import detect_trade_intent, detect_completed_trade, detect_trend_query, detect_compare_query
 from .warframes import price_warframe_query
 
@@ -36,6 +41,34 @@ RIVEN_INGAME_STATUSES = ("ingame",)
 RIVEN_INGAME_KEYWORDS = ("游戏中", "在游戏中", "游戏里的", "ingame", "in game")
 RIVEN_ONLINE_KEYWORDS = ("在线", "online", "在线玩家", "在线的", "在线卖家")
 RIVEN_ALL_STATUS_KEYWORDS = ("全部", "所有", "离线", "offline", "包括离线", "离线也要")
+
+
+def _tool_metadata_to_dict(meta) -> dict:
+    return {
+        "tool_name": meta.tool_name,
+        "args_summary": _json_safe_tool_value(meta.args_summary),
+        "ok": meta.ok,
+        "error": meta.error,
+        "duration_ms": round(meta.duration_ms, 2),
+        "timestamp": meta.timestamp,
+    }
+
+
+def _json_safe_tool_value(value):
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        if len(value) > 500:
+            return f"{value[:300]}... [len={len(value)}]"
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe_tool_value(val) for key, val in list(value.items())[:50]}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_tool_value(item) for item in list(value)[:50]]
+    text = repr(value)
+    if len(text) > 300:
+        return f"{text[:200]}... [len={len(text)}]"
+    return text
 
 
 def _riven_statuses_from_message(message: str, default_online: bool = False) -> tuple[str, ...] | None:
@@ -188,6 +221,7 @@ class ItemContext:
     best_buy_price: int | None = None
     best_seller: MarketOrder | None = None
     best_buyer: MarketOrder | None = None
+    model_context: str | None = None
 
 
 def is_chat_exit(message: str) -> bool:
@@ -250,7 +284,71 @@ def build_item_context_result(item_id: str, orders: Iterable[dict]) -> ItemConte
         best_buy_price=best_buyer.platinum if best_buyer else None,
         best_seller=best_seller,
         best_buyer=best_buyer,
+        model_context=build_safe_query_price_model_context(
+            item_id,
+            best_seller=best_seller,
+            best_buyer=best_buyer,
+            rank_filter=rank_filter,
+            rank0_sell=rank0_sell,
+        ),
     )
+
+
+def build_safe_query_price_model_context(
+    item_id: str,
+    *,
+    best_seller: MarketOrder | None = None,
+    best_buyer: MarketOrder | None = None,
+    rank_filter: int | None = None,
+    rank0_sell: int | None = None,
+    extra_lines: list[str] | None = None,
+) -> str:
+    """Build allowlisted query_price context for model/session history.
+
+    Deliberately excludes player names, profile URLs, whisper commands and raw order data.
+    """
+    lines = [
+        "tool=query_price",
+        f"item_id={item_id}",
+        f"display_name={display_item_name(item_id)}",
+    ]
+    if best_seller:
+        lines.append(f"最低卖价: {best_seller.platinum}p")
+        lines.append(f"sell_quantity={best_seller.quantity}")
+        lines.append(f"sell_reputation={best_seller.reputation}")
+        if best_seller.mod_rank is not None:
+            lines.append(f"sell_rank={best_seller.mod_rank}")
+    else:
+        lines.append("最低卖价: 暂无在线卖家")
+    if best_buyer:
+        lines.append(f"最高收价: {best_buyer.platinum}p")
+        lines.append(f"buy_quantity={best_buyer.quantity}")
+        lines.append(f"buy_reputation={best_buyer.reputation}")
+        if best_buyer.mod_rank is not None:
+            lines.append(f"buy_rank={best_buyer.mod_rank}")
+    else:
+        lines.append("最高收价: 暂无在线买家")
+    if best_seller and best_buyer:
+        lines.append(f"价差: {best_seller.platinum - best_buyer.platinum}p")
+    if rank0_sell is not None:
+        lines.append(f"rank0_sell={rank0_sell}p")
+    if rank_filter is not None:
+        lines.append(f"rank_filter={rank_filter}")
+    if extra_lines:
+        lines.extend(str(line) for line in extra_lines if line)
+    return "\n".join(lines)
+
+
+def _context_model_text(context: ItemContext) -> str:
+    return context.model_context or build_safe_query_price_model_context(
+        context.item_id,
+        best_seller=context.best_seller,
+        best_buyer=context.best_buyer,
+    )
+
+
+def safe_query_price_context_from_contexts(contexts: list[ItemContext]) -> str:
+    return "\n\n".join(_context_model_text(context) for context in contexts)
 
 
 class ChatAgent:
@@ -268,6 +366,7 @@ class ChatAgent:
         router_call: Callable[[str], str] | None = None,
         knowledge: MarketKnowledge | None = None,
         event_tracker: EventTracker | None = None,
+        trading_memory_db=None,
     ):
         self.resolver = resolver or ItemResolver()
         self.order_fetcher = order_fetcher
@@ -282,7 +381,11 @@ class ChatAgent:
         self.router_call = router_call
         self.knowledge = knowledge
         self.event_tracker = event_tracker
+        self.trading_memory_db = trading_memory_db
         self.game_data = GameDataStore()
+        self.model_orchestrator = None
+        self.tool_registry = self._build_tool_registry()
+        self.tool_execution_metadata = []
         self._last_baro_recommendations = []
         self._baro_item_info_lookup = None
 
@@ -354,11 +457,88 @@ class ChatAgent:
                 parts.append(msg["content"])
         return self.model_call("\n\n".join(parts))
 
+    def _try_direct_market_intent(self, message: str) -> str | None:
+        lowered = message.lower()
+        wants_link = any(keyword in lowered or keyword in message for keyword in ("市场链接", "链接", "url", "warframe.market", "market"))
+        wants_seller = any(keyword in message for keyword in ("最便宜卖家", "最低卖家", "最低价卖家", "便宜卖家"))
+        wants_bargain = any(keyword in message for keyword in ("砍价", "讲价", "还价", "压价"))
+        if not (wants_link or wants_seller or wants_bargain):
+            return None
+
+        item_id = self._resolve_direct_market_item_id(message)
+        if not item_id:
+            return None
+        item_display = display_item_name(item_id)
+        market_url = f"https://warframe.market/items/{item_id}"
+        if wants_link:
+            return f"{item_display}\n市场链接: {market_url}"
+
+        context = build_item_context_result(item_id, self.order_fetcher(item_id))
+        seller = context.best_seller
+        if not seller:
+            return f"{item_display}\n当前没有在线卖家。\n市场链接: {market_url}"
+        whisper = build_whisper(seller.user_name, item_id, seller.platinum, "sell")
+        if wants_seller:
+            return "\n".join([
+                item_display,
+                f"最低卖家: {seller.user_name}，价格 {seller.platinum}p，数量 {seller.quantity}",
+                f"购买私聊: {whisper}",
+                f"市场链接: {market_url}",
+            ])
+
+        target = _extract_platinum_amount(message)
+        if target is None:
+            discount = max(1, min(10, round(seller.platinum * 0.1)))
+            target = max(1, seller.platinum - discount)
+        script = f"/w {seller.user_name} Hi, would you take {target}p for {english_name(item_id)}?"
+        return "\n".join([
+            item_display,
+            f"当前最低卖家: {seller.user_name}，标价 {seller.platinum}p",
+            f"砍价话术: {script}",
+            "如果对方不接受，可以改用原价购买私聊:",
+            whisper,
+            f"市场链接: {market_url}",
+        ])
+
+    def _resolve_direct_market_item_id(self, message: str) -> str | None:
+        from .warframes import parse_warframe_query
+
+        query = parse_warframe_query(message, self.warframe_items)
+        if query:
+            return query.item_ids()[0]
+
+        item_ids = self._item_ids_from_alias_substrings(message)
+        if item_ids:
+            return item_ids[0]
+
+        try:
+            return self.resolver.resolve(message).item_id
+        except (LookupError, ValueError):
+            pass
+
+        noise_terms = (
+            "市场链接", "链接", "url", "warframe.market", "market",
+            "最便宜卖家", "最低卖家", "最低价卖家", "便宜卖家",
+            "砍价", "讲价", "还价", "压价", "帮我", "给我", "跟卖家", "卖家", "的",
+        )
+        for token in _message_tokens(message):
+            if token in noise_terms:
+                continue
+            try:
+                return self.resolver.resolve(token).item_id
+            except (LookupError, ValueError):
+                continue
+        return None
+
     def answer(self, message: str) -> str:
         self._reload_memory()
         stripped = message.strip()
         if stripped.startswith("/"):
             return self._handle_agent_command(stripped)
+        opportunity_control = self._try_opportunity_control(message)
+        if opportunity_control:
+            self._log_answer(message, opportunity_control)
+            return opportunity_control
         if is_watchlist_command(message):
             return self.scan_watchlist()
         cycle_result = self._try_cycle_intent(message)
@@ -368,10 +548,11 @@ class ChatAgent:
             return cycle_result
         self._remember_common_question(message)
         baro_followup = self._try_baro_order_followup(message)
-        if baro_followup:
-            self.session.add_exchange(message, baro_followup)
-            self._log_answer(message, baro_followup)
-            return baro_followup
+        baro_followup_display = self._tool_result_display_text(baro_followup)
+        if baro_followup_display:
+            self.session.add_exchange(message, self._tool_result_history_text(baro_followup))
+            self._log_answer(message, baro_followup_display)
+            return baro_followup_display
         baro_answer = self._try_baro_recommendation(message)
         if baro_answer:
             self.session.add_exchange(message, baro_answer)
@@ -380,22 +561,29 @@ class ChatAgent:
         # 紫卡查询：优先确定性解析，避免 LLM 路由误判
         if _looks_like_riven_query(message):
             riven_result = self._try_deterministic_riven(message)
-            if riven_result:
-                self.session.add_exchange(message, riven_result)
-                self._log_answer(message, riven_result)
-                return riven_result
+            riven_display = self._tool_result_display_text(riven_result)
+            if riven_display:
+                self.session.add_exchange(message, self._tool_result_history_text(riven_result))
+                self._log_answer(message, riven_display)
+                return riven_display
         # 紫卡追问：基于上一次查询过滤（在线/便宜）
         riven_followup = self._try_riven_followup(message)
-        if riven_followup:
-            self.session.add_exchange(message, riven_followup)
-            self._log_answer(message, riven_followup)
-            return riven_followup
+        riven_followup_display = self._tool_result_display_text(riven_followup)
+        if riven_followup_display:
+            self.session.add_exchange(message, self._tool_result_history_text(riven_followup))
+            self._log_answer(message, riven_followup_display)
+            return riven_followup_display
         # Prime 重生 / Vault 查询：直接走事件格式化，避免物品匹配误触发
         if _is_prime_resurgence_query(message):
             result = self._handle_vault_command()
             self.session.add_exchange(message, result)
             self._log_answer(message, result)
             return result
+        prime_direct = self._try_direct_market_intent(message)
+        if prime_direct:
+            self.session.add_exchange(message, prime_direct)
+            self._log_answer(message, prime_direct)
+            return prime_direct
         # 事件类/交易工具类查询直接走路由器，避免物品匹配误触发交易流程
         if _is_event_query(message) or _is_trading_tool_query(message):
             if _is_event_query(message) and not _is_specific_event_list_query(message):
@@ -406,11 +594,12 @@ class ChatAgent:
             if _is_specific_event_list_query(message):
                 routed = self._handle_specific_event_query(message)
             else:
-                routed = self._try_router(message)
-            if routed:
-                self.session.add_exchange(message, routed)
-                self._log_answer(message, routed)
-                return routed
+                routed = self._try_router_result(message)
+            routed_display = self._tool_result_display_text(routed)
+            if routed_display:
+                self.session.add_exchange(message, self._tool_result_history_text(routed))
+                self._log_answer(message, routed_display)
+                return routed_display
             # 路由失败时不要 fallthrough 到物品匹配，返回通用提示
             if _is_trading_tool_query(message):
                 fallback = "交易工具暂时无法使用，请稍后重试。你也可以直接输入物品名称查询价格。"
@@ -430,11 +619,12 @@ class ChatAgent:
         else:
             contexts = self._contexts_for_message(message)
         if not contexts:
-            routed = self._try_router(message)
-            if routed:
-                self.session.add_exchange(message, routed)
-                self._log_answer(message, routed)
-                return routed
+            routed = self._try_router_result(message)
+            routed_display = self._tool_result_display_text(routed)
+            if routed_display:
+                self.session.add_exchange(message, self._tool_result_history_text(routed))
+                self._log_answer(message, routed_display)
+                return routed_display
             result = "没有找到匹配的物品，请输入 warframe.market 的 item_id，例如：充沛 / arcane_energize"
             self._log_answer(message, result)
             return result
@@ -445,11 +635,14 @@ class ChatAgent:
         if deterministic_answer:
             if auto_trade_note:
                 deterministic_answer += "\n\n" + auto_trade_note
-            self.session.add_exchange(message, deterministic_answer)
+            self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
             self._log_answer(message, deterministic_answer, contexts)
             return deterministic_answer
         current_ids = [ctx.item_id for ctx in contexts]
         market_ctx = build_system_context(self.knowledge, self.event_tracker, memory=self.memory, game_data=self.game_data, current_item_ids=current_ids)
+        memory_recall_ctx = self._build_memory_recall_context(message, current_ids)
+        if memory_recall_ctx:
+            market_ctx = f"{market_ctx}\n\n{memory_recall_ctx}" if market_ctx else memory_recall_ctx
         prompt_messages = build_chat_messages(message, contexts, self.memory, self.session.to_messages(current_query=message), market_ctx or None)
         try:
             answer = self._call_llm_messages(prompt_messages).strip()
@@ -457,30 +650,196 @@ class ChatAgent:
                 checked = _self_check(answer, contexts)
                 if checked:
                     answer = checked
-                self.session.add_exchange(message, answer)
+                self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
                 self._log_answer(message, answer, contexts)
                 return answer
         except Exception as exc:
             logger.debug("LLM 调用失败，使用回退: %s", exc)
             result = fallback_answer(message, contexts, llm_failed=True)
-            self.session.add_exchange(message, result)
+            self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
             self._log_answer(message, result, contexts)
             return result
         result = fallback_answer(message, contexts)
-        self.session.add_exchange(message, result)
+        self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
         self._log_answer(message, result, contexts)
         return result
 
     def _log_answer(self, message: str, reply: str, contexts=None) -> None:
+        tool_calls = self._consume_tool_execution_metadata()
+        self._record_user_query_memory(message, contexts, tool_calls)
         try:
             from .conversation_log import log_conversation, ConversationEntry
             log_conversation(ConversationEntry(
                 user_message=message,
                 assistant_reply=reply,
+                tool_calls=tool_calls or None,
                 contexts=[ctx.item_id for ctx in contexts] if contexts else None,
             ))
         except Exception as exc:
             logger.debug("对话日志记录失败: %s", exc)
+
+    def _build_memory_recall_context(self, message: str, item_ids: list[str]) -> str:
+        if not self.trading_memory_db or not item_ids:
+            return ""
+        try:
+            service = MemoryRecallService(self.trading_memory_db)
+            result = service.recall(
+                message,
+                item_name=item_ids[0],
+                intent=self._infer_user_query_memory_intent(message, []),
+                limit=3,
+            )
+            return service.format_for_model(result, max_items=3)
+        except Exception as exc:
+            logger.debug("长期交易记忆召回失败: %s", exc)
+            return ""
+
+    def _record_user_query_memory(self, message: str, contexts=None, tool_calls: list[dict] | None = None) -> None:
+        if not self.trading_memory_db:
+            return
+        if message.strip().startswith("/"):
+            return
+        context_item_ids, tool_item_ids, item_source = self._infer_user_query_memory_item_ids(contexts, tool_calls or [])
+        safe_tool_names = self._safe_tool_names_from_tool_calls(tool_calls or [])
+        intent = self._infer_user_query_memory_intent(message, safe_tool_names)
+        has_context_signal = bool(context_item_ids or tool_item_ids)
+        has_tool_signal = bool(safe_tool_names and safe_tool_names != ["general_chat"])
+        has_trade_signal = intent not in {"unknown", "price_check"}
+        if not (has_context_signal or has_tool_signal or has_trade_signal):
+            return
+        item_ids = context_item_ids or tool_item_ids
+        try:
+            self.trading_memory_db.record_user_query_summary(
+                intent=intent,
+                item_name=item_ids[0] if item_ids else "",
+                metadata={
+                    "context_item_ids": item_ids,
+                    "context_count": len(context_item_ids),
+                    "tool_names": safe_tool_names,
+                    "tool_count": len(tool_calls or []),
+                    "tool_ok_count": sum(1 for call in (tool_calls or []) if call.get("ok") is True),
+                    "item_source": item_source,
+                },
+            )
+        except Exception as exc:
+            logger.debug("长期交易记忆用户查询摘要写入失败: %s", exc)
+
+    def _infer_user_query_memory_intent(self, message: str, tool_names: list[str]) -> str:
+        tool_intents = {
+            "query_price": "price_check",
+            "price_trend": "price_trend",
+            "query_set": "price_check",
+            "query_missing_parts": "trading_tool",
+            "scan_favorites": "watchlist_scan",
+            "set_alert": "alert_create",
+            "mod_flipper": "mod_flip_scan",
+            "set_profit": "set_profit_scan",
+            "investment_advisor": "investment_advice",
+            "query_events": "event_query",
+            "riven_search": "riven_search",
+        }
+        for tool_name in tool_names:
+            if tool_name in tool_intents:
+                return tool_intents[tool_name]
+        completed = detect_completed_trade(message)
+        if completed:
+            return "completed_trade_buy" if completed[0] == "buy" else "completed_trade_sell"
+        if detect_compare_query(message):
+            return "price_compare"
+        if detect_trend_query(message):
+            return "price_trend"
+        trade_intent = detect_trade_intent(message)
+        if trade_intent == "buy":
+            return "trade_buy"
+        if trade_intent == "sell":
+            return "trade_sell"
+        if trade_intent == "spread":
+            return "spread_check"
+        if trade_intent == "overview":
+            return "price_check"
+        if _looks_like_riven_query(message):
+            return "riven_search"
+        if _is_baro_recommendation_query(message):
+            return "baro_recommendation"
+        if _is_event_query(message):
+            return "event_query"
+        return "unknown"
+
+    def _infer_user_query_memory_item_ids(self, contexts=None, tool_calls: list[dict] | None = None) -> tuple[list[str], list[str], str]:
+        context_item_ids = []
+        for ctx in contexts or []:
+            item_id = getattr(ctx, "item_id", "")
+            if item_id and item_id not in context_item_ids:
+                context_item_ids.append(item_id)
+            if len(context_item_ids) >= 3:
+                break
+        tool_item_ids = []
+        for call in tool_calls or []:
+            item_id = self._resolve_user_query_memory_item_from_tool_args(call.get("args_summary"))
+            if item_id and item_id not in tool_item_ids:
+                tool_item_ids.append(item_id)
+            if len(tool_item_ids) >= 3:
+                break
+        if context_item_ids and tool_item_ids:
+            item_source = "mixed" if any(item_id not in context_item_ids for item_id in tool_item_ids) else "contexts"
+        elif context_item_ids:
+            item_source = "contexts"
+        elif tool_item_ids:
+            item_source = "tool_args_resolved"
+        else:
+            item_source = "none"
+        return context_item_ids, tool_item_ids, item_source
+
+    def _resolve_user_query_memory_item_from_tool_args(self, args_summary) -> str:
+        if not isinstance(args_summary, dict):
+            return ""
+        for key in ("item_id", "market_id"):
+            value = args_summary.get(key)
+            if not isinstance(value, str) or value == "[REDACTED]":
+                continue
+            item_id = self._safe_memory_identifier(value)
+            if item_id:
+                return item_id
+        for key in ("item_name", "query", "warframe_name", "weapon"):
+            value = args_summary.get(key)
+            if not isinstance(value, str) or value == "[REDACTED]":
+                continue
+            item_id = self._resolve_safe_memory_item_id(value)
+            if item_id:
+                return item_id
+        return ""
+
+    def _resolve_safe_memory_item_id(self, value: str) -> str:
+        try:
+            resolved = self.resolver.resolve(value).item_id
+        except (LookupError, ValueError):
+            return ""
+        return self._safe_memory_identifier(resolved)
+
+    def _safe_memory_identifier(self, value: str) -> str:
+        normalized = value.strip().lower().replace(" ", "_").replace("-", "_")
+        if normalized and all(ch.isascii() and (ch.isalnum() or ch == "_") for ch in normalized):
+            return normalized
+        return ""
+
+    def _safe_tool_names_from_tool_calls(self, tool_calls: list[dict]) -> list[str]:
+        allowed = {
+            "query_price", "price_trend", "query_set", "query_missing_parts", "scan_favorites",
+            "set_alert", "mod_flipper", "set_profit", "investment_advisor", "query_events", "riven_search",
+        }
+        names = []
+        for call in tool_calls:
+            name = call.get("tool_name")
+            if name in allowed and name not in names:
+                names.append(name)
+            if len(names) >= 5:
+                break
+        return names
+
+    def _consume_tool_execution_metadata(self) -> list[dict]:
+        records = [_tool_metadata_to_dict(meta) for meta in self.tool_execution_metadata]
+        self.tool_execution_metadata = []
+        return records
 
     async def answer_stream(self, message: str) -> AsyncIterator[str]:
         """流式版本的 answer，逐 token yield。对于不需要 LLM 的路径，一次性 yield 全文。"""
@@ -490,6 +849,11 @@ class ChatAgent:
             result = self._handle_agent_command(stripped)
             self._log_answer(message, result)
             yield result
+            return
+        opportunity_control = self._try_opportunity_control(message)
+        if opportunity_control:
+            self._log_answer(message, opportunity_control)
+            yield opportunity_control
             return
         if is_watchlist_command(message):
             result = self.scan_watchlist()
@@ -504,10 +868,11 @@ class ChatAgent:
             return
         self._remember_common_question(message)
         baro_followup = self._try_baro_order_followup(message)
-        if baro_followup:
-            self.session.add_exchange(message, baro_followup)
-            self._log_answer(message, baro_followup)
-            yield baro_followup
+        baro_followup_display = self._tool_result_display_text(baro_followup)
+        if baro_followup_display:
+            self.session.add_exchange(message, self._tool_result_history_text(baro_followup))
+            self._log_answer(message, baro_followup_display)
+            yield baro_followup_display
             return
         baro_answer = self._try_baro_recommendation(message)
         if baro_answer:
@@ -518,17 +883,19 @@ class ChatAgent:
         # 紫卡查询：优先确定性解析，避免 LLM 路由误判
         if _looks_like_riven_query(message):
             riven_result = self._try_deterministic_riven(message)
-            if riven_result:
-                self.session.add_exchange(message, riven_result)
-                self._log_answer(message, riven_result)
-                yield riven_result
+            riven_display = self._tool_result_display_text(riven_result)
+            if riven_display:
+                self.session.add_exchange(message, self._tool_result_history_text(riven_result))
+                self._log_answer(message, riven_display)
+                yield riven_display
                 return
         # 紫卡追问：基于上一次查询过滤（在线/便宜）
         riven_followup = self._try_riven_followup(message)
-        if riven_followup:
-            self.session.add_exchange(message, riven_followup)
-            self._log_answer(message, riven_followup)
-            yield riven_followup
+        riven_followup_display = self._tool_result_display_text(riven_followup)
+        if riven_followup_display:
+            self.session.add_exchange(message, self._tool_result_history_text(riven_followup))
+            self._log_answer(message, riven_followup_display)
+            yield riven_followup_display
             return
         # Prime 重生 / Vault 查询：直接走事件格式化，避免物品匹配误触发
         if _is_prime_resurgence_query(message):
@@ -536,6 +903,12 @@ class ChatAgent:
             self.session.add_exchange(message, result)
             self._log_answer(message, result)
             yield result
+            return
+        prime_direct = self._try_direct_market_intent(message)
+        if prime_direct:
+            self.session.add_exchange(message, prime_direct)
+            self._log_answer(message, prime_direct)
+            yield prime_direct
             return
         # 事件类/交易工具类查询直接走路由器，避免物品匹配误触发交易流程
         if _is_event_query(message) or _is_trading_tool_query(message):
@@ -548,11 +921,12 @@ class ChatAgent:
             if _is_specific_event_list_query(message):
                 routed = self._handle_specific_event_query(message)
             else:
-                routed = self._try_router(message)
-            if routed:
-                self.session.add_exchange(message, routed)
-                self._log_answer(message, routed)
-                yield routed
+                routed = self._try_router_result(message)
+            routed_display = self._tool_result_display_text(routed)
+            if routed_display:
+                self.session.add_exchange(message, self._tool_result_history_text(routed))
+                self._log_answer(message, routed_display)
+                yield routed_display
                 return
             if _is_trading_tool_query(message):
                 fallback = "交易工具暂时无法使用，请稍后重试。你也可以直接输入物品名称查询价格。"
@@ -576,11 +950,12 @@ class ChatAgent:
         else:
             contexts = self._contexts_for_message(message)
         if not contexts:
-            routed = self._try_router(message)
-            if routed:
-                self.session.add_exchange(message, routed)
-                self._log_answer(message, routed)
-                yield routed
+            routed = self._try_router_result(message)
+            routed_display = self._tool_result_display_text(routed)
+            if routed_display:
+                self.session.add_exchange(message, self._tool_result_history_text(routed))
+                self._log_answer(message, routed_display)
+                yield routed_display
                 return
             result = "没有找到匹配的物品，请输入 warframe.market 的 item_id，例如：充沛 / arcane_energize"
             self._log_answer(message, result)
@@ -591,12 +966,15 @@ class ChatAgent:
         self._auto_record_trade(message, contexts)
         deterministic_answer = _deterministic_trade_intent_answer(message, contexts)
         if deterministic_answer:
-            self.session.add_exchange(message, deterministic_answer)
+            self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
             self._log_answer(message, deterministic_answer, contexts)
             yield deterministic_answer
             return
         current_ids = [ctx.item_id for ctx in contexts]
         market_ctx = build_system_context(self.knowledge, self.event_tracker, memory=self.memory, game_data=self.game_data, current_item_ids=current_ids)
+        memory_recall_ctx = self._build_memory_recall_context(message, current_ids)
+        if memory_recall_ctx:
+            market_ctx = f"{market_ctx}\n\n{memory_recall_ctx}" if market_ctx else memory_recall_ctx
         prompt_messages = build_chat_messages(message, contexts, self.memory, self.session.to_messages(current_query=message), market_ctx or None)
         # 流式调用 LLM
         full_reply = []
@@ -608,7 +986,7 @@ class ChatAgent:
         except Exception as exc:
             logger.debug("流式 LLM 失败，使用回退: %s", exc)
             result = fallback_answer(message, contexts, llm_failed=True)
-            self.session.add_exchange(message, result)
+            self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
             self._log_answer(message, result, contexts)
             yield result
             return
@@ -617,11 +995,11 @@ class ChatAgent:
             checked = _self_check(reply_text, contexts)
             if checked:
                 reply_text = checked
-            self.session.add_exchange(message, reply_text)
+            self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
             self._log_answer(message, reply_text, contexts)
         else:
             result = fallback_answer(message, contexts)
-            self.session.add_exchange(message, result)
+            self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
             self._log_answer(message, result, contexts)
             yield result
 
@@ -651,6 +1029,8 @@ class ChatAgent:
             return self._handle_alert_command(tokens[1:])
         if command == "/pref":
             return self._handle_preference_command(tokens[1:])
+        if command == "/push":
+            return self._handle_push_command(tokens[1:])
         if command == "/scan":
             return self._handle_scan_command()
         if command == "/goal":
@@ -681,6 +1061,8 @@ class ChatAgent:
             "/pref platform pc",
             "/pref crossplay on",
             "/pref max 5",
+            "/push opportunity off|on  暂停/开启交易机会推送",
+            "/push opportunity filter mod|arcane|all  设置交易机会检测范围",
             "/goal              查看当前目标",
             "/goal set 目标描述   创建新目标",
             "/goal done ID      标记目标完成",
@@ -703,6 +1085,55 @@ class ChatAgent:
             "/vault              查看 Vault / Prime 重生状态",
         ])
 
+    def _try_opportunity_control(self, message: str) -> str | None:
+        text = re.sub(r"\s+", "", message.strip().lower())
+        if not text:
+            return None
+        if "交易机会" in text or "机会推送" in text:
+            if any(word in text for word in ("暂停", "停止", "关闭", "关掉")):
+                return self._set_opportunity_push_enabled(False)
+            if any(word in text for word in ("开启", "恢复", "打开", "启用")) and "只检测" not in text:
+                return self._set_opportunity_push_enabled(True)
+            if any(word in text for word in ("只检测mod", "只检测卡", "仅检测mod", "仅检测卡")):
+                return self._set_opportunity_filter("mod")
+            if any(word in text for word in ("只检测赋能", "仅检测赋能", "只看赋能")):
+                return self._set_opportunity_filter("arcane")
+            if any(word in text for word in ("检测全部", "恢复全部", "取消过滤", "全部检测")):
+                return self._set_opportunity_filter("all")
+        return None
+
+    def _set_opportunity_push_enabled(self, enabled: bool) -> str:
+        cfg = PushConfig.load()
+        cfg.push_proactive = enabled
+        cfg.save()
+        status = "开启" if enabled else "暂停"
+        return f"已{status}交易机会推送。只影响主动交易机会；价格提醒、关注扫描和每日报告不受影响。"
+
+    def _set_opportunity_filter(self, opportunity_filter: str) -> str:
+        opportunity_filter = normalize_opportunity_filter(opportunity_filter)
+        self.memory = self.memory.with_updated_preferences(opportunity_filter=opportunity_filter)
+        self._persist_memory()
+        label = {"all": "全部", "mod": "仅 MOD", "arcane": "仅赋能"}[opportunity_filter]
+        return f"已设置交易机会检测范围：{label}。价格提醒、关注推送和每日报告不受影响。"
+
+    def _handle_push_command(self, args: list[str]) -> str:
+        normalized = [arg.strip().lower() for arg in args if arg.strip()]
+        if not normalized:
+            return "用法：/push opportunity off|on 或 /push opportunity filter mod|arcane|all"
+        text = " ".join(normalized)
+        if any(token in normalized for token in ("off", "false", "0", "关闭", "暂停")):
+            return self._set_opportunity_push_enabled(False)
+        if any(token in normalized for token in ("on", "true", "1", "开启", "恢复")):
+            return self._set_opportunity_push_enabled(True)
+        if "filter" in normalized or "只检测" in text or "检测" in text:
+            if any(token in normalized for token in ("mod", "卡")):
+                return self._set_opportunity_filter("mod")
+            if any(token in normalized for token in ("arcane", "赋能")):
+                return self._set_opportunity_filter("arcane")
+            if any(token in normalized for token in ("all", "全部")):
+                return self._set_opportunity_filter("all")
+        return "用法：/push opportunity off|on 或 /push opportunity filter mod|arcane|all"
+
     def _render_memory_summary(self) -> str:
         favorites = "、".join(display_item_name(item_id) for item_id in self.memory.favorite_items[:5]) or "无"
         alerts = "、".join(
@@ -712,7 +1143,7 @@ class ChatAgent:
         questions = "、".join(self.memory.common_questions[-5:]) or "无"
         lines = [
             "记忆摘要：",
-            f"偏好: platform={self.memory.preferences.platform}, crossplay={self.memory.preferences.crossplay}, max_results={self.memory.preferences.max_results}",
+            f"偏好: platform={self.memory.preferences.platform}, crossplay={self.memory.preferences.crossplay}, max_results={self.memory.preferences.max_results}, opportunity_filter={self.memory.preferences.opportunity_filter}",
             f"关注物品: {favorites}",
             f"价格提醒: {alerts}",
             f"常见问题: {questions}",
@@ -1264,7 +1695,13 @@ class ChatAgent:
 
     def _handle_relic_command(self, args: list[str]) -> str:
         if not args:
-            return "用法: /relic 物品名 | /relic 遗物名\n示例: /relic 犀牛 Prime 蓝图 | /relic Lith B1"
+            return "用法: /relic 物品名 | /relic 遗物名 | /relic value 遗物名\n示例: /relic 犀牛 Prime 蓝图 | /relic Lith B1 | /relic value Lith B1"
+        if args[0].lower() in {"value", "估值", "价值"}:
+            relic_name = " ".join(args[1:]).strip()
+            if not relic_name:
+                return "用法: /relic value 遗物名\n示例: /relic value Lith B1"
+            result = self._tool_relic_value({"relic_name": relic_name})
+            return result.display_content if result.ok else (result.error or f"未找到与 '{relic_name}' 相关的遗物。")
         query = " ".join(args)
         from .relics import get_relic_db, TIER_MAP
         db = get_relic_db()
@@ -1404,12 +1841,10 @@ class ChatAgent:
             except Exception:
                 sellers = []
                 buyers = []
-            if sellers:
-                lowest_buy = f"最低买入价 {sellers[0].platinum}p"
             if buyers:
-                parts.append(f"最高卖出价 {buyers[0].platinum}p")
+                parts.append(f"最高收价 {buyers[0].platinum}p")
             if sellers:
-                parts.append(lowest_buy)
+                parts.append(f"最低卖价 {sellers[0].platinum}p")
         return f" ({'，'.join(parts)})"
 
     def _auto_record_trade(self, message: str, contexts: list) -> str | None:
@@ -1468,12 +1903,13 @@ class ChatAgent:
             logger.debug("Baro 推荐失败: %s", exc)
             return "暂时无法分析虚空商人库存。"
 
-    def _try_baro_order_followup(self, message: str) -> str | None:
+    def _try_baro_order_followup(self, message: str) -> ToolResult | None:
         if not self._last_baro_recommendations:
             return None
         from .baro import (
             find_baro_recommendation,
             format_baro_order_details,
+            format_baro_order_details_for_model,
             is_baro_order_detail_request,
             parse_order_detail_limits,
         )
@@ -1483,20 +1919,26 @@ class ChatAgent:
         if not recommendation:
             return None
         buyer_limit, seller_limit = parse_order_detail_limits(message)
-        return format_baro_order_details(recommendation, seller_limit=seller_limit, buyer_limit=buyer_limit)
+        display = format_baro_order_details(recommendation, seller_limit=seller_limit, buyer_limit=buyer_limit)
+        model_context = format_baro_order_details_for_model(recommendation, seller_limit=seller_limit, buyer_limit=buyer_limit)
+        return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
 
     def _try_router(self, message: str) -> str | None:
+        result = self._try_router_result(message)
+        return self._tool_result_display_text(result)
+
+    def _try_router_result(self, message: str) -> str | ToolResult | None:
         result = self._try_react_loop(message)
         if result:
             return result
-        return self._try_router_legacy(message)
+        return self._try_router_legacy_result(message)
 
     def _try_react_loop(self, message: str) -> str | None:
         from .tool_router import react_loop
         try:
             return react_loop(
                 message=message,
-                tool_executor=self._execute_tool_call,
+                tool_executor=lambda tc: self._run_tool_call(tc, message),
                 model_call=self._react_model_call,
             )
         except Exception as exc:
@@ -1514,145 +1956,333 @@ class ChatAgent:
         return _default_model_call(messages)
 
     def _try_router_legacy(self, message: str) -> str | None:
+        result = self._try_router_legacy_result(message)
+        return self._tool_result_display_text(result)
+
+    def _try_router_legacy_result(self, message: str) -> ToolResult | None:
         caller = self.router_call or self.model_call
         try:
-            router_prompt = build_router_prompt(message)
+            candidate_tools = select_candidate_tools(message)
+            router_prompt = build_router_prompt(message, candidate_tools=candidate_tools)
             raw = caller(router_prompt).strip()
-            tool_call = parse_tool_call(raw)
+            tool_call = parse_tool_call(raw, valid_names=candidate_tools)
             if not tool_call:
                 return None
-            return self._execute_tool_call(tool_call, message)
+            result = self._run_tool_call(tool_call, message)
+            return result if result.ok else None
         except Exception as exc:
             logger.debug("工具路由失败: %s", exc)
             return None
 
+    def _build_tool_registry(self):
+        registry = create_default_tool_registry()
+        registry.with_handler("query_price", self._tool_query_price)
+        registry.with_handler("query_set", self._tool_query_set)
+        registry.with_handler("query_missing_parts", self._tool_query_missing_parts)
+        registry.with_handler("scan_favorites", self._tool_scan_favorites)
+        registry.with_handler("set_alert", self._tool_set_alert)
+        registry.with_handler("price_trend", self._tool_price_trend)
+        registry.with_handler("general_chat", self._tool_general_chat)
+        registry.with_handler("mod_flipper", self._tool_mod_flipper)
+        registry.with_handler("set_profit", self._tool_set_profit)
+        registry.with_handler("investment_advisor", self._tool_investment_advisor)
+        registry.with_handler("query_events", self._tool_query_events)
+        registry.with_handler("relic_value", self._tool_relic_value)
+        registry.with_handler("farming_route", self._tool_farming_route)
+        registry.with_handler("deep_analysis", self._tool_deep_analysis)
+        registry.with_handler("market_expert", lambda args: self._tool_expert("market", args))
+        registry.with_handler("riven_expert", lambda args: self._tool_expert("riven", args))
+        registry.with_handler("event_expert", lambda args: self._tool_expert("event", args))
+        registry.with_handler("riven_search", self._tool_riven_search)
+        return registry
+
+    def _run_tool_call(self, tool_call, message: str = "") -> ToolResult:
+        args = dict(tool_call.arguments)
+        if message and "__message" not in args:
+            args["__message"] = message
+        result = self.tool_registry.execute(tool_call.name, args)
+        if result.metadata:
+            self.tool_execution_metadata.append(result.metadata)
+        return result
+
     def _execute_tool_call(self, tool_call, message: str = "") -> str | None:
-        args = tool_call.arguments
-        if tool_call.name == "query_price":
-            item_name = args.get("item_name", message)
-            item_id = self._resolve_item_id_for_command(item_name)
-            if not item_id:
+        result = self._run_tool_call(tool_call, message)
+        return result.display_content if result.ok else None
+
+    @staticmethod
+    def _tool_result_display_text(result: str | ToolResult | None) -> str | None:
+        if isinstance(result, ToolResult):
+            if not result.ok:
                 return None
-            contexts = self._contexts_for_items([item_id])
-            if not contexts:
-                return None
-            self.session.update([item_id])
-            det = _deterministic_trade_intent_answer(message, contexts)
-            if det:
-                return det
-            return fallback_answer(message, contexts)
-        if tool_call.name == "query_set":
-            warframe_name = args.get("warframe_name", message)
-            result = price_warframe_query(warframe_name, self.warframe_items, self.order_fetcher)
-            return result or None
-        if tool_call.name == "scan_favorites":
-            return self._handle_scan_command()
-        if tool_call.name == "set_alert":
-            item_name = args.get("item_name", "")
-            direction = args.get("direction", "below")
-            price = args.get("price", 0)
-            try:
-                price = int(price)
-            except (ValueError, TypeError):
-                return None
-            item_id = self._resolve_item_id_for_command(item_name)
-            if not item_id:
-                return None
-            threshold_text = "低于" if direction == "below" else "高于"
-            note = f"{display_item_name(item_id)} {threshold_text} {price}p 提醒"
-            self.memory = self.memory.with_price_alert(item_id, direction, price, note)
-            self._persist_memory()
-            return f"已添加提醒: {note}"
-        if tool_call.name == "price_trend":
-            item_name = args.get("item_name", message)
-            item_id = self._resolve_item_id_for_command(item_name)
-            if not item_id or not self.price_db:
-                return None
-            trend = self.price_db.trend_summary(item_id)
-            if trend:
-                return f"{display_item_name(item_id)}\n{trend}"
-            return f"{display_item_name(item_id)}\n暂无历史价格数据"
-        if tool_call.name == "query_missing_parts":
-            warframe_name = args.get("warframe_name", message)
-            owned_raw = args.get("owned_parts", "")
-            owned_parts = [p.strip() for p in owned_raw.replace("、", ",").replace("，", ",").split(",") if p.strip()]
-            return self._query_missing_parts(warframe_name, owned_parts)
-        if tool_call.name == "general_chat":
+            return result.display_content if result.display_content is not None else result.content
+        return result
+
+    @staticmethod
+    def _tool_result_history_text(result: str | ToolResult | None) -> str:
+        if isinstance(result, ToolResult):
+            return result.model_context or result.display_content or result.content or ""
+        return result or ""
+
+    def _tool_query_price(self, args: dict) -> ToolResult | None:
+        message = args.get("__message", "")
+        item_name = args.get("item_name", message)
+        item_id = self._resolve_item_id_for_command(item_name)
+        if not item_id:
             return None
-        if tool_call.name == "mod_flipper":
-            from .mod_flipper import scan_all_mod_flips
-            from .scout import scout_mod_candidates
-            min_profit = int(args.get("min_profit", 5))
-            limit = int(args.get("limit", 20))
-            results = scan_all_mod_flips(
-                self.warframe_items or [],
-                self.order_fetcher,
-                min_profit=min_profit,
-                limit=limit,
-                scout_fn=scout_mod_candidates,
-            )
-            if not results:
-                return "没有找到符合条件的 Mod 翻转机会"
-            lines = ["## Mod 翻转排行榜\n"]
-            for i, r in enumerate(results, 1):
-                lines.append(f"{i}. **{r.display_name}** (R0→R{r.max_rank})")
-                lines.append(f"   买 R0: {r.r0_buy_price}p → 卖 R{r.max_rank}: {r.r10_sell_price}p")
-                lines.append(f"   利润: {r.flip_profit}p | 每千内融: {r.plat_per_1k_endo:.1f}p | 48h成交: {r.volume_48h or '未知'}笔")
-            return "\n".join(lines)
-        if tool_call.name == "set_profit":
-            from .set_profit import scan_all_set_profits
-            from .scout import scout_set_candidates
-            min_profit = int(args.get("min_profit", 5))
-            limit = int(args.get("limit", 20))
-            results = scan_all_set_profits(
-                self.warframe_items or [],
-                self.order_fetcher,
-                min_profit=min_profit,
-                limit=limit,
-                scout_fn=scout_set_candidates,
-            )
-            if not results:
-                return "没有找到符合条件的套装利润机会"
-            lines = ["## Prime 套装利润排行榜\n"]
-            for i, r in enumerate(results, 1):
-                lines.append(f"{i}. **{r.display_name}**")
-                lines.append(f"   最佳策略: {r.best_strategy} | 利润: +{r.best_profit}p")
-                lines.append(f"   整套买: {r.set_buy_price or '无'}p | 拆件卖合计: {r.parts_sell_total}p")
-                if r.volume_48h:
-                    lines.append(f"   48h成交: {r.volume_48h}笔")
-            return "\n".join(lines)
-        if tool_call.name == "investment_advisor":
-            from .investment import scan_prime_investments
-            from .scout import scout_investment_candidates
-            budget = int(args.get("budget", 1000))
-            min_roi = float(args.get("min_roi", 10))
-            limit = int(args.get("limit", 15))
-            results = scan_prime_investments(
-                self.warframe_items or [],
-                self.order_fetcher,
-                budget=budget,
-                min_roi_pct=min_roi,
-                limit=limit,
-                scout_fn=lambda groups: scout_investment_candidates(groups, budget=budget),
-            )
-            if not results:
-                return "没有找到符合条件的投资机会"
-            lines = [f"## 投资顾问 (预算 {budget}p, ROI >= {min_roi}%)\n"]
-            for i, r in enumerate(results, 1):
-                risk_icon = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(r.risk_level, "⚪")
-                lines.append(f"{i}. **{r.display_name}** {risk_icon}")
-                lines.append(f"   买入成本: {r.buy_cost}p → 卖出: {r.sell_price}p | 每套利润: +{r.profit_per_set}p")
-                lines.append(f"   ROI: {r.roi_pct:.1f}% | 可购 {r.sets_affordable} 套 | 总利润: +{r.total_profit}p")
-                lines.append(f"   48h成交: {r.volume_48h or '未知'}笔 | 风险: {r.risk_level}")
-            return "\n".join(lines)
-        if tool_call.name == "query_events":
-            return self._handle_limited_event_query()
-        if tool_call.name == "deep_analysis":
-            item_name = args.get("item_name", message)
-            return self._deep_analysis(item_name)
-        if tool_call.name == "riven_search":
-            return self._handle_riven_search(args)
+        contexts = self._contexts_for_items([item_id])
+        if not contexts:
+            return None
+        self.session.update([item_id])
+        det = _deterministic_trade_intent_answer(message, contexts)
+        display = det if det else fallback_answer(message, contexts)
+        model_context = safe_query_price_context_from_contexts(contexts)
+        return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
+
+    def _tool_query_set(self, args: dict) -> str | None:
+        message = args.get("__message", "")
+        warframe_name = args.get("warframe_name", message)
+        result = price_warframe_query(warframe_name, self.warframe_items, self.order_fetcher)
+        return result or None
+
+    def _tool_scan_favorites(self, args: dict) -> str | None:
+        return self._handle_scan_command()
+
+    def _tool_set_alert(self, args: dict) -> str | None:
+        item_name = args.get("item_name", "")
+        direction = args.get("direction", "below")
+        price = args.get("price", 0)
+        try:
+            price = int(price)
+        except (ValueError, TypeError):
+            return None
+        item_id = self._resolve_item_id_for_command(item_name)
+        if not item_id:
+            return None
+        threshold_text = "低于" if direction == "below" else "高于"
+        note = f"{display_item_name(item_id)} {threshold_text} {price}p 提醒"
+        self.memory = self.memory.with_price_alert(item_id, direction, price, note)
+        self._persist_memory()
+        return f"已添加提醒: {note}"
+
+    def _tool_price_trend(self, args: dict) -> str | None:
+        message = args.get("__message", "")
+        item_name = args.get("item_name", message)
+        item_id = self._resolve_item_id_for_command(item_name)
+        if not item_id or not self.price_db:
+            return None
+        trend = self.price_db.trend_summary(item_id)
+        if trend:
+            return f"{display_item_name(item_id)}\n{trend}"
+        return f"{display_item_name(item_id)}\n暂无历史价格数据"
+
+    def _tool_query_missing_parts(self, args: dict) -> str | None:
+        message = args.get("__message", "")
+        warframe_name = args.get("warframe_name", message)
+        owned_raw = args.get("owned_parts", "")
+        owned_parts = [p.strip() for p in owned_raw.replace("、", ",").replace("，", ",").split(",") if p.strip()]
+        return self._query_missing_parts(warframe_name, owned_parts)
+
+    def _tool_relic_value(self, args: dict) -> ToolResult:
+        from .relic_value import analyze_relic_value, format_relic_value_for_display, format_relic_value_for_model
+        from .relics import get_relic_db
+
+        relic_name = (args.get("relic_name") or args.get("__message") or "").strip()
+        for prefix in ("/relic value", "/relic 估值", "/relic 价值"):
+            if relic_name.lower().startswith(prefix):
+                relic_name = relic_name[len(prefix):].strip()
+        if not relic_name:
+            return ToolResult(ok=False, error="缺少遗物名称")
+        db = get_relic_db()
+        db.load(self.warframe_items or None)
+        info = db.find_by_relic(relic_name)
+        if not info:
+            return ToolResult(ok=False, error=f"未找到与 '{relic_name}' 相关的遗物。")
+        game_data = GameDataStore()
+        report = analyze_relic_value(info, self.order_fetcher, game_data)
+        display = format_relic_value_for_display(report)
+        model_context = format_relic_value_for_model(report)
+        return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
+
+    def _tool_farming_route(self, args: dict) -> ToolResult:
+        from .farming_route import analyze_farming_route, format_farming_route_for_display, format_farming_route_for_model
+        from .relics import get_relic_db
+
+        target = (args.get("target") or args.get("item_name") or args.get("relic_name") or args.get("__message") or "").strip()
+        if not target:
+            return ToolResult(ok=False, error="缺少刷取目标")
+        db = get_relic_db()
+        db.load(self.warframe_items or None)
+        game_data = GameDataStore()
+        try:
+            fissures = EventTracker().get_active_fissures()
+        except Exception:
+            fissures = []
+        report = analyze_farming_route(target, db, game_data, fissures=fissures, order_fetcher=self.order_fetcher)
+        display = format_farming_route_for_display(report)
+        model_context = format_farming_route_for_model(report)
+        return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
+
+    def _tool_general_chat(self, args: dict) -> str | None:
         return None
+
+    @staticmethod
+    def _format_trade_plan_display(plan: dict) -> list[str]:
+        lines = [f"   策略: {plan.get('display_strategy', plan.get('strategy', ''))}"]
+        lines.append(
+            f"   成本: {plan.get('total_cost', 0)}p → 收入: {plan.get('total_revenue', 0)}p | "
+            f"利润: +{plan.get('profit', 0)}p | ROI: {plan.get('roi_pct', 0)}%"
+        )
+        buy_steps = plan.get("buy_steps") or []
+        if buy_steps:
+            lines.append(f"   你需要买入 {sum(int(step.get('quantity') or 0) for step in buy_steps)} 个:")
+            for step in buy_steps:
+                lines.append(
+                    f"   - {step.get('label')}: {step.get('player')} {step.get('unit_price')}p × "
+                    f"{step.get('quantity')} = {step.get('subtotal')}p · {step.get('market_url')} · {step.get('profile_url')}"
+                )
+                if step.get("whisper"):
+                    lines.append(f"     {step['whisper']}")
+        sell_steps = plan.get("sell_steps") or []
+        if sell_steps:
+            lines.append("   你可以卖给:")
+            for step in sell_steps:
+                lines.append(
+                    f"   - {step.get('label')}: {step.get('player')} {step.get('unit_price')}p × "
+                    f"{step.get('quantity')} = {step.get('subtotal')}p · {step.get('market_url')} · {step.get('profile_url')}"
+                )
+                if step.get("whisper"):
+                    lines.append(f"     {step['whisper']}")
+        return lines
+
+    def _tool_mod_flipper(self, args: dict) -> ToolResult:
+        from .mod_flipper import format_mod_flip_results_for_model, scan_all_mod_flips
+        from .scout import scout_mod_candidates
+        min_profit = int(args.get("min_profit", 5))
+        limit = int(args.get("limit", 20))
+        results = scan_all_mod_flips(
+            self.warframe_items or [],
+            self.order_fetcher,
+            min_profit=min_profit,
+            limit=limit,
+            scout_fn=scout_mod_candidates,
+        )
+        model_context = format_mod_flip_results_for_model(results, min_profit=min_profit, limit=limit)
+        if not results:
+            display = "没有找到符合条件的 Mod 翻转机会"
+            return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
+        lines = ["## Mod/赋能翻转机会\n"]
+        for i, r in enumerate(results, 1):
+            lines.append(f"{i}. **{r.display_name}**")
+            if r.trade_plan:
+                lines.extend(self._format_trade_plan_display(r.trade_plan))
+            else:
+                lines.append(f"   买 R0: {r.r0_buy_price}p → 卖 R{r.max_rank}: {r.r10_sell_price}p")
+                if r.r0_seller:
+                    lines.append(f"   买入对象: {r.r0_seller['player']} {r.r0_seller['price']}p · {r.r0_seller['whisper']}")
+                if r.max_rank_buyer:
+                    lines.append(f"   出售对象: {r.max_rank_buyer['player']} {r.max_rank_buyer['price']}p · {r.max_rank_buyer['whisper']}")
+                if r.market_url:
+                    lines.append(f"   市场链接: {r.market_url}")
+            lines.append(f"   每千内融: {r.plat_per_1k_endo:.1f}p | 48h成交: {r.volume_48h or '未知'}笔")
+        display = "\n".join(lines)
+        return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
+
+    def _tool_set_profit(self, args: dict) -> ToolResult:
+        from .set_profit import format_set_profit_results_for_model, scan_all_set_profits
+        from .scout import scout_set_candidates
+        min_profit = int(args.get("min_profit", 5))
+        limit = int(args.get("limit", 20))
+        results = scan_all_set_profits(
+            self.warframe_items or [],
+            self.order_fetcher,
+            min_profit=min_profit,
+            limit=limit,
+            scout_fn=scout_set_candidates,
+        )
+        model_context = format_set_profit_results_for_model(results, min_profit=min_profit, limit=limit)
+        if not results:
+            display = "没有找到符合条件的套装利润机会"
+            return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
+        lines = ["## Prime 套装利润排行榜\n"]
+        for i, r in enumerate(results, 1):
+            lines.append(f"{i}. **{r.display_name}**")
+            if r.trade_plan:
+                lines.extend(self._format_trade_plan_display(r.trade_plan))
+            else:
+                lines.append(f"   最佳策略: {r.best_strategy} | 利润: +{r.best_profit}p")
+                lines.append(f"   成本/收入: {r.parts_sell_total if r.best_strategy == '买部件→卖套装' else r.set_buy_price or 0}p → {r.set_sell_price if r.best_strategy == '买部件→卖套装' else r.parts_buy_total}p")
+                if r.market_url:
+                    lines.append(f"   市场链接: {r.market_url}")
+            if r.volume_48h:
+                lines.append(f"   48h成交: {r.volume_48h}笔")
+        display = "\n".join(lines)
+        return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
+
+    def _tool_investment_advisor(self, args: dict) -> ToolResult:
+        from .investment import format_prime_investment_results_for_model, scan_prime_investments
+        from .scout import scout_investment_candidates
+        budget = int(args.get("budget", 1000))
+        min_roi = float(args.get("min_roi", 10))
+        limit = int(args.get("limit", 15))
+        results = scan_prime_investments(
+            self.warframe_items or [],
+            self.order_fetcher,
+            budget=budget,
+            min_roi_pct=min_roi,
+            limit=limit,
+            scout_fn=lambda groups: scout_investment_candidates(groups, budget=budget),
+        )
+        model_context = format_prime_investment_results_for_model(results, budget=budget, min_roi_pct=min_roi, limit=limit)
+        if not results:
+            display = "没有找到符合条件的投资机会"
+            return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
+        lines = [f"## 投资顾问 (预算 {budget}p, ROI >= {min_roi}%)\n"]
+        for i, r in enumerate(results, 1):
+            risk_icon = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(r.risk_level, "⚪")
+            lines.append(f"{i}. **{r.display_name}** {risk_icon}")
+            if r.trade_plan:
+                lines.extend(self._format_trade_plan_display(r.trade_plan))
+            else:
+                lines.append(f"   买入成本: {r.buy_cost}p → 卖出: {r.sell_price}p | 每套利润: +{r.profit_per_set}p")
+            lines.append(f"   ROI: {r.roi_pct:.1f}% | 可购 {r.sets_affordable} 套 | 总利润: +{r.total_profit}p")
+            lines.append(f"   48h成交: {r.volume_48h or '未知'}笔 | 风险: {r.risk_level}")
+        display = "\n".join(lines)
+        return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
+
+    def _tool_query_events(self, args: dict) -> ToolResult:
+        event_type = args.get("type")
+        display, model_context = self._query_events_result(event_type=event_type)
+        return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
+
+    def _tool_deep_analysis(self, args: dict) -> str | None:
+        message = args.get("__message", "")
+        item_name = args.get("item_name", message)
+        return self._deep_analysis(item_name)
+
+    def _tool_expert(self, domain: str, args: dict) -> ToolResult:
+        orchestrator = self._expert_orchestrator()
+        return run_expert(
+            ExpertRequest(
+                domain=domain,
+                question=str(args.get("question") or args.get("__message") or ""),
+                context=str(args.get("context") or ""),
+            ),
+            orchestrator,
+        )
+
+    def _expert_orchestrator(self):
+        if self.model_orchestrator is not None:
+            return self.model_orchestrator
+        from .llm import _cloud_chat_sync, chat_with_ollama
+        from .model_orchestrator import ModelOrchestrator
+        self.model_orchestrator = ModelOrchestrator(
+            cloud_call=lambda messages, model: _cloud_chat_sync(messages, model=model),
+            local_call=chat_with_ollama,
+        )
+        return self.model_orchestrator
+
+    def _tool_riven_search(self, args: dict) -> ToolResult:
+        return self._handle_riven_search(args)
 
     def _handle_limited_event_query(self) -> str:
         from .events import EventTracker
@@ -1672,38 +2302,29 @@ class ChatAgent:
             lines.append(f"- {event.description}")
         return "\n".join(lines)
 
-    def _handle_specific_event_query(self, message: str) -> str:
-        from .events import EventTracker
-        tracker = self.event_tracker or EventTracker()
-        if not self.event_tracker:
-            tracker.load_cache()
-        events = tracker.get_active_events()
-        lower = message.lower()
-        if any(kw in lower for kw in ("裂缝", "裂隙", "fissure")):
-            selected = [event for event in events if event.event_type == "void_fissure"]
-            title = "当前虚空裂缝/裂隙:"
-        elif any(kw in lower for kw in ("风暴", "虚空风暴")):
-            selected = [event for event in events if event.event_type == "void_storm"]
-            title = "当前虚空风暴:"
-        elif any(kw in lower for kw in ("入侵", "invasion")):
-            selected = [event for event in events if event.event_type == "invasion"]
-            title = "当前入侵:"
-        elif any(kw in lower for kw in ("警报", "alert")):
-            selected = [event for event in events if event.event_type == "alert"]
-            title = "当前警报:"
-        else:
-            selected = []
-            title = "当前事件:"
-        if not selected:
-            return f"{title}\n暂无。"
-        lines = [title]
-        for event in selected[:20]:
-            lines.append(f"- {event.description}")
-        return "\n".join(lines)
+    def _query_events_result(self, event_type: str | None = None) -> tuple[str, str]:
+        from .events import EventTracker, format_events_for_display, format_events_for_model, is_supported_query_event_type
+        normalized_type = _normalize_query_event_type_arg(event_type)
+        if not is_supported_query_event_type(normalized_type):
+            return format_events_for_display([], normalized_type), format_events_for_model([], normalized_type)
+        try:
+            tracker = self.event_tracker or EventTracker()
+            if not self.event_tracker:
+                tracker.load_cache()
+            events = tracker.get_active_events()
+        except Exception as exc:
+            logger.debug("事件查询失败: %s", exc)
+            display = "暂时无法获取游戏活动信息。"
+            return display, "tool=query_events\nerror=fetch_failed"
+        return format_events_for_display(events, normalized_type), format_events_for_model(events, normalized_type)
 
-    def _try_deterministic_riven(self, message: str) -> str | None:
+    def _handle_specific_event_query(self, message: str) -> str:
+        display, _ = self._query_events_result(event_type=_event_type_from_message(message) or message)
+        return display
+
+    def _try_deterministic_riven(self, message: str) -> ToolResult | None:
         """确定性紫卡路由：直接解析查询，不依赖 LLM 路由。"""
-        from .riven import parse_riven_query, search_rivens, format_riven_results
+        from .riven import parse_riven_query, search_rivens, format_riven_results, format_riven_results_for_model
 
         query = parse_riven_query(message, weapon_resolver=self._resolve_weapon_for_riven)
         if not query:
@@ -1720,7 +2341,11 @@ class ChatAgent:
         results = search_rivens(query, page=1, page_size=self.session.last_riven_page_size)
         self.session.last_riven_query = query
         self.session.last_riven_page = 1
-        return format_riven_results(query, results)
+        display = format_riven_results(query, results)
+        if _is_riven_value_question(message):
+            display += "\n\n" + _build_riven_value_analysis(results)
+        model_context = format_riven_results_for_model(query, results)
+        return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
 
     def _try_model_riven_parse(self, message: str):
         """???????????????????????"""
@@ -1780,9 +2405,9 @@ class ChatAgent:
             seller_statuses=seller_statuses,
         )
 
-    def _try_riven_followup(self, message: str) -> str | None:
+    def _try_riven_followup(self, message: str) -> ToolResult | None:
         """基于上一次紫卡查询的追问（翻页/在线/便宜/无负等过滤条件）。"""
-        from .riven import _extract_max_price, search_rivens, format_riven_results
+        from .riven import _extract_max_price, search_rivens, format_riven_results, format_riven_results_for_model
         query = self.session.last_riven_query
         if query is None:
             return None
@@ -1832,16 +2457,23 @@ class ChatAgent:
         text = format_riven_results(query, results)
         if suffix:
             text = text.replace("紫卡搜索结果", f"紫卡搜索结果{suffix}", 1)
+        display = text + boundary_note
+        model_context = format_riven_results_for_model(query, results)
+        if suffix:
+            model_context += f"\nfollowup_filters={suffix}"
+        if boundary_note:
+            model_context += f"\nboundary_note={boundary_note.strip()}"
         self.session.update([query.weapon_url_name], "riven", "riven_followup")
-        return text + boundary_note
+        return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
 
-    def _handle_riven_search(self, args: dict) -> str:
+    def _handle_riven_search(self, args: dict) -> ToolResult:
         """处理紫卡搜索工具调用。"""
-        from .riven import RivenQuery, parse_riven_query, search_rivens, format_riven_results, RIVEN_ATTRIBUTES, COMPOUND_KEYWORDS
+        from .riven import RivenQuery, parse_riven_query, search_rivens, format_riven_results, format_riven_results_for_model, RIVEN_ATTRIBUTES, COMPOUND_KEYWORDS
 
         weapon = args.get("weapon", "")
         if not weapon:
-            return "请指定武器名称，如：斯特朗双爆紫卡无负"
+            display = "请指定武器名称，如：斯特朗双爆紫卡无负"
+            return ToolResult(ok=True, content=display, display_content=display, model_context="tool=riven_search\nerror=missing_weapon")
 
         # 构建查询消息用于解析属性（始终包含"紫卡"关键词，负向属性加"负"前缀）
         fake_msg = weapon + "紫卡"
@@ -1903,7 +2535,9 @@ class ChatAgent:
         results = search_rivens(query, page=1, page_size=self.session.last_riven_page_size)
         self.session.last_riven_query = query
         self.session.last_riven_page = 1
-        return format_riven_results(query, results)
+        display = format_riven_results(query, results)
+        model_context = format_riven_results_for_model(query, results)
+        return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
 
     def _resolve_weapon_for_riven(self, name: str) -> str | None:
         """解析武器名到 market weapon_url_name（紫卡必须用普通版武器名）。"""
@@ -2124,6 +2758,7 @@ class ChatAgent:
                             best_buy_price=ctx.best_buy_price,
                             best_seller=ctx.best_seller,
                             best_buyer=ctx.best_buyer,
+                            model_context=f"{ctx.model_context}\n{trend}" if ctx.model_context else None,
                         )
                 contexts.append(ctx)
             except requests.RequestException as exc:
@@ -2164,6 +2799,7 @@ class ChatAgent:
                             best_buy_price=ctx.best_buy_price,
                             best_seller=ctx.best_seller,
                             best_buyer=ctx.best_buyer,
+                            model_context=f"{ctx.model_context}\n{trend}" if ctx.model_context else None,
                         )
                 contexts.append(ctx)
             except requests.RequestException as exc:
@@ -2184,7 +2820,7 @@ class ChatAgent:
 
 
 def build_chat_prompt(message: str, contexts: list[ItemContext], memory: AgentMemory) -> str:
-    context_text = "\n\n".join(context.text for context in contexts)
+    context_text = safe_query_price_context_from_contexts(contexts)
     memory_text = _memory_prompt(contexts, memory)
     return (
         "你是资深星际战甲玩家和中文交易助手。请用老玩家视角回答，重点说明能不能买、能不能卖、价差和注意事项。"
@@ -2192,9 +2828,9 @@ def build_chat_prompt(message: str, contexts: list[ItemContext], memory: AgentMe
         "所有价格单位都是 Warframe 白金 platinum，绝不是美元、人民币或其他现实货币。"
         "不要编造没有提供的实时价格。\n\n"
         f"长期记忆与偏好:\n{memory_text}\n\n"
-        f"实时市场上下文:\n{context_text}\n\n"
+        f"实时市场安全摘要:\n{context_text}\n\n"
         f"玩家问题: {message}\n"
-        "请给出简洁中文建议，并保留可复制的私聊命令。"
+        "请基于摘要给出简洁中文建议；不要编造玩家名、profile 链接或私聊命令。"
     )
 
 
@@ -2213,13 +2849,13 @@ def build_system_prompt(
         "- 所有商品名使用 `中文名 / English Name / market_id` 格式\n"
         "- 所有价格单位都是白金(platinum)，不是现实货币\n"
         "- 绝不编造未提供的实时价格，数据不足时明确说明\n"
-        "- 有推荐交易对象时必须提供 /w 私聊命令\n\n"
+        "- 只有工具/display 已明确提供交易对象时才可转述私聊命令，不能凭安全摘要编造玩家名\n\n"
         "## 回答策略\n"
         "价格查询类问题，按以下步骤思考：\n"
         "1. 识别物品类型（Mod/战甲/赋能/遗物等）\n"
         "2. 分析当前市场数据（卖价、收价、价差）\n"
         "3. 结合趋势和事件给出建议\n"
-        "4. 提供可执行的操作（私聊命令等）\n\n"
+        "4. 只有工具/display 已提供真实玩家名和私聊命令时才转述；否则不要编造玩家名或私聊命令\n\n"
         "投资/利润类问题，按以下步骤思考：\n"
         "1. 计算成本和预期收益\n"
         "2. 评估流动性（成交量）\n"
@@ -2234,8 +2870,7 @@ def build_system_prompt(
         "回答:\n"
         "充沛赋能 / Arcane Energize / arcane_energize\n"
         "最低卖价: 45p，最高收价: 35p，价差: 10p\n"
-        "推荐购买: /w seller Hi! I want to buy: \"Arcane Energize\" for 45 platinum.\n"
-        "建议: 价差适中，适合直接购买。满级赋能流动性好，48h 成交量充足。\n\n"
+        "建议: 价差适中，适合直接购买。若界面已提供真实玩家私聊按钮，可使用复制命令；不要编造玩家名。\n\n"
         "玩家问题: 犀牛 Prime 一套多少钱，拆件买还是一套买\n"
         "回答:\n"
         "Rhino Prime / rhino_prime_set\n"
@@ -2250,7 +2885,7 @@ def build_system_prompt(
 
     # 4. 市场智能注入
     if market_context:
-        parts.append(f"\n## 市场智能\n{market_context}")
+        parts.append(f"\n## 市场智能\n{wrap_untrusted_model_text('market_context', market_context)}")
 
     return "\n".join(parts)
 
@@ -2267,11 +2902,54 @@ def build_chat_messages(
     if history:
         messages.extend(history)
     if contexts:
-        context_text = "\n\n".join(context.text for context in contexts)
-        messages.append({"role": "user", "content": f"实时市场上下文:\n{context_text}\n\n玩家问题: {message}\n请给出简洁中文建议，并保留可复制的私聊命令。"})
+        context_text = safe_query_price_context_from_contexts(contexts)
+        messages.append({"role": "user", "content": f"实时市场安全摘要:\n{context_text}\n\n玩家问题: {message}\n请基于摘要给出简洁中文建议；不要编造玩家名、profile 链接或私聊命令。"})
     else:
         messages.append({"role": "user", "content": f"玩家问题: {message}\n请给出简洁中文建议。"})
     return messages
+
+
+def _extract_platinum_amount(message: str) -> int | None:
+    match = re.search(r"(\d+)\s*(?:p|白金)", message, flags=re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _is_riven_value_question(message: str) -> bool:
+    return any(keyword in message for keyword in ("值不值得", "值得买", "能买吗", "适合买", "评价", "分析"))
+
+
+def _build_riven_value_analysis(results) -> str:
+    rivens = list(getattr(results, "results", results) or [])
+    if not rivens:
+        return "购买分析: 当前没有可对比的紫卡订单，暂时不建议凭空估价。"
+    priced = [r for r in rivens if getattr(r, "price", None) is not None]
+    prices = [int(r.price) for r in priced]
+    price_line = f"价格区间: {min(prices)}p - {max(prices)}p，低价参考约 {prices[0]}p。" if prices else "价格区间: 当前结果没有明确标价。"
+    strong_stats = {
+        "critical_chance": "暴击率",
+        "critical_damage": "暴击伤害",
+        "multishot": "多重",
+        "base_damage_/_melee_damage": "基伤",
+    }
+    strong_hits = []
+    negatives = []
+    rerolls = []
+    for riven in rivens[:5]:
+        rerolls.append(getattr(riven, "re_rolls", 0))
+        for attr in getattr(riven, "positive_attrs", []) or []:
+            stat = attr.get("stat") if isinstance(attr, dict) else getattr(attr, "stat", "")
+            if stat in strong_stats and strong_stats[stat] not in strong_hits:
+                strong_hits.append(strong_stats[stat])
+        for attr in getattr(riven, "negative_attrs", []) or []:
+            stat = attr.get("stat") if isinstance(attr, dict) else getattr(attr, "stat", "")
+            if stat and stat not in negatives:
+                negatives.append(stat)
+    stat_line = "词条: " + (f"看到 {', '.join(strong_hits)} 等有效词条。" if strong_hits else "当前前几条没有明显核心输出词条。")
+    if negatives:
+        stat_line += " 但有负词条，需要确认是否影响武器手感或输出。"
+    reroll_line = f"洗卡: 前几条洗卡次数约 {min(rerolls)}-{max(rerolls)} 次，低洗可继续调整，高洗转手风险更高。" if rerolls else "洗卡: 未显示洗卡次数。"
+    conclusion = "结论: 只建议把低价、词条匹配玩法的卡作为自用或小额尝试；不要把紫卡当稳定倒卖品，也不要高价追没有核心词条的卡。"
+    return "\n".join(["购买分析:", price_line, stat_line, reroll_line, conclusion])
 
 
 def _deterministic_trade_intent_answer(message: str, contexts: list[ItemContext]) -> str | None:
@@ -2350,8 +3028,8 @@ def _render_trend_prediction(context: ItemContext) -> str | None:
 def _render_comparison_table(contexts: list[ItemContext]) -> str:
     """生成多物品对比表格。"""
     lines = ["物品对比"]
-    header = "| 物品 | 最低卖价 | 最高价 | 价差 | 建议 |"
-    separator = "|------|---------|--------|------|------|"
+    header = "| 物品 | 最低卖价 | 最高收价 | 价差 | 建议 |"
+    separator = "|------|---------|----------|------|------|"
     lines.append(header)
     lines.append(separator)
 
@@ -2650,10 +3328,12 @@ _RESURGENCE_NAME_ZH = {
 
 _EVENT_KEYWORDS = {
     "活动", "事件", "裂缝", "裂隙", "fissure", "虚空裂缝", "虚空裂隙",
-    "baro", "虚空商人", "入侵", "invasion", "警报", "alert", "虚空风暴",
+    "baro", "虚空商人", "奸商", "入侵", "invasion", "警报", "alert", "虚空风暴",
     "钢铁歼灭", "钢铁防御", "钢铁生存", "开核桃", "遗物", "核桃",
     "刷什么", "现在刷", "当前刷", "可以刷", "有什么活动",
-    "重生", "prime重生", "prime 重生", "resurgence", "prime resurgence", "prime vault",
+    "重生", "返厂", "prime重生", "prime 重生", "resurgence", "prime resurgence", "prime vault",
+    "午夜电波", "电波", "nightwave", "仲裁", "arbitration", "突击", "sortie",
+    "darvo", "每日特惠", "每日优惠", "扎里曼", "zariman", "赏金", "bounty",
 }
 
 
@@ -2684,8 +3364,21 @@ def _is_event_query(message: str) -> bool:
 
 
 def _is_specific_event_list_query(message: str) -> bool:
-    lower = message.lower()
-    return any(kw in lower for kw in ("裂缝", "裂隙", "fissure", "虚空风暴", "风暴", "入侵", "invasion", "警报", "alert"))
+    from .events import unsupported_event_type_label
+    return _event_type_from_message(message) is not None or bool(unsupported_event_type_label(message)) or any(kw in message.lower() for kw in ("警报", "alert"))
+
+
+def _event_type_from_message(message: str) -> str | None:
+    from .events import normalize_query_event_type
+    return normalize_query_event_type(message)
+
+
+def _normalize_query_event_type_arg(event_type: object) -> str | None:
+    if event_type is None:
+        return None
+    from .events import normalize_query_event_type
+    text = str(event_type).strip()
+    return normalize_query_event_type(text) or (text if text else None)
 
 
 _TRADING_TOOL_KEYWORDS = {
@@ -2731,19 +3424,10 @@ def _self_check(answer: str, contexts: list[ItemContext]) -> str | None:
         if fabricated and len(fabricated) > len(mentioned_prices) * 0.5:
             warnings.append(f"回答中包含未在数据中出现的价格: {fabricated}p，可能不准确")
 
-    # 2. 私聊命令检测：有推荐卖家/买家时必须包含 /w
-    has_recommendation = any(
-        kw in answer for kw in ["推荐购买", "推荐出售", "推荐卖家", "推荐买家", "最低卖", "最高收"]
-    )
+    # 2. 无交易上下文时出现私聊命令 = LLM 混入了无关数据
     has_whisper = "/w " in answer or "/W " in answer
-    # 2b. 无交易上下文时出现私聊命令 = LLM 混入了无关数据
     if has_whisper and not contexts:
         warnings.append("回答中包含私聊命令但查询与交易无关，可能混入了不相关数据")
-    if has_recommendation and not has_whisper and contexts:
-        for ctx in contexts:
-            if ctx.best_sell_price or ctx.best_buy_price:
-                warnings.append("有推荐交易对象但缺少 /w 私聊命令")
-                break
 
     # 3. 回答截断检测
     if len(answer.strip()) < 20:

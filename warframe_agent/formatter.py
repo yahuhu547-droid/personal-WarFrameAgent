@@ -7,6 +7,11 @@ def display_name(item_id: str) -> str:
     return item_id.replace("_", " ").title()
 
 
+def market_item_url(item_id: str) -> str:
+    slug = str(item_id or "").strip().lower().replace(" ", "_").replace("'", "")
+    return f"https://warframe.market/items/{slug}" if slug else ""
+
+
 def build_whisper(user_name: str, item_id: str, platinum: int, order_type: str) -> str:
     if order_type == "sell":
         action = "buy"
@@ -15,6 +20,20 @@ def build_whisper(user_name: str, item_id: str, platinum: int, order_type: str) 
     else:
         raise ValueError(f"未知订单类型：{order_type}")
     return f'/w {user_name} Hi! I want to {action}: "{display_name(item_id)}" for {platinum} platinum. (warframe.market)'
+
+
+def summarize_trade_order(order: MarketOrder | None, item_id: str) -> dict | None:
+    if order is None:
+        return None
+    return {
+        "player": order.user_name,
+        "price": order.platinum,
+        "quantity": order.quantity,
+        "reputation": order.reputation,
+        "rank": order.mod_rank,
+        "market_url": market_item_url(item_id),
+        "whisper": build_whisper(order.user_name, item_id, order.platinum, order.order_type),
+    }
 
 
 def format_order_table(title: str, orders: list[MarketOrder], item_id: str) -> str:

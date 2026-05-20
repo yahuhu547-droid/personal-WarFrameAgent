@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from warframe_agent.memory import AgentMemory, CycleAlert, PriceAlert, TradingPreferences, UserProfile
+from warframe_agent.memory import AgentMemory, CycleAlert, PriceAlert, ProactiveSuggestion, TradingPreferences, UserProfile
 
 
 class MemoryTests(unittest.TestCase):
@@ -29,6 +29,63 @@ class MemoryTests(unittest.TestCase):
 
         self.assertTrue(alert.matches(40))
         self.assertFalse(alert.matches(50))
+
+    def test_opportunity_filter_defaults_and_round_trips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memory.json"
+            path.write_text(json.dumps({
+                "preferences": {"platform": "pc", "crossplay": True, "max_results": 5},
+                "price_alerts": [],
+                "favorite_items": [],
+                "common_questions": [],
+                "watchlist": [],
+            }, ensure_ascii=False), encoding="utf-8")
+
+            memory = AgentMemory.load(path)
+            self.assertEqual(memory.preferences.opportunity_filter, "all")
+            updated = memory.with_updated_preferences(opportunity_filter="mod")
+            updated.save(path)
+            loaded = AgentMemory.load(path)
+
+        self.assertEqual(loaded.preferences.opportunity_filter, "mod")
+        self.assertEqual(loaded.to_dict()["preferences"]["opportunity_filter"], "mod")
+
+    def test_invalid_opportunity_filter_normalizes_to_all(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memory.json"
+            path.write_text(json.dumps({
+                "preferences": {"opportunity_filter": "everything"},
+                "price_alerts": [],
+                "favorite_items": [],
+                "common_questions": [],
+                "watchlist": [],
+            }, ensure_ascii=False), encoding="utf-8")
+
+            memory = AgentMemory.load(path)
+
+        self.assertEqual(memory.preferences.opportunity_filter, "all")
+
+    def test_recent_suggestions_deduplicate_by_opportunity_identity(self):
+        memory = AgentMemory.default()
+        first = ProactiveSuggestion(
+            item_id="arcane_energize",
+            suggestion_type="opportunity",
+            priority=2,
+            message="旧机会",
+            data={"source": "spread", "dedupe_key": "opportunity:arcane_energize:spread"},
+        )
+        second = ProactiveSuggestion(
+            item_id="arcane_energize",
+            suggestion_type="opportunity",
+            priority=2,
+            message="新机会",
+            data={"source": "spread", "dedupe_key": "opportunity:arcane_energize:spread"},
+        )
+
+        memory = memory.with_suggestion(first).with_suggestion(second)
+
+        self.assertEqual(len(memory.recent_suggestions), 1)
+        self.assertEqual(memory.recent_suggestions[0].message, "新机会")
 
     def test_cycle_alert_round_trip_and_dedup(self):
         with tempfile.TemporaryDirectory() as tmp:

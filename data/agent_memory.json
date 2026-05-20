@@ -2,7 +2,8 @@
   "preferences": {
     "platform": "pc",
     "crossplay": true,
-    "max_results": 5
+    "max_results": 5,
+    "opportunity_filter": "all"
   },
   "price_alerts": [
     {
@@ -22,16 +23,16 @@
     "arcane_energize"
   ],
   "common_questions": [
-    "老哥，充沛现在能买吗",
-    "充沛现在能买吗",
-    "赤毒布拉玛现在价格怎么样",
-    "充沛多少钱",
-    "那现在呢",
-    "我有 Lex Prime 蓝图和枪管，还差多少钱做一套",
     "Lex Prime 一套多少钱",
     "斯特朗紫卡双爆无负，全部玩家",
-    "斯特朗紫卡双爆无负",
     "全部玩家",
+    "斯特朗紫卡双爆无负",
+    "上一组",
+    "斯特朗紫卡双爆",
+    "下一组",
+    "无负1000p以下",
+    "这个斯特朗紫卡值不值得买",
+    "斯特朗紫卡暴击率",
     "现在呢",
     "充沛现在价格怎么样",
     "那个回蓝的赋能现在行情怎样",
@@ -55,31 +56,31 @@
   "user_profile": {
     "preferred_trade_type": "buy",
     "queried_items": {
-      "Lex": 4,
-      "Prime": 4,
-      "充沛现在能买吗": 2,
+      "Lex": 3,
+      "Prime": 3,
       "斯特朗紫卡双爆无负": 2,
       "全部玩家": 2,
-      "老哥": 1,
-      "赤毒布拉玛现在价格怎么样": 1,
-      "充沛多少钱": 1,
-      "那现在呢": 1,
-      "我有": 1,
-      "蓝图和枪管": 1,
-      "还差多少钱做一套": 1,
       "一套多少钱": 1,
+      "上一组": 1,
+      "斯特朗紫卡双爆": 1,
+      "下一组": 1,
+      "无负1000p以下": 1,
+      "这个斯特朗紫卡值不值得买": 1,
+      "斯特朗紫卡暴击率": 1,
       "现在呢": 1,
       "充沛现在价格怎么样": 1,
       "那个回蓝的赋能现在行情怎样": 1,
       "你好啊": 1,
       "我要买充沛": 1,
       "我想卖充沛": 1,
-      "枪管最高收多少": 1
+      "枪管最高收多少": 1,
+      "一套最低卖多少": 1,
+      "伏特p机体多少钱": 1
     },
     "favorite_categories": [
       "prime_set",
-      "prime_part",
-      "arcane"
+      "arcane",
+      "prime_part"
     ],
     "total_queries": 20
   },
@@ -88,141 +89,369 @@
       "item_id": "ash_prime_set",
       "suggestion_type": "goal_opportunity",
       "priority": 2,
-      "message": "目标「test」发现机会: Ash Prime 一套 +132p (ROI 27.9%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "carrier_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「test」发现机会: 搬运者 prime +112p (ROI 25.0%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "ballistica_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「test」发现机会: 布里斯提卡 prime +70p (ROI 14.3%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "carrier_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 50 白金」发现机会: 搬运者 prime +64p (ROI 25.0%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "ballistica_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 50 白金」发现机会: 布里斯提卡 prime +40p (ROI 14.3%)",
-      "timestamp": ""
+      "message": "目标「攒 100 白金」发现机会: Ash Prime 一套 +36p (ROI 7.8%)。原因：来源 投资翻转，策略 buy_parts_sell_set，预估成本 51p，目标卖价 55p，预估利润 +36p，ROI 7.8%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "investment",
+        "strategy": "buy_parts_sell_set",
+        "profit": 36,
+        "roi_pct": 7.8,
+        "buy_cost": 51,
+        "sell_price": 55,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "sets_affordable": 9,
+        "rationale": "原因：来源 投资翻转，策略 buy_parts_sell_set，预估成本 51p，目标卖价 55p，预估利润 +36p，ROI 7.8%，风险 medium。"
+      }
     },
     {
       "item_id": "boltor_prime_set",
       "suggestion_type": "goal_opportunity",
       "priority": 2,
-      "message": "目标「攒 50 白金」发现机会: 螺钉步枪 prime +24p (ROI 8.7%)",
-      "timestamp": ""
+      "message": "目标「攒 50 白金」发现机会: 螺钉步枪 prime +24p (ROI 8.7%)。原因：来源 投资翻转，策略 buy_parts_sell_set，预估成本 46p，目标卖价 50p，预估利润 +24p，ROI 8.7%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "investment",
+        "strategy": "buy_parts_sell_set",
+        "profit": 24,
+        "roi_pct": 8.7,
+        "buy_cost": 46,
+        "sell_price": 50,
+        "risk": "medium",
+        "goal_description": "攒 50 白金",
+        "sets_affordable": 6,
+        "rationale": "原因：来源 投资翻转，策略 buy_parts_sell_set，预估成本 46p，目标卖价 50p，预估利润 +24p，ROI 8.7%，风险 medium。"
+      }
     },
     {
       "item_id": "ash_prime_set",
       "suggestion_type": "goal_opportunity",
       "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: Ash Prime 一套 +132p (ROI 27.9%)",
-      "timestamp": ""
+      "message": "目标「攒 50 白金」发现机会: Ash Prime 一套 +28p (ROI 10.4%)。原因：来源 投资翻转，策略 buy_set_sell_parts，预估成本 67p，目标卖价 74p，预估利润 +28p，ROI 10.4%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "investment",
+        "strategy": "buy_set_sell_parts",
+        "profit": 28,
+        "roi_pct": 10.4,
+        "buy_cost": 67,
+        "sell_price": 74,
+        "risk": "medium",
+        "goal_description": "攒 50 白金",
+        "sets_affordable": 4,
+        "rationale": "原因：来源 投资翻转，策略 buy_set_sell_parts，预估成本 67p，目标卖价 74p，预估利润 +28p，ROI 10.4%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "arcane_aegis",
+      "suggestion_type": "goal_opportunity",
+      "priority": 1,
+      "message": "目标「攒 100 白金」发现机会: 神盾赋能 +65p (ROI 1083.3333333333335%)。原因：来源 Mod/赋能翻转，预估成本 6p，目标卖价 71p，预估利润 +65p，ROI 1083.3333333333335%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "mod_flip",
+        "strategy": "",
+        "profit": 65,
+        "roi_pct": 1083.3333333333335,
+        "buy_cost": 6,
+        "sell_price": 71,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "rationale": "原因：来源 Mod/赋能翻转，预估成本 6p，目标卖价 71p，预估利润 +65p，ROI 1083.3333333333335%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "arcane_velocity",
+      "suggestion_type": "goal_opportunity",
+      "priority": 1,
+      "message": "目标「攒 100 白金」发现机会: 迅速赋能 +70p (ROI 1400.0%)。原因：来源 Mod/赋能翻转，预估成本 5p，目标卖价 75p，预估利润 +70p，ROI 1400.0%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "mod_flip",
+        "strategy": "",
+        "profit": 70,
+        "roi_pct": 1400.0,
+        "buy_cost": 5,
+        "sell_price": 75,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "rationale": "原因：来源 Mod/赋能翻转，预估成本 5p，目标卖价 75p，预估利润 +70p，ROI 1400.0%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "arcane_energize",
+      "suggestion_type": "goal_opportunity",
+      "priority": 1,
+      "message": "目标「攒 100 白金」发现机会: 充沛赋能 +74p (ROI 1233.3333333333335%)。原因：来源 Mod/赋能翻转，预估成本 6p，目标卖价 80p，预估利润 +74p，ROI 1233.3333333333335%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "mod_flip",
+        "strategy": "",
+        "profit": 74,
+        "roi_pct": 1233.3333333333335,
+        "buy_cost": 6,
+        "sell_price": 80,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "rationale": "原因：来源 Mod/赋能翻转，预估成本 6p，目标卖价 80p，预估利润 +74p，ROI 1233.3333333333335%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "arcane_precision",
+      "suggestion_type": "goal_opportunity",
+      "priority": 1,
+      "message": "目标「攒 100 白金」发现机会: 精确赋能 +38p (ROI 950.0%)。原因：来源 Mod/赋能翻转，预估成本 4p，目标卖价 42p，预估利润 +38p，ROI 950.0%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "mod_flip",
+        "strategy": "",
+        "profit": 38,
+        "roi_pct": 950.0,
+        "buy_cost": 4,
+        "sell_price": 42,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "rationale": "原因：来源 Mod/赋能翻转，预估成本 4p，目标卖价 42p，预估利润 +38p，ROI 950.0%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "arcane_grace",
+      "suggestion_type": "goal_opportunity",
+      "priority": 1,
+      "message": "目标「攒 100 白金」发现机会: 优雅赋能 +54p (ROI 900.0%)。原因：来源 Mod/赋能翻转，预估成本 6p，目标卖价 60p，预估利润 +54p，ROI 900.0%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "mod_flip",
+        "strategy": "",
+        "profit": 54,
+        "roi_pct": 900.0,
+        "buy_cost": 6,
+        "sell_price": 60,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "rationale": "原因：来源 Mod/赋能翻转，预估成本 6p，目标卖价 60p，预估利润 +54p，ROI 900.0%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "arcane_avenger",
+      "suggestion_type": "goal_opportunity",
+      "priority": 1,
+      "message": "目标「攒 100 白金」发现机会: 复仇者赋能 +32p (ROI 800.0%)。原因：来源 Mod/赋能翻转，预估成本 4p，目标卖价 36p，预估利润 +32p，ROI 800.0%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "mod_flip",
+        "strategy": "",
+        "profit": 32,
+        "roi_pct": 800.0,
+        "buy_cost": 4,
+        "sell_price": 36,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "rationale": "原因：来源 Mod/赋能翻转，预估成本 4p，目标卖价 36p，预估利润 +32p，ROI 800.0%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "arcane_barrier",
+      "suggestion_type": "goal_opportunity",
+      "priority": 1,
+      "message": "目标「攒 100 白金」发现机会: 壁垒赋能 +26p (ROI 650.0%)。原因：来源 Mod/赋能翻转，预估成本 4p，目标卖价 30p，预估利润 +26p，ROI 650.0%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "mod_flip",
+        "strategy": "",
+        "profit": 26,
+        "roi_pct": 650.0,
+        "buy_cost": 4,
+        "sell_price": 30,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "rationale": "原因：来源 Mod/赋能翻转，预估成本 4p，目标卖价 30p，预估利润 +26p，ROI 650.0%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "arcane_guardian",
+      "suggestion_type": "goal_opportunity",
+      "priority": 1,
+      "message": "目标「攒 100 白金」发现机会: 保卫者赋能 +23p (ROI 575.0%)。原因：来源 Mod/赋能翻转，预估成本 4p，目标卖价 27p，预估利润 +23p，ROI 575.0%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "mod_flip",
+        "strategy": "",
+        "profit": 23,
+        "roi_pct": 575.0,
+        "buy_cost": 4,
+        "sell_price": 27,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "rationale": "原因：来源 Mod/赋能翻转，预估成本 4p，目标卖价 27p，预估利润 +23p，ROI 575.0%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "arcane_acceleration",
+      "suggestion_type": "goal_opportunity",
+      "priority": 1,
+      "message": "目标「攒 100 白金」发现机会: 加速赋能 +22p (ROI 550.0%)。原因：来源 Mod/赋能翻转，预估成本 4p，目标卖价 26p，预估利润 +22p，ROI 550.0%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "mod_flip",
+        "strategy": "",
+        "profit": 22,
+        "roi_pct": 550.0,
+        "buy_cost": 4,
+        "sell_price": 26,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "rationale": "原因：来源 Mod/赋能翻转，预估成本 4p，目标卖价 26p，预估利润 +22p，ROI 550.0%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "arcane_rage",
+      "suggestion_type": "goal_opportunity",
+      "priority": 1,
+      "message": "目标「攒 100 白金」发现机会: 愤怒赋能 +15p (ROI 500.0%)。原因：来源 Mod/赋能翻转，预估成本 3p，目标卖价 18p，预估利润 +15p，ROI 500.0%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "mod_flip",
+        "strategy": "",
+        "profit": 15,
+        "roi_pct": 500.0,
+        "buy_cost": 3,
+        "sell_price": 18,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "rationale": "原因：来源 Mod/赋能翻转，预估成本 3p，目标卖价 18p，预估利润 +15p，ROI 500.0%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "ankyros_prime",
+      "suggestion_type": "goal_opportunity",
+      "priority": 1,
+      "message": "目标「攒 100 白金」发现机会: Ankyros Prime +26p (ROI 144.4%)。原因：来源 Prime 套装套利，预估成本 18p，目标卖价 52p，预估利润 +26p，ROI 144.4%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "set_profit",
+        "strategy": "",
+        "profit": 26,
+        "roi_pct": 144.4,
+        "buy_cost": 18,
+        "sell_price": 52,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "rationale": "原因：来源 Prime 套装套利，预估成本 18p，目标卖价 52p，预估利润 +26p，ROI 144.4%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "akarius_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 阿利乌双枪 prime +165p (ROI 33.3%)。原因：来源 投资翻转，策略 buy_parts_sell_set，预估成本 45p，目标卖价 60p，预估利润 +165p，ROI 33.3%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "investment",
+        "strategy": "buy_parts_sell_set",
+        "profit": 165,
+        "roi_pct": 33.3,
+        "buy_cost": 45,
+        "sell_price": 60,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "sets_affordable": 11,
+        "rationale": "原因：来源 投资翻转，策略 buy_parts_sell_set，预估成本 45p，目标卖价 60p，预估利润 +165p，ROI 33.3%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "akjagara_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 觉醒双枪 prime +104p (ROI 22.8%)。原因：来源 投资翻转，策略 buy_parts_sell_set，预估成本 57p，目标卖价 70p，预估利润 +104p，ROI 22.8%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "investment",
+        "strategy": "buy_parts_sell_set",
+        "profit": 104,
+        "roi_pct": 22.8,
+        "buy_cost": 57,
+        "sell_price": 70,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "sets_affordable": 8,
+        "rationale": "原因：来源 投资翻转，策略 buy_parts_sell_set，预估成本 57p，目标卖价 70p，预估利润 +104p，ROI 22.8%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "akstiletto_prime",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: Akstiletto Prime +8p (ROI 19.5%)。原因：来源 Prime 套装套利，预估成本 41p，目标卖价 61p，预估利润 +8p，ROI 19.5%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "set_profit",
+        "strategy": "",
+        "profit": 8,
+        "roi_pct": 19.5,
+        "buy_cost": 41,
+        "sell_price": 61,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "rationale": "原因：来源 Prime 套装套利，预估成本 41p，目标卖价 61p，预估利润 +8p，ROI 19.5%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "akstiletto_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 100 白金」发现机会: 史提托双枪 prime +72p (ROI 15.1%)。原因：来源 投资翻转，策略 buy_parts_sell_set，预估成本 53p，目标卖价 61p，预估利润 +72p，ROI 15.1%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "investment",
+        "strategy": "buy_parts_sell_set",
+        "profit": 72,
+        "roi_pct": 15.1,
+        "buy_cost": 53,
+        "sell_price": 61,
+        "risk": "medium",
+        "goal_description": "攒 100 白金",
+        "sets_affordable": 9,
+        "rationale": "原因：来源 投资翻转，策略 buy_parts_sell_set，预估成本 53p，目标卖价 61p，预估利润 +72p，ROI 15.1%，风险 medium。"
+      }
+    },
+    {
+      "item_id": "afuris_prime_set",
+      "suggestion_type": "goal_opportunity",
+      "priority": 2,
+      "message": "目标「攒 50 白金」发现机会: 盗贼双枪 prime +56p (ROI 23.0%)。原因：来源 投资翻转，策略 buy_parts_sell_set，预估成本 61p，目标卖价 75p，预估利润 +56p，ROI 23.0%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "investment",
+        "strategy": "buy_parts_sell_set",
+        "profit": 56,
+        "roi_pct": 23.0,
+        "buy_cost": 61,
+        "sell_price": 75,
+        "risk": "medium",
+        "goal_description": "攒 50 白金",
+        "sets_affordable": 4,
+        "rationale": "原因：来源 投资翻转，策略 buy_parts_sell_set，预估成本 61p，目标卖价 75p，预估利润 +56p，ROI 23.0%，风险 medium。"
+      }
     },
     {
       "item_id": "carrier_prime_set",
       "suggestion_type": "goal_opportunity",
       "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 搬运者 prime +112p (ROI 25.0%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "ballistica_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 布里斯提卡 prime +70p (ROI 14.3%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "ballistica_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 布里斯提卡 prime +91p (ROI 19.4%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "boltor_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 螺钉步枪 prime +40p (ROI 8.7%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "ballistica_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 布里斯提卡 prime +91p (ROI 19.4%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "boltor_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 螺钉步枪 prime +40p (ROI 8.7%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "ballistica_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「test」发现机会: 布里斯提卡 prime +91p (ROI 19.4%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "boltor_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「test」发现机会: 螺钉步枪 prime +40p (ROI 8.7%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "carrier_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 50 白金」发现机会: 搬运者 prime +64p (ROI 25.0%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "ash_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 50 白金」发现机会: Ash Prime 一套 +54p (ROI 19.6%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "ballistica_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 50 白金」发现机会: 布里斯提卡 prime +52p (ROI 19.4%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "ballistica_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 布里斯提卡 prime +91p (ROI 19.4%)",
-      "timestamp": ""
-    },
-    {
-      "item_id": "boltor_prime_set",
-      "suggestion_type": "goal_opportunity",
-      "priority": 2,
-      "message": "目标「攒 100 白金」发现机会: 螺钉步枪 prime +40p (ROI 8.7%)",
-      "timestamp": ""
+      "message": "目标「攒 50 白金」发现机会: 搬运者 prime +40p (ROI 15.2%)。原因：来源 投资翻转，策略 buy_parts_sell_set，预估成本 66p，目标卖价 76p，预估利润 +40p，ROI 15.2%，风险 medium。",
+      "timestamp": "",
+      "data": {
+        "source": "investment",
+        "strategy": "buy_parts_sell_set",
+        "profit": 40,
+        "roi_pct": 15.2,
+        "buy_cost": 66,
+        "sell_price": 76,
+        "risk": "medium",
+        "goal_description": "攒 50 白金",
+        "sets_affordable": 4,
+        "rationale": "原因：来源 投资翻转，策略 buy_parts_sell_set，预估成本 66p，目标卖价 76p，预估利润 +40p，ROI 15.2%，风险 medium。"
+      }
     }
   ],
   "active_goals": [
@@ -298,6 +527,14 @@
       "tier": "",
       "hard": null,
       "note": "地点=虚空、任务=歼灭"
+    }
+  ],
+  "cycle_alerts": [
+    {
+      "cycle": "earth",
+      "target_state": "night",
+      "note": "地球变为黑夜",
+      "created_at": 1779000824.934246
     }
   ]
 }

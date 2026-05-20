@@ -216,9 +216,22 @@ def generate_proactive_message(
     if suggestion.suggestion_type in ("opportunity", "goal_opportunity"):
         action = "buy now" if suggestion.priority == 1 else "watch"
         push_type = "opportunity"
+        data = dict(suggestion.data or {})
         message = suggestion.message
+        rationale = data.get("rationale")
+        if rationale and rationale not in message:
+            message = f"{message}\n{rationale}"
         if event_ctx:
             message += f"（注意：{event_ctx}）"
+        source = data.get("source", "")
+        strategy = data.get("strategy", "")
+        dedupe_parts = [push_type, suggestion.suggestion_type, item_id]
+        if source:
+            dedupe_parts.append(str(source))
+        if strategy:
+            dedupe_parts.append(str(strategy))
+        data["suggestion_type"] = suggestion.suggestion_type
+        data["dedupe_key"] = data.get("dedupe_key") or ":".join(dedupe_parts)
         return ProactivePush(
             item_id=item_id,
             item_display=item_display,
@@ -226,7 +239,7 @@ def generate_proactive_message(
             priority=suggestion.priority,
             message=message,
             action_suggestion=action,
-            data={"suggestion_type": suggestion.suggestion_type},
+            data=data,
         )
 
     # 其他类型（trend 等）

@@ -4,6 +4,7 @@ from __future__ import annotations
 from warframe_agent.mod_flipper import (
     ModFlipResult,
     analyze_mod_flip,
+    format_mod_flip_results_for_model,
     get_endo_cost,
     get_tradeable_mods,
     scan_all_mod_flips,
@@ -77,6 +78,64 @@ def test_analyze_mod_flip_success():
     assert result.r10_sell_price == 80
     assert result.endo_cost == 20470
     assert result.plat_per_1k_endo > 0
+    assert result.market_url == "https://warframe.market/items/test_mod"
+    assert result.r0_seller["player"] == "seller1"
+    assert result.r0_seller["price"] == 10
+    assert "/w seller1" in result.r0_seller["whisper"]
+    assert result.max_rank_buyer["player"] == "buyer1"
+    assert result.max_rank_buyer["price"] == 80
+    assert "/w buyer1" in result.max_rank_buyer["whisper"]
+
+
+def test_analyze_arcane_flip_aggregates_rank0_quantities_for_rank5():
+    def mock_orders(item_id):
+        return [
+            {"order_type": "sell", "platinum": 4, "quantity": 10, "user": {"ingame_name": "CheapBulk", "status": "ingame", "reputation": 5}, "rank": 0},
+            {"order_type": "sell", "platinum": 6, "quantity": 12, "user": {"ingame_name": "NextBulk", "status": "ingame", "reputation": 9}, "rank": 0},
+            {"order_type": "buy", "platinum": 150, "quantity": 1, "user": {"ingame_name": "Rank5Buyer", "status": "ingame", "reputation": 10}, "rank": 5},
+        ]
+
+    result = analyze_mod_flip("arcane_energize", 5, "LEGENDARY", mock_orders)
+
+    assert result is not None
+    assert result.required_quantity == 21
+    assert result.r0_buy_price == 106
+    assert result.r10_sell_price == 150
+    assert result.flip_profit == 44
+    assert round(result.roi_pct, 1) == 41.5
+    assert result.trade_plan["source"] == "arcane_flip"
+    assert result.trade_plan["strategy"] == "arcane_r0_to_r5"
+    assert [(step["player"], step["unit_price"], step["quantity"], step["subtotal"]) for step in result.trade_plan["buy_steps"]] == [
+        ("CheapBulk", 4, 10, 40),
+        ("NextBulk", 6, 11, 66),
+    ]
+    assert result.trade_plan["sell_steps"][0]["player"] == "Rank5Buyer"
+    assert result.trade_plan["total_cost"] == 106
+    assert result.trade_plan["total_revenue"] == 150
+
+
+def test_analyze_arcane_flip_returns_none_when_rank0_quantity_insufficient():
+    def mock_orders(item_id):
+        return [
+            {"order_type": "sell", "platinum": 4, "quantity": 10, "user": {"ingame_name": "CheapBulk", "status": "ingame", "reputation": 5}, "rank": 0},
+            {"order_type": "buy", "platinum": 150, "quantity": 1, "user": {"ingame_name": "Rank5Buyer", "status": "ingame", "reputation": 10}, "rank": 5},
+        ]
+
+    result = analyze_mod_flip("arcane_energize", 5, "LEGENDARY", mock_orders)
+
+    assert result is None
+
+
+def test_analyze_arcane_flip_returns_none_when_aggregate_cost_exceeds_buyer_price():
+    def mock_orders(item_id):
+        return [
+            {"order_type": "sell", "platinum": 10, "quantity": 21, "user": {"ingame_name": "ExpensiveBulk", "status": "ingame", "reputation": 5}, "rank": 0},
+            {"order_type": "buy", "platinum": 150, "quantity": 1, "user": {"ingame_name": "Rank5Buyer", "status": "ingame", "reputation": 10}, "rank": 5},
+        ]
+
+    result = analyze_mod_flip("arcane_energize", 5, "LEGENDARY", mock_orders)
+
+    assert result is None
 
 
 def test_analyze_mod_flip_no_profit():
@@ -119,6 +178,40 @@ def test_scan_filters_by_min_profit():
     assert results[0].item_id == "good_mod"
 
 
+def test_scan_all_mod_flips_filters_mod_only():
+    analyzed = []
+
+    def mock_orders(item_id):
+        analyzed.append(item_id)
+        return []
+
+    items = [
+        {"url_name": "primed_flow", "item_name": "Primed Flow", "tags": ["mod"], "tradable": True, "modMaxRank": 10, "rarity": "LEGENDARY"},
+        {"url_name": "arcane_energize", "item_name": "Arcane Energize", "tags": ["arcane_enhancement"]},
+    ]
+
+    scan_all_mod_flips(items, mock_orders, opportunity_filter="mod", scout_fn=None)
+
+    assert analyzed == ["primed_flow"]
+
+
+def test_scan_all_mod_flips_filters_arcane_only():
+    analyzed = []
+
+    def mock_orders(item_id):
+        analyzed.append(item_id)
+        return []
+
+    items = [
+        {"url_name": "primed_flow", "item_name": "Primed Flow", "tags": ["mod"], "tradable": True, "modMaxRank": 10, "rarity": "LEGENDARY"},
+        {"url_name": "arcane_energize", "item_name": "Arcane Energize", "tags": ["arcane_enhancement"]},
+    ]
+
+    scan_all_mod_flips(items, mock_orders, opportunity_filter="arcane", scout_fn=None)
+
+    assert analyzed == ["arcane_energize"]
+
+
 def test_value_score_formula():
     import math
     result = ModFlipResult(
@@ -131,3 +224,57 @@ def test_value_score_formula():
     )
     expected = (50 / 20.47) * math.log2(11)
     assert abs(result.value_score - expected) < 0.01 or result.value_score == 0  # value_score is computed at creation
+
+
+def _mod_flip_result(index: int, *, profit: int = 50) -> ModFlipResult:
+    return ModFlipResult(
+        item_id=f"mod_{index}",
+        display_name=f"Mod {index}",
+        r0_buy_price=10 + index,
+        r10_sell_price=10 + index + profit,
+        flip_profit=profit,
+        roi_pct=profit / (10 + index) * 100,
+        endo_cost=20470,
+        plat_per_1k_endo=profit / 20.47,
+        value_score=profit,
+        volume_48h=100 + index,
+        max_rank=10,
+        rarity="LEGENDARY" if index == 0 else "RARE",
+        is_prime=index == 0,
+    )
+
+
+def test_format_mod_flip_results_for_model_keeps_compact_top_metrics():
+    results = [_mod_flip_result(0, profit=70)]
+
+    text = format_mod_flip_results_for_model(results, min_profit=20, limit=5)
+
+    assert "tool=mod_flipper min_profit=20 limit=5 result_count=1" in text
+    assert "## Mod 翻转排行榜" not in text
+    assert "item_id=mod_0" in text
+    assert "display_name=Mod 0" in text
+    assert "rarity=LEGENDARY" in text
+    assert "max_rank=10" in text
+    assert "r0_buy_price=10" in text
+    assert "r10_sell_price=80" in text
+    assert "flip_profit=70" in text
+    assert "roi_pct=700.00" in text
+    assert "endo_cost=20470" in text
+    assert "plat_per_1k_endo=3.42" in text
+    assert "volume_48h=100" in text
+    assert "is_prime=true" in text
+    for forbidden in ["seller", "buyer", "/w", "market_url", "whisper"]:
+        assert forbidden not in text.lower()
+
+
+def test_format_mod_flip_results_for_model_omits_tail_rows_and_count():
+    results = [_mod_flip_result(i, profit=100 - i) for i in range(10)]
+
+    text = format_mod_flip_results_for_model(results, min_profit=10, limit=10, max_items=3)
+
+    assert "result_count=10" in text
+    assert "item_id=mod_0" in text
+    assert "item_id=mod_1" in text
+    assert "item_id=mod_2" in text
+    assert "item_id=mod_3" not in text
+    assert "omitted_count=7" in text

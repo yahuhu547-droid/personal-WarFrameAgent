@@ -157,6 +157,25 @@ def test_proactive_opportunity():
     assert push.action_suggestion == "watch"
 
 
+def test_proactive_opportunity_includes_rationale_and_dedupe_key():
+    suggestion = ProactiveSuggestion(
+        item_id="test_item",
+        suggestion_type="opportunity",
+        priority=2,
+        message="利润 50p",
+        data={"source": "spread", "rationale": "原因：价差超过阈值。", "profit": 50},
+    )
+
+    push = generate_proactive_message(suggestion, MarketState())
+
+    assert "原因：价差超过阈值。" in push.message
+    assert push.data["suggestion_type"] == "opportunity"
+    assert push.data["source"] == "spread"
+    assert push.data["profit"] == 50
+    assert push.data["rationale"] == "原因：价差超过阈值。"
+    assert push.data["dedupe_key"] == "opportunity:opportunity:test_item:spread"
+
+
 def test_proactive_with_event_context():
     suggestion = ProactiveSuggestion(
         item_id="test_item", suggestion_type="anomaly",

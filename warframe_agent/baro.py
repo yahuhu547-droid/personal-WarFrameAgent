@@ -164,6 +164,29 @@ def format_baro_order_details(
     return "\n".join(lines)
 
 
+def format_baro_order_details_for_model(
+    recommendation: BaroRecommendation,
+    seller_limit: int = 1,
+    buyer_limit: int = 1,
+) -> str:
+    """Return compact Baro follow-up context without player-identifying order data."""
+    parts = [
+        "tool=baro_order_followup",
+        f"item={_summary_name(recommendation.market_id)}",
+        f"rank={recommendation.rank if recommendation.rank is not None else 'unspecified'}",
+        f"max_rank={recommendation.max_rank}",
+    ]
+    if buyer_limit > 0:
+        buyers = recommendation.buyers[:buyer_limit]
+        parts.append(f"buyer_count={len(buyers)}")
+        parts.append(f"best_buy={_price(buyers[0].platinum if buyers else None)}")
+    if seller_limit > 0:
+        sellers = recommendation.sellers[:seller_limit]
+        parts.append(f"seller_count={len(sellers)}")
+        parts.append(f"best_sell={_price(sellers[0].platinum if sellers else None)}")
+    return "\n".join(parts)
+
+
 def find_baro_recommendation(
     recommendations: list[BaroRecommendation],
     message: str,

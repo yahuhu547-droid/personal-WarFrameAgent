@@ -9,3 +9,5 @@ websockets>=13.0
 aiosqlite>=0.20.0
 numpy>=1.24.0
 playwright>=1.40.0
+pytest>=8.0.0
+lark-oapi>=1.4.0

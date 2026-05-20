@@ -14,12 +14,22 @@ import lark_oapi as lark
 from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody, ReplyMessageRequest, ReplyMessageRequestBody
 
 from . import config
+from .trade_plan import trade_plan_step_lines
 
 logger = logging.getLogger(__name__)
 
 
 def _worker_marker() -> str:
     return f"WARFRAME_FEISHU_WORKER:{config.DATA_DIR.resolve()}"
+
+
+def _is_feishu_worker_process(command_line: str, marker: str) -> bool:
+    return (
+        marker in command_line
+        and "lark_oapi" in command_line
+        and "P2ImMessageReceiveV1" in command_line
+        and "WORKER_MARKER" in command_line
+    )
 
 
 @dataclass
@@ -41,6 +51,47 @@ class FeishuConfig:
             return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
         except Exception:
             return cls()
+
+
+def _plain_text(content: str) -> dict:
+    return {"tag": "plain_text", "content": str(content)}
+
+
+def _trade_plan_step_text(step: dict) -> str:
+    return "\n".join(trade_plan_step_lines(step))
+
+
+def build_trade_plan_card_elements(plan: dict) -> list[dict]:
+    if not isinstance(plan, dict):
+        return []
+    profit = plan.get("profit", 0)
+    profit_text = f"+{profit}" if isinstance(profit, (int, float)) and profit >= 0 else str(profit)
+    elements = [
+        {
+            "tag": "div",
+            "fields": [
+                {"is_short": True, "text": _plain_text(f"策略：{plan.get('display_strategy') or plan.get('strategy') or '-' }")},
+                {"is_short": True, "text": _plain_text(f"成本：{plan.get('total_cost', 0)}p")},
+                {"is_short": True, "text": _plain_text(f"收入：{plan.get('total_revenue', 0)}p")},
+                {"is_short": True, "text": _plain_text(f"利润：{profit_text}p")},
+                {"is_short": True, "text": _plain_text(f"ROI：{plan.get('roi_pct', 0)}%")},
+                {"is_short": True, "text": _plain_text(f"风险：{plan.get('risk_level') or '-'}")},
+            ],
+        }
+    ]
+    buy_steps = plan.get("buy_steps") or []
+    if buy_steps:
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "div", "text": _plain_text("买入")})
+        for step in buy_steps:
+            elements.append({"tag": "div", "text": _plain_text(_trade_plan_step_text(step))})
+    sell_steps = plan.get("sell_steps") or []
+    if sell_steps:
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "div", "text": _plain_text("卖出")})
+        for step in sell_steps:
+            elements.append({"tag": "div", "text": _plain_text(_trade_plan_step_text(step))})
+    return elements
 
 
 class FeishuBot:
@@ -252,6 +303,38 @@ class FeishuBot:
             self._log_file = None
         logger.info("飞书 WebSocket 子进程已停止")
 
+    def status_snapshot(self, data_dir: Path | None = None) -> dict:
+        data_dir = data_dir or config.DATA_DIR
+        lock_path = data_dir / "feishu_worker.lock"
+        log_path = data_dir / "feishu_worker.log"
+        proc = self._ws_proc
+        exit_code = proc.poll() if proc else None
+        lock_pid = ""
+        if lock_path.exists():
+            try:
+                lock_pid = lock_path.read_text(encoding="utf-8").strip()
+            except Exception:
+                lock_pid = ""
+        log_stat = None
+        if log_path.exists():
+            try:
+                log_stat = log_path.stat()
+            except OSError:
+                log_stat = None
+        return {
+            "enabled": self.cfg.enabled,
+            "configured": bool(self.cfg.app_id and self.cfg.app_secret),
+            "available": self.available,
+            "managed_pid": proc.pid if proc else None,
+            "managed_running": bool(proc and exit_code is None),
+            "exit_code": exit_code,
+            "lock_file_exists": lock_path.exists(),
+            "lock_pid": lock_pid,
+            "log_file_exists": log_path.exists(),
+            "log_size_bytes": log_stat.st_size if log_stat else 0,
+            "log_modified_at": log_stat.st_mtime if log_stat else None,
+        }
+
     def _kill_old_workers(self) -> None:
         """杀掉所有旧的飞书 worker 子进程，防止重复响应。"""
         try:
@@ -260,21 +343,24 @@ class FeishuBot:
                 capture_output=True, text=True, timeout=5,
             )
             current_pid = str(self._ws_proc.pid) if self._ws_proc else ""
+            marker = _worker_marker()
             for line in result.stdout.splitlines():
-                if _worker_marker() in line:
-                    # 提取 PID（最后一列数字）
-                    parts = line.strip().split()
-                    if parts:
-                        pid = parts[-1]
-                        if pid != current_pid and pid.isdigit():
-                            subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=5)
-                            logger.info("杀掉旧飞书 worker 进程: pid=%s", pid)
+                if not _is_feishu_worker_process(line, marker):
+                    continue
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                pid = parts[-1]
+                if pid != current_pid and pid.isdigit():
+                    subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=5)
+                    logger.info("杀掉旧飞书 worker 进程: pid=%s", pid)
         except Exception as exc:
             logger.debug("清理旧进程失败: %s", exc)
 
 
 _FEISHU_WORKER_SCRIPT = '''
 import json
+import os
 import sys
 import time
 import threading
@@ -291,6 +377,36 @@ DATA_DIR = Path(r"{data_dir}")
 
 _client = None
 _service_start_ms = int(time.time() * 1000)  # 服务启动时间（毫秒）
+_lock_file = None
+
+
+def _acquire_worker_lock() -> bool:
+    global _lock_file
+    lock_path = DATA_DIR / "feishu_worker.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    _lock_file = open(lock_path, "a+", encoding="utf-8")
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            _lock_file.seek(0)
+            msvcrt.locking(_lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(_lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("[feishu] 已有 WebSocket worker 运行，退出重复进程", flush=True)
+        _lock_file.close()
+        _lock_file = None
+        return False
+    _lock_file.seek(0)
+    _lock_file.truncate()
+    _lock_file.write(str(os.getpid()))
+    _lock_file.flush()
+    return True
+
+
+if not _acquire_worker_lock():
+    sys.exit(0)
 
 # 消息去重：持久化到磁盘，重启后仍有效
 _processed_lock = threading.Lock()

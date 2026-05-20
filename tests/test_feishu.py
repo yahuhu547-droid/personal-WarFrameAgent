@@ -8,7 +8,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from warframe_agent.feishu import FeishuBot, FeishuConfig, _worker_marker
+from warframe_agent.feishu import FeishuBot, FeishuConfig, build_trade_plan_card_elements, _worker_marker
 
 
 class TestFeishuConfig:
@@ -86,6 +86,73 @@ class TestFeishuBot:
         mock_request_cls.builder.return_value.message_id.assert_called_once_with("om_test")
         client.im.v1.message.reply.assert_called_once_with(request)
 
+    def test_status_snapshot_is_safe_and_reports_runtime_files(self, tmp_path: Path):
+        cfg = FeishuConfig(enabled=True, app_id="cli_test", app_secret="secret-value")
+        bot = FeishuBot(cfg)
+        proc = MagicMock()
+        proc.pid = 12345
+        proc.poll.return_value = None
+        bot._ws_proc = proc
+        lock_path = tmp_path / "feishu_worker.lock"
+        log_path = tmp_path / "feishu_worker.log"
+        lock_path.write_text("12345", encoding="utf-8")
+        log_path.write_text("log with secret-value should not be exposed", encoding="utf-8")
+
+        snapshot = bot.status_snapshot(data_dir=tmp_path)
+
+        assert snapshot["enabled"] is True
+        assert snapshot["configured"] is True
+        assert snapshot["available"] is True
+        assert snapshot["managed_pid"] == 12345
+        assert snapshot["managed_running"] is True
+        assert snapshot["lock_file_exists"] is True
+        assert snapshot["lock_pid"] == "12345"
+        assert snapshot["log_file_exists"] is True
+        assert snapshot["log_size_bytes"] > 0
+        assert "secret-value" not in json.dumps(snapshot)
+        assert "app_secret" not in snapshot
+
+
+def test_build_trade_plan_card_elements_contains_actionable_steps():
+    elements = build_trade_plan_card_elements({
+        "display_strategy": "买部件 -> 卖整套",
+        "total_cost": 70,
+        "total_revenue": 95,
+        "profit": 25,
+        "roi_pct": 35.7,
+        "risk_level": "medium",
+        "buy_steps": [{
+            "label": "买入部件：蓝图",
+            "player": "PartSellerFS",
+            "unit_price": 10,
+            "quantity": 1,
+            "subtotal": 10,
+            "market_url": "https://warframe.market/items/rhino_prime_blueprint",
+            "profile_url": "https://warframe.market/profile/PartSellerFS",
+            "whisper": "/w PartSellerFS Hi! I want to buy.",
+        }],
+        "sell_steps": [{
+            "label": "出售整套",
+            "player": "SetBuyerFS",
+            "unit_price": 95,
+            "quantity": 1,
+            "subtotal": 95,
+            "market_url": "https://warframe.market/items/rhino_prime_set",
+            "profile_url": "https://warframe.market/profile/SetBuyerFS",
+            "whisper": "/w SetBuyerFS Hi! I want to sell.",
+        }],
+    })
+    serialized = json.dumps(elements, ensure_ascii=False)
+
+    assert "策略：买部件 -> 卖整套" in serialized
+    assert "成本：70p" in serialized
+    assert "利润：+25p" in serialized
+    assert "买入部件：蓝图" in serialized
+    assert "PartSellerFS：10p × 1 = 10p" in serialized
+    assert "SetBuyerFS：95p × 1 = 95p" in serialized
+    assert "https://warframe.market/profile/PartSellerFS" in serialized
+    assert "/w SetBuyerFS Hi! I want to sell." in serialized
+
 
 def test_worker_script_converts_data_dir_to_path():
     from warframe_agent.feishu import _FEISHU_WORKER_SCRIPT
@@ -99,12 +166,22 @@ def test_worker_script_has_project_marker():
     assert 'WORKER_MARKER = "{marker}"' in _FEISHU_WORKER_SCRIPT
 
 
+def test_worker_script_uses_single_instance_lock():
+    from warframe_agent.feishu import _FEISHU_WORKER_SCRIPT
+
+    assert 'feishu_worker.lock' in _FEISHU_WORKER_SCRIPT
+    assert 'LK_NBLCK' in _FEISHU_WORKER_SCRIPT
+    assert 'sys.exit(0)' in _FEISHU_WORKER_SCRIPT
+
+
 def test_worker_cleanup_matches_project_marker():
     cfg = FeishuConfig(enabled=True, app_id="cli_test", app_secret="secret")
     bot = FeishuBot(cfg)
-    current = str(bot._ws_proc.pid) if bot._ws_proc else ""
     marker = _worker_marker()
-    output = f"python -c worker {marker} 12345\npython -c lark_oapi P2ImMessageReceiveV1 67890\n"
+    output = (
+        f"python -c lark_oapi P2ImMessageReceiveV1 WORKER_MARKER={marker} 12345\n"
+        "python -c lark_oapi P2ImMessageReceiveV1 67890\n"
+    )
 
     with patch("warframe_agent.feishu.subprocess.run") as run:
         run.return_value.stdout = output
@@ -113,3 +190,33 @@ def test_worker_cleanup_matches_project_marker():
     kill_calls = [call for call in run.call_args_list if call.args[0][0] == "taskkill"]
     assert len(kill_calls) == 1
     assert kill_calls[0].args[0][-1] == "12345"
+
+
+def test_worker_cleanup_ignores_marker_in_inspection_command():
+    cfg = FeishuConfig(enabled=True, app_id="cli_test", app_secret="secret")
+    bot = FeishuBot(cfg)
+    marker = _worker_marker()
+    output = f"python -c \"marker = '{marker}'\" 12345\n"
+
+    with patch("warframe_agent.feishu.subprocess.run") as run:
+        run.return_value.stdout = output
+        bot._kill_old_workers()
+
+    kill_calls = [call for call in run.call_args_list if call.args[0][0] == "taskkill"]
+    assert kill_calls == []
+
+
+def test_worker_cleanup_keeps_current_worker_process():
+    cfg = FeishuConfig(enabled=True, app_id="cli_test", app_secret="secret")
+    bot = FeishuBot(cfg)
+    marker = _worker_marker()
+    bot._ws_proc = MagicMock()
+    bot._ws_proc.pid = 12345
+    output = f"python -c lark_oapi P2ImMessageReceiveV1 WORKER_MARKER={marker} 12345\n"
+
+    with patch("warframe_agent.feishu.subprocess.run") as run:
+        run.return_value.stdout = output
+        bot._kill_old_workers()
+
+    kill_calls = [call for call in run.call_args_list if call.args[0][0] == "taskkill"]
+    assert kill_calls == []

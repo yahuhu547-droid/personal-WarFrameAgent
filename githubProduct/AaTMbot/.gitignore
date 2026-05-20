@@ -1,0 +1,6 @@
+__pycache__
+*.zip
+*.log
+*.txt
+*.json
+config.yml

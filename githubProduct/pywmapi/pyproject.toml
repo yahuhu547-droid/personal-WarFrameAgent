@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pywmapi"
+version = "1.2.3"
+authors = [{ name = "leonardodalink", email = "linkyy2000313@gmail.com" }]
+keywords = ["warframe", "warframe market"]
+description = "API for warframe market."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Natural Language :: English",
+]
+dependencies = [
+    "attrs>=22",
+    "cattrs>=22",
+    "requests>=2",
+    "websocket-client>=1.2",
+]
+
+[project.urls]
+Repository = "https://github.com/leonardodalinky/pywmapi"
+Tracker = "https://github.com/leonardodalinky/pywmapi/issues"
+
+[tool.isort]
+profile = "black"
+py_version = "37"
+line_length = 100
+
+[tool.black]
+line-length = 100
+target-version = ["py37"]
+include = '\.pyi?$'

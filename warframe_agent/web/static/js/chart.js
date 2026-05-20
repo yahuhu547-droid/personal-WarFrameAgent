@@ -129,7 +129,6 @@ function renderItemDetailCard(data) {
     const safeItemId = escapeHtml(data.item_id || '');
     const safeTrendDisplay = escapeHtml(data.trend_display || '');
     const safeItemTypeDisplay = escapeHtml(data.item_type_display || '');
-    const jsSellerName = escapeJsString(data.seller ? data.seller.name : '');
     const jsDisplay = escapeJsString(data.display || data.item_id || '');
     const jsWhisperSell = escapeJsString(data.whisper_sell || '');
     const jsWhisperBuy = escapeJsString(data.whisper_buy || '');
@@ -153,7 +152,7 @@ function renderItemDetailCard(data) {
                     <div class="price-label">最低卖价</div>
                     <div class="price-value">${data.sell_price !== null ? data.sell_price + 'p' : '暂无'}</div>
                     ${data.seller ? `<div class="price-player">${escapeHtml(data.seller.name)} (信誉 ${data.seller.reputation})
-                        <button class="copy-whisper-btn" onclick="copyWhisperMessage('${jsSellerName}', '${jsDisplay}', ${data.sell_price})" title="复制私聊消息">📋 复制私聊</button>
+                        ${jsWhisperSell ? `<button class="copy-whisper-btn" onclick="copyProvidedWhisperMessage('${jsWhisperSell}')" title="复制私聊消息">📋 复制私聊</button>` : ''}
                     </div>` : ''}
                 </div>
                 <div class="price-block spread ${spreadClass}">
@@ -1130,71 +1129,130 @@ function showComparePanel() {
     renderCompareUI();
 }
 
+function getCompareItemIds() {
+    return Array.isArray(window.compareItemIds) ? window.compareItemIds : compareItemIds;
+}
+
+function setCompareItemIds(items) {
+    compareItemIds = items;
+    window.compareItemIds = compareItemIds;
+}
+
+setCompareItemIds(compareItemIds);
+window.renderCompareUI = renderCompareUI;
+
 function renderCompareUI() {
     const content = document.getElementById('detail-content');
+    if (!content) return;
 
-    let html = `
-        <div class="compare-container">
-            <div class="compare-header">
-                <div class="compare-title">价格走势对比</div>
-            </div>
-            <div class="compare-items-selector" id="compare-items-selector">
-    `;
+    content.textContent = '';
 
-    compareItemIds.forEach((item, index) => {
-        html += `
-            <div class="compare-item-row">
-                <input type="text" class="compare-item-input" placeholder="输入物品名称..."
-                    value="${escapeHtml(item)}" data-index="${index}"
-                    oninput="onCompareInputChange(this, ${index})">
-                <div class="compare-suggestions" id="compare-suggestions-${index}" style="display:none; position:absolute;"></div>
-                ${compareItemIds.length > 2 ? `
-                <button class="compare-remove-btn" onclick="removeCompareItem(${index})">×</button>
-                ` : ''}
-            </div>
-        `;
-    });
+    const container = document.createElement('div');
+    container.className = 'compare-container';
 
-    html += `
-                ${compareItemIds.length < 5 ? `
-                <button class="compare-add-btn" onclick="addCompareItem()">+ 添加物品</button>
-                ` : ''}
-            </div>
-            <div class="compare-actions">
-                <div class="compare-range-selector">
-                    <button class="compare-range-btn ${compareRange === '24h' ? 'active' : ''}" onclick="setCompareRange('24h')">24h</button>
-                    <button class="compare-range-btn ${compareRange === '7d' ? 'active' : ''}" onclick="setCompareRange('7d')">7天</button>
-                    <button class="compare-range-btn ${compareRange === '30d' ? 'active' : ''}" onclick="setCompareRange('30d')">30天</button>
-                </div>
-                <button class="form-btn primary" onclick="runCompare()" style="flex:none; padding: 6px 16px;">对比</button>
-            </div>
-            <div id="compare-chart-area"></div>
-        </div>
-    `;
+    const header = document.createElement('div');
+    header.className = 'compare-header';
+    const title = document.createElement('div');
+    title.className = 'compare-title';
+    title.textContent = '价格走势对比';
+    header.appendChild(title);
 
-    content.innerHTML = html;
+    const selector = document.createElement('div');
+    selector.className = 'compare-items-selector';
+    selector.id = 'compare-items-selector';
+    const items = getCompareItemIds();
 
-    // 绑定输入建议事件
-    compareItemIds.forEach((_, index) => {
-        const input = document.querySelector(`.compare-item-input[data-index="${index}"]`);
-        if (input) {
-            let debounce;
-            input.addEventListener('input', () => {
-                clearTimeout(debounce);
-                debounce = setTimeout(() => showCompareSuggestions(input, index), 300);
-            });
+    items.forEach((item, index) => {
+        const row = document.createElement('div');
+        row.className = 'compare-item-row';
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'compare-item-input';
+        input.placeholder = '输入物品名称...';
+        input.value = item;
+        input.dataset.index = String(index);
+        let debounce;
+        input.addEventListener('input', () => {
+            onCompareInputChange(input, index);
+            clearTimeout(debounce);
+            debounce = setTimeout(() => showCompareSuggestions(input, index), 300);
+        });
+
+        const suggestions = document.createElement('div');
+        suggestions.className = 'compare-suggestions';
+        suggestions.id = `compare-suggestions-${index}`;
+        suggestions.style.cssText = 'display:none; position:absolute;';
+
+        row.append(input, suggestions);
+
+        if (items.length > 2) {
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'compare-remove-btn';
+            remove.textContent = '×';
+            remove.addEventListener('click', () => removeCompareItem(index));
+            row.appendChild(remove);
         }
+
+        selector.appendChild(row);
     });
+
+    if (items.length < 5) {
+        const add = document.createElement('button');
+        add.type = 'button';
+        add.className = 'compare-add-btn';
+        add.textContent = '+ 添加物品';
+        add.addEventListener('click', addCompareItem);
+        selector.appendChild(add);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'compare-actions';
+
+    const ranges = document.createElement('div');
+    ranges.className = 'compare-range-selector';
+    [
+        ['24h', '24h'],
+        ['7d', '7天'],
+        ['30d', '30天'],
+    ].forEach(([value, label]) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `compare-range-btn ${compareRange === value ? 'active' : ''}`;
+        btn.textContent = label;
+        btn.addEventListener('click', () => setCompareRange(value));
+        ranges.appendChild(btn);
+    });
+
+    const runBtn = document.createElement('button');
+    runBtn.type = 'button';
+    runBtn.className = 'form-btn primary';
+    runBtn.style.cssText = 'flex:none; padding: 6px 16px;';
+    runBtn.textContent = '对比';
+    runBtn.addEventListener('click', runCompare);
+
+    actions.append(ranges, runBtn);
+
+    const chartArea = document.createElement('div');
+    chartArea.id = 'compare-chart-area';
+
+    container.append(header, selector, actions, chartArea);
+    content.appendChild(container);
 }
 
 function addCompareItem() {
-    if (compareItemIds.length >= 5) return;
-    compareItemIds.push('');
+    const items = getCompareItemIds();
+    if (items.length >= 5) return;
+    items.push('');
+    setCompareItemIds(items);
     renderCompareUI();
 }
 
 function removeCompareItem(index) {
-    compareItemIds.splice(index, 1);
+    const items = getCompareItemIds();
+    items.splice(index, 1);
+    setCompareItemIds(items);
     renderCompareUI();
 }
 
@@ -1207,7 +1265,9 @@ function setCompareRange(range) {
 
 let compareDebounce = null;
 function onCompareInputChange(input, index) {
-    compareItemIds[index] = input.value;
+    const items = getCompareItemIds();
+    items[index] = input.value;
+    setCompareItemIds(items);
     clearTimeout(compareDebounce);
     compareDebounce = setTimeout(() => showCompareSuggestions(input, index), 300);
 }
@@ -1229,10 +1289,14 @@ async function showCompareSuggestions(input, index) {
             return;
         }
 
-        sugDiv.innerHTML = data.suggestions.map(s =>
-            `<div class="suggestion-item" onclick="selectCompareItem(${index}, '${escapeJsString(s)}')">${escapeHtml(s)}</div>`
-        ).join('');
-        sugDiv.style.display = 'block';
+        sugDiv.textContent = '';
+        data.suggestions.forEach(suggestion => {
+            const item = document.createElement('div');
+            item.className = 'suggestion-item';
+            item.textContent = suggestion;
+            item.addEventListener('click', () => selectCompareItem(index, suggestion));
+            sugDiv.appendChild(item);
+        });
         sugDiv.style.cssText = 'display:block; position:absolute; background:var(--glass-bg); border:var(--glass-border); border-radius:8px; max-height:150px; overflow-y:auto; z-index:10; width:100%;';
     } catch (e) {
         sugDiv.style.display = 'none';
@@ -1240,7 +1304,9 @@ async function showCompareSuggestions(input, index) {
 }
 
 function selectCompareItem(index, itemId) {
-    compareItemIds[index] = itemId;
+    const items = getCompareItemIds();
+    items[index] = itemId;
+    setCompareItemIds(items);
     const input = document.querySelector(`.compare-item-input[data-index="${index}"]`);
     if (input) input.value = itemId;
     const sugDiv = document.getElementById(`compare-suggestions-${index}`);
@@ -1248,7 +1314,7 @@ function selectCompareItem(index, itemId) {
 }
 
 async function runCompare() {
-    const validItems = compareItemIds.filter(i => i.trim() !== '');
+    const validItems = getCompareItemIds().filter(i => i.trim() !== '');
     if (validItems.length < 2) {
         showToast('请至少输入2个物品', 'warning');
         return;
@@ -1282,14 +1348,22 @@ async function runCompare() {
 
 function renderCompareChart(data) {
     const chartArea = document.getElementById('compare-chart-area');
+    if (!chartArea) return;
 
-    let html = `
-        <div class="chart-container" style="height:300px;">
-            <canvas id="compare-chart"></canvas>
-        </div>
-        <div class="compare-legend" id="compare-legend"></div>
-    `;
-    chartArea.innerHTML = html;
+    chartArea.textContent = '';
+    const chartContainer = document.createElement('div');
+    chartContainer.className = 'chart-container';
+    chartContainer.style.height = '300px';
+
+    const canvas = document.createElement('canvas');
+    canvas.id = 'compare-chart';
+    chartContainer.appendChild(canvas);
+
+    const legend = document.createElement('div');
+    legend.className = 'compare-legend';
+    legend.id = 'compare-legend';
+
+    chartArea.append(chartContainer, legend);
 
     const ctx = document.getElementById('compare-chart');
     if (!ctx) return;
@@ -1382,12 +1456,21 @@ function renderCompareChart(data) {
     // 渲染图例
     const legendDiv = document.getElementById('compare-legend');
     if (legendDiv) {
-        legendDiv.innerHTML = legendItems.map(item =>
-            `<div class="compare-legend-item">
-                <div class="compare-legend-color" style="background:${item.color}"></div>
-                <span>${item.name}</span>
-            </div>`
-        ).join('');
+        legendDiv.textContent = '';
+        legendItems.forEach(item => {
+            const row = document.createElement('div');
+            row.className = 'compare-legend-item';
+
+            const color = document.createElement('div');
+            color.className = 'compare-legend-color';
+            color.style.background = item.color;
+
+            const name = document.createElement('span');
+            name.textContent = item.name;
+
+            row.append(color, name);
+            legendDiv.appendChild(row);
+        });
     }
 }
 

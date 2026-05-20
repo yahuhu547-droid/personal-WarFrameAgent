@@ -1,0 +1,50 @@
+[
+  {
+    "repo": "leonardodalinky/pywmapi",
+    "status": "downloaded",
+    "branch": "main",
+    "target": "F:\\giteeProject\\warframe\\githubProduct\\pywmapi"
+  },
+  {
+    "repo": "JonathanSourdough/Warframe-Market-Overlay",
+    "status": "downloaded",
+    "branch": "master",
+    "target": "F:\\giteeProject\\warframe\\githubProduct\\Warframe-Market-Overlay"
+  },
+  {
+    "repo": "Emanem/wfdrops",
+    "status": "downloaded",
+    "branch": "main",
+    "target": "F:\\giteeProject\\warframe\\githubProduct\\wfdrops"
+  },
+  {
+    "repo": "GamerNoTitle/AaTMbot",
+    "status": "downloaded",
+    "branch": "master",
+    "target": "F:\\giteeProject\\warframe\\githubProduct\\AaTMbot"
+  },
+  {
+    "repo": "cjtho/WarframeRivenPricer",
+    "status": "downloaded",
+    "branch": "main",
+    "target": "F:\\giteeProject\\warframe\\githubProduct\\WarframeRivenPricer"
+  },
+  {
+    "repo": "kronthto/warframe-relic-value",
+    "status": "downloaded",
+    "branch": "master",
+    "target": "F:\\giteeProject\\warframe\\githubProduct\\warframe-relic-value"
+  },
+  {
+    "repo": "Engusseus/Warframe-Market-Set-Profit-Analyzer",
+    "status": "downloaded",
+    "branch": "main",
+    "target": "F:\\giteeProject\\warframe\\githubProduct\\Warframe-Market-Set-Profit-Analyzer"
+  },
+  {
+    "repo": "Luis-Munu/Warframe-Market-deal-finder",
+    "status": "downloaded",
+    "branch": "Update-1.6.0-Tons-of-stuff",
+    "target": "F:\\giteeProject\\warframe\\githubProduct\\Warframe-Market-deal-finder"
+  }
+]

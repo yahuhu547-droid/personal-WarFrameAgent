@@ -9,7 +9,14 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from warframe_agent.push import WxPusher, PushConfig, should_send_daily_report
+from warframe_agent.push import (
+    WxPusher,
+    PushConfig,
+    format_buyers_with_whisper,
+    format_sellers_with_whisper,
+    format_trade_plan_push,
+    should_send_daily_report,
+)
 
 
 class TestPushConfig:
@@ -135,6 +142,98 @@ class TestWxPusher:
         client.send_text(long_title, "内容")
         payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get("json")
         assert len(payload["summary"]) <= 100
+
+
+class TestDailyReportFormatting:
+    def test_buyers_whisper_uses_market_name_not_display_label(self):
+        text = format_buyers_with_whisper(
+            "充沛赋能 / Arcane Energize / arcane_energize",
+            "arcane_energize",
+            [{"user_name": "Buyer1", "platinum": 30, "mod_rank": None, "status": "ingame"}],
+        )
+
+        assert "最高收价" in text
+        assert "最高买家价格" not in text
+        assert "Rank" not in text
+        assert "/w Buyer1 Hi! I want to sell: \"Arcane Energize\" for 30 platinum." in text
+        assert "/w Buyer1 Hi! I want to buy:" not in text
+        assert "/w Buyer1 Hi! I want to sell: 充沛赋能" not in text
+        assert "https://warframe.market/items/arcane_energize" in text
+        assert "warframe.market/items/充沛赋能" not in text
+
+    def test_sellers_whisper_uses_market_name_not_display_label(self):
+        text = format_sellers_with_whisper(
+            "充沛赋能 / Arcane Energize / arcane_energize",
+            "arcane_energize",
+            [{"user_name": "Seller1", "platinum": 40, "mod_rank": None, "status": "ingame"}],
+        )
+
+        assert "最低卖价" in text
+        assert "最低卖家价格" not in text
+        assert "Rank" not in text
+        assert "/w Seller1 Hi! I want to buy: \"Arcane Energize\" for 40 platinum." in text
+        assert "/w Seller1 Hi! I want to sell:" not in text
+        assert "/w Seller1 Hi! I want to buy: 充沛赋能" not in text
+        assert "https://warframe.market/items/arcane_energize" in text
+        assert "warframe.market/items/充沛赋能" not in text
+
+    def test_rank_is_shown_only_when_order_has_rank(self):
+        text = format_sellers_with_whisper(
+            "满级 Mod / primed_flow",
+            "primed_flow",
+            [{"user_name": "Seller1", "platinum": 100, "mod_rank": 10, "status": "ingame"}],
+        )
+
+        assert "Rank 10" in text
+
+
+class TestTradePlanPushFormatting:
+    def test_format_trade_plan_push_contains_actionable_steps(self):
+        text = format_trade_plan_push({
+            "display_name": "Arcane Energize",
+            "display_strategy": "买 21 个 R0 -> 合成 R5 -> 卖出",
+            "total_cost": 105,
+            "total_revenue": 150,
+            "profit": 45,
+            "roi_pct": 42.9,
+            "risk_level": "medium",
+            "buy_steps": [
+                {
+                    "label": "买入 R0",
+                    "player": "SellerPush",
+                    "unit_price": 5,
+                    "quantity": 21,
+                    "subtotal": 105,
+                    "market_url": "https://warframe.market/items/arcane_energize",
+                    "profile_url": "https://warframe.market/profile/SellerPush",
+                    "whisper": "/w SellerPush Hi! I want to buy.",
+                }
+            ],
+            "sell_steps": [
+                {
+                    "label": "出售 R5",
+                    "player": "BuyerPush",
+                    "unit_price": 150,
+                    "quantity": 1,
+                    "subtotal": 150,
+                    "market_url": "https://warframe.market/items/arcane_energize",
+                    "profile_url": "https://warframe.market/profile/BuyerPush",
+                    "whisper": "/w BuyerPush Hi! I want to sell.",
+                }
+            ],
+        })
+
+        assert "## 交易机会：Arcane Energize" in text
+        assert "策略：买 21 个 R0 -> 合成 R5 -> 卖出" in text
+        assert "成本：105p" in text
+        assert "收入：150p" in text
+        assert "利润：+45p" in text
+        assert "ROI：42.9%" in text
+        assert "SellerPush：5p × 21 = 105p" in text
+        assert "BuyerPush：150p × 1 = 150p" in text
+        assert "https://warframe.market/items/arcane_energize" in text
+        assert "https://warframe.market/profile/SellerPush" in text
+        assert "`/w SellerPush Hi! I want to buy.`" in text
 
 
 class TestShouldSendDailyReport:

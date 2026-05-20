@@ -11,6 +11,8 @@ from pathlib import Path
 import requests
 
 from . import config
+from .formatter import build_whisper
+from .trade_plan import trade_plan_step_lines
 
 logger = logging.getLogger(__name__)
 
@@ -81,33 +83,82 @@ class WxPusher:
         return self.send(title, md, content_type=3)
 
 
+def _order_rank(order) -> int | None:
+    return order.mod_rank if hasattr(order, "mod_rank") else order.get("mod_rank")
+
+
+def _format_order_line(index: int, name: str, price: int, status: str, rank: int | None) -> str:
+    details = f"Rank {rank}, {status}" if rank is not None else status
+    return f"{index}. {name} - {price}p ({details})"
+
+
 def format_buyers_with_whisper(item_name: str, market_id: str, buyers: list) -> str:
     """格式化买家列表，附带游戏内私聊命令。"""
-    lines = [f"{item_name} 最高买家价格", ""]
+    lines = [f"{item_name} 最高收价", ""]
     for i, b in enumerate(buyers, 1):
         name = b.user_name if hasattr(b, "user_name") else str(b.get("user_name", "?"))
         price = b.platinum if hasattr(b, "platinum") else b.get("platinum", 0)
-        rank = b.mod_rank if hasattr(b, "mod_rank") else b.get("mod_rank", 0)
         status = b.status if hasattr(b, "status") else b.get("status", "?")
-        lines.append(f"{i}. {name} - {price}p (Rank {rank}, {status})")
-        lines.append(f"   /w {name} Hi! I want to buy: {item_name} for {price} platinum. (warframe.market)")
+        lines.append(_format_order_line(i, name, price, status, _order_rank(b)))
+        lines.append(f"   {build_whisper(name, market_id, price, 'buy')}")
         lines.append("")
-    lines.append(f"warframe.market/items/{market_id}")
+    lines.append(f"https://warframe.market/items/{market_id}")
     return "\n".join(lines)
 
 
 def format_sellers_with_whisper(item_name: str, market_id: str, sellers: list) -> str:
     """格式化卖家列表，附带游戏内私聊命令。"""
-    lines = [f"{item_name} 最低卖家价格", ""]
+    lines = [f"{item_name} 最低卖价", ""]
     for i, s in enumerate(sellers, 1):
         name = s.user_name if hasattr(s, "user_name") else str(s.get("user_name", "?"))
         price = s.platinum if hasattr(s, "platinum") else s.get("platinum", 0)
-        rank = s.mod_rank if hasattr(s, "mod_rank") else s.get("mod_rank", 0)
         status = s.status if hasattr(s, "status") else s.get("status", "?")
-        lines.append(f"{i}. {name} - {price}p (Rank {rank}, {status})")
-        lines.append(f"   /w {name} Hi! I want to sell: {item_name} for {price} platinum. (warframe.market)")
+        lines.append(_format_order_line(i, name, price, status, _order_rank(s)))
+        lines.append(f"   {build_whisper(name, market_id, price, 'sell')}")
         lines.append("")
-    lines.append(f"warframe.market/items/{market_id}")
+    lines.append(f"https://warframe.market/items/{market_id}")
+    return "\n".join(lines)
+
+
+def _format_trade_plan_step(step: dict) -> str:
+    lines = trade_plan_step_lines(step)
+    if not lines:
+        return ""
+    head, *tail = lines
+    result = [f"- {head}"]
+    for line in tail:
+        if line.startswith("/w "):
+            result.append(f"  `{line}`")
+        else:
+            result.append(f"  {line}")
+    return "\n".join(result)
+
+
+def format_trade_plan_push(plan: dict) -> str:
+    """格式化可执行交易计划，用于 WxPusher Markdown。"""
+    if not isinstance(plan, dict):
+        return ""
+    display_name = plan.get("display_name") or plan.get("item_id") or "交易机会"
+    profit = plan.get("profit", 0)
+    profit_text = f"+{profit}" if isinstance(profit, (int, float)) and profit >= 0 else str(profit)
+    lines = [
+        f"## 交易机会：{display_name}",
+        f"策略：{plan.get('display_strategy') or plan.get('strategy') or '-'}",
+        f"成本：{plan.get('total_cost', 0)}p",
+        f"收入：{plan.get('total_revenue', 0)}p",
+        f"利润：{profit_text}p",
+        f"ROI：{plan.get('roi_pct', 0)}%",
+    ]
+    if plan.get("risk_level"):
+        lines.append(f"风险：{plan['risk_level']}")
+    buy_steps = plan.get("buy_steps") or []
+    if buy_steps:
+        lines.extend(["", "### 买入"])
+        lines.extend(_format_trade_plan_step(step) for step in buy_steps)
+    sell_steps = plan.get("sell_steps") or []
+    if sell_steps:
+        lines.extend(["", "### 卖出"])
+        lines.extend(_format_trade_plan_step(step) for step in sell_steps)
     return "\n".join(lines)
 
 

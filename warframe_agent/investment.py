@@ -9,8 +9,9 @@ from typing import Callable
 logger = logging.getLogger(__name__)
 
 from . import config
-from .market import best_buyers, best_sellers, fetch_item_statistics, fetch_orders
+from .market import MarketOrder, best_buyers, best_sellers, fetch_item_statistics, fetch_orders
 from .names import display_item_name, preferred_chinese_name
+from .trade_plan import build_trade_plan, trade_step_from_order
 from .warframes import PrimeGroup, build_prime_groups
 
 
@@ -29,8 +30,59 @@ class PrimeInvestment:
     risk_level: str         # "low" / "medium" / "high"
     part_details: list[dict]  # 各部件价格明细
     set_item_id: str        # 套装 item_id
+    trade_plan: dict | None = None
 
 
+_FIELD_SEPARATOR = " | "
+
+
+def _format_model_value(value: object) -> str:
+    return str(value).replace("\r", " ").replace("\n", " ").replace("|", "/")
+
+
+def format_prime_investment_results_for_model(
+    results: list[PrimeInvestment],
+    *,
+    budget: int,
+    min_roi_pct: float,
+    limit: int,
+    max_items: int = 8,
+) -> str:
+    lines = [
+        " ".join([
+            "tool=investment_advisor",
+            f"budget={budget}",
+            f"min_roi={min_roi_pct}",
+            f"limit={limit}",
+            f"result_count={len(results)}",
+        ])
+    ]
+
+    shown_count = max(0, max_items)
+    for index, result in enumerate(results[:shown_count], start=1):
+        fields = [
+            f"rank={index}",
+            f"base_id={_format_model_value(result.base_id)}",
+            f"display_name={_format_model_value(result.display_name)}",
+            f"set_item_id={_format_model_value(result.set_item_id)}",
+            f"strategy={_format_model_value(result.strategy)}",
+            f"buy_cost={result.buy_cost}",
+            f"sell_price={result.sell_price}",
+            f"profit_per_set={result.profit_per_set}",
+            f"roi_pct={result.roi_pct}",
+            f"sets_affordable={result.sets_affordable}",
+            f"total_profit={result.total_profit}",
+            f"risk_level={_format_model_value(result.risk_level)}",
+            f"volume_48h={result.volume_48h}",
+            f"part_count={len(result.part_details)}",
+        ]
+        lines.append(_FIELD_SEPARATOR.join(fields))
+
+    omitted = len(results) - shown_count
+    if omitted > 0:
+        lines.append(f"omitted={omitted}")
+
+    return "\n".join(lines)
 
 
 def _assess_risk(volume_48h: int | None, supply_count: int, demand_count: int) -> str:
@@ -102,7 +154,11 @@ def analyze_prime_investment(
     # 计算部件散买总价（取最低卖价）和散卖总价（取最高收价）
     parts_buy_total = 0
     parts_sell_total = 0
+    parts_with_buy = 0
+    parts_with_sell = 0
     part_details = []
+    part_seller_orders: list[tuple[str, str, MarketOrder]] = []
+    part_buyer_orders: list[tuple[str, str, MarketOrder]] = []
     all_supply = 0
     all_demand = 0
 
@@ -113,10 +169,18 @@ def analyze_prime_investment(
         sellers = best_sellers(orders, limit=1)
         buyers = best_buyers(orders, limit=1)
 
-        buy_price = sellers[0].platinum if sellers else 0
-        sell_price = buyers[0].platinum if buyers else 0
-        parts_buy_total += buy_price
-        parts_sell_total += sell_price
+        seller = sellers[0] if sellers else None
+        buyer = buyers[0] if buyers else None
+        buy_price = seller.platinum if seller else None
+        sell_price = buyer.platinum if buyer else None
+        if buy_price is not None and seller:
+            parts_buy_total += buy_price
+            parts_with_buy += 1
+            part_seller_orders.append((part_key, part_id, seller))
+        if sell_price is not None and buyer:
+            parts_sell_total += sell_price
+            parts_with_sell += 1
+            part_buyer_orders.append((part_key, part_id, buyer))
 
         all_supply += sum(1 for o in orders if (o.get("order_type") or o.get("type")) == "sell")
         all_demand += sum(1 for o in orders if (o.get("order_type") or o.get("type")) == "buy")
@@ -125,8 +189,8 @@ def analyze_prime_investment(
             "key": part_key,
             "name": _part_label(part_key),
             "item_id": part_id,
-            "buy": buy_price,
-            "sell": sell_price,
+            "buy": buy_price or 0,
+            "sell": sell_price or 0,
         })
 
     # 套装价格
@@ -134,16 +198,26 @@ def analyze_prime_investment(
     set_sellers = best_sellers(set_orders, limit=1)
     set_buyers = best_buyers(set_orders, limit=1)
 
-    set_buy_price = set_sellers[0].platinum if set_sellers else 0  # 买套装的成本
-    set_sell_price = set_buyers[0].platinum if set_buyers else 0   # 卖套装的收入
+    set_seller = set_sellers[0] if set_sellers else None
+    set_buyer = set_buyers[0] if set_buyers else None
+    set_buy_price = set_seller.platinum if set_seller else None  # 买套装的成本
+    set_sell_price = set_buyer.platinum if set_buyer else None   # 卖套装的收入
 
     all_supply += sum(1 for o in set_orders if o.get("order_type") == "sell")
     all_demand += sum(1 for o in set_orders if o.get("order_type") == "buy")
 
     # 策略 A: 散买部件 → 整套卖出
-    profit_a = set_sell_price - parts_buy_total
+    profit_a = (
+        set_sell_price - parts_buy_total
+        if set_sell_price is not None and parts_with_buy == len(part_ids)
+        else 0
+    )
     # 策略 B: 整套买入 → 散卖部件
-    profit_b = parts_sell_total - set_buy_price
+    profit_b = (
+        parts_sell_total - set_buy_price
+        if set_buy_price is not None and parts_with_sell == len(part_ids)
+        else 0
+    )
 
     if profit_a <= 0 and profit_b <= 0:
         return None
@@ -156,7 +230,7 @@ def analyze_prime_investment(
         profit = profit_a
     else:
         strategy = "buy_set_sell_parts"
-        buy_cost = set_buy_price
+        buy_cost = set_buy_price or 0
         sell_price = parts_sell_total
         profit = profit_b
 
@@ -173,6 +247,75 @@ def analyze_prime_investment(
     risk_level = _assess_risk(volume_48h, all_supply, all_demand)
 
     display_name = preferred_chinese_name(set_id) or display_item_name(set_id)
+    trade_plan = None
+    if strategy == "buy_parts_sell_set" and set_buyer:
+        buy_steps = [
+            trade_step_from_order(
+                side="buy",
+                label=f"买入部件：{_part_label(part_key)}",
+                item_id=part_id,
+                order=order,
+                quantity=1,
+            )
+            for part_key, part_id, order in part_seller_orders
+        ]
+        sell_steps = [trade_step_from_order(
+            side="sell",
+            label="出售整套",
+            item_id=set_id,
+            order=set_buyer,
+            quantity=1,
+        )]
+        trade_plan = build_trade_plan(
+            source="investment",
+            strategy=strategy,
+            display_strategy="买部件 -> 卖整套",
+            item_id=set_id,
+            display_name=display_name,
+            required_quantity=len(buy_steps),
+            buy_steps=buy_steps,
+            sell_steps=sell_steps,
+            total_cost=buy_cost,
+            total_revenue=sell_price or 0,
+            profit=profit,
+            roi_pct=roi_pct,
+            volume_48h=volume_48h,
+            risk_level=risk_level,
+        )
+    elif strategy == "buy_set_sell_parts" and set_seller:
+        buy_steps = [trade_step_from_order(
+            side="buy",
+            label="买入整套",
+            item_id=set_id,
+            order=set_seller,
+            quantity=1,
+        )]
+        sell_steps = [
+            trade_step_from_order(
+                side="sell",
+                label=f"出售部件：{_part_label(part_key)}",
+                item_id=part_id,
+                order=order,
+                quantity=1,
+            )
+            for part_key, part_id, order in part_buyer_orders
+        ]
+        trade_plan = build_trade_plan(
+            source="investment",
+            strategy=strategy,
+            display_strategy="买整套 -> 卖部件",
+            item_id=set_id,
+            display_name=display_name,
+            required_quantity=1,
+            buy_steps=buy_steps,
+            sell_steps=sell_steps,
+            total_cost=buy_cost,
+            total_revenue=sell_price or 0,
+            profit=profit,
+            roi_pct=roi_pct,
+            volume_48h=volume_48h,
+            risk_level=risk_level,
+        )
 
     return PrimeInvestment(
         base_id=group.base_id,
@@ -188,6 +331,7 @@ def analyze_prime_investment(
         risk_level=risk_level,
         part_details=part_details,
         set_item_id=set_id,
+        trade_plan=trade_plan,
     )
 
 

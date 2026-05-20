@@ -189,7 +189,213 @@ function updateThemeIcon(theme) {
 // ===== WebSocket 连接（指数退避） =====
 
 let wsReconnectDelay = 1000;
+let runtimeStatusState = 'loading';
+let lastRuntimeStatusData = null;
 const WS_MAX_DELAY = 30000;
+const RUNTIME_STATUS_POLL_MS = 45000;
+
+function runtimeStatusDetail(data) {
+    if (!data || typeof data !== 'object') return '';
+    const parts = [];
+    if (data.scheduler) parts.push(`scheduler: ${data.scheduler.running ? 'running' : 'stopped'}`);
+    if (data.feishu && data.feishu.enabled) parts.push(`feishu: ${data.feishu.managed_running ? 'running' : 'stopped'}`);
+    if (data.daily_report) parts.push(`daily: ${data.daily_report.enabled ? data.daily_report.report_time : 'off'}`);
+    return parts.join(' | ');
+}
+
+async function refreshRuntimeStatus() {
+    try {
+        updateSidebarStatus('loading', '正在检查运行态');
+        const res = await fetch(`${API_BASE}/api/runtime/status`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        lastRuntimeStatusData = data;
+        const status = data && data.status === 'degraded' ? 'degraded' : data && data.status === 'ok' ? 'online' : 'loading';
+        runtimeStatusState = status;
+        updateSidebarStatus(status, runtimeStatusDetail(data));
+    } catch (error) {
+        console.warn('运行态状态检查失败:', error);
+        runtimeStatusState = 'error';
+        lastRuntimeStatusData = { status: 'error', error: String(error && error.message ? error.message : error) };
+        updateSidebarStatus('error', String(error && error.message ? error.message : error));
+    }
+}
+
+async function showRuntimeStatusPanel() {
+    const content = openDetailPanel('加载运行态详情...');
+    if (!content) return;
+    try {
+        const res = await fetch(`${API_BASE}/api/runtime/status`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        lastRuntimeStatusData = data;
+        content.innerHTML = renderRuntimeStatusPanel(data);
+    } catch (error) {
+        const message = String(error && error.message ? error.message : error);
+        lastRuntimeStatusData = { status: 'error', error: message };
+        content.innerHTML = renderRuntimeStatusPanel(lastRuntimeStatusData);
+    }
+}
+
+function renderRuntimeStatusPanel(data) {
+    const scheduler = data && data.scheduler ? data.scheduler : {};
+    const jobs = Array.isArray(scheduler.jobs) ? scheduler.jobs : [];
+    const background = data && data.background_tasks ? data.background_tasks : {};
+    const tasks = Array.isArray(background.tasks) ? background.tasks : [];
+    const recentToolCalls = data && data.recent_tool_calls ? data.recent_tool_calls : {};
+    const toolCalls = Array.isArray(recentToolCalls.items) ? recentToolCalls.items : [];
+    const feishu = data && data.feishu ? data.feishu : {};
+    const wxpusher = data && data.wxpusher ? data.wxpusher : {};
+    const daily = data && data.daily_report ? data.daily_report : {};
+    const web = data && data.web ? data.web : {};
+    return `
+        <div class="runtime-panel">
+            <div class="panel-title-row">
+                <div>
+                    <span class="panel-title-eyebrow">运行态详情</span>
+                    <div class="trading-memory-subtitle">Web、scheduler、推送与后台任务只读状态</div>
+                </div>
+                <span class="badge ${data && data.status === 'ok' ? 'badge-green' : data && data.status === 'degraded' ? 'badge-gold' : 'badge-red'}">${escapeHtml(data && data.status ? data.status : 'unknown')}</span>
+            </div>
+            ${data && data.error ? `<div class="card runtime-card"><div class="card-body"><div class="trading-memory-message">${escapeHtml(data.error)}</div></div></div>` : ''}
+            <div class="runtime-grid">
+                ${renderRuntimeSummaryCard('Web', [`uptime=${web.uptime_seconds ?? '-' }s`, `started=${web.started_at ?? '-'}`])}
+                ${renderRuntimeSummaryCard('Scheduler', [`running=${Boolean(scheduler.running)}`, `jobs=${scheduler.total ?? jobs.length}`])}
+                ${renderRuntimeSummaryCard('Feishu', [`enabled=${Boolean(feishu.enabled)}`, `running=${Boolean(feishu.managed_running)}`])}
+                ${renderRuntimeSummaryCard('WxPusher', [`enabled=${Boolean(wxpusher.enabled)}`, `configured=${Boolean(wxpusher.configured)}`, `uids=${wxpusher.uid_count ?? 0}`])}
+                ${renderRuntimeSummaryCard('Daily Report', [`enabled=${Boolean(daily.enabled)}`, `time=${daily.report_time || '-'}`])}
+                ${renderRuntimeSummaryCard('Background Tasks', [`running=${background.running ?? 0}`, `error=${background.error ?? 0}`, `total=${background.total ?? tasks.length}`])}
+                ${renderRuntimeSummaryCard('最近工具调用', [`count=${recentToolCalls.count ?? toolCalls.length}`])}
+            </div>
+            <h3 class="runtime-section-title">Scheduler Jobs</h3>
+            <div class="trading-memory-list">${jobs.length ? jobs.map(renderRuntimeJob).join('') : renderRuntimeEmpty('暂无任务状态')}</div>
+            <h3 class="runtime-section-title">后台任务</h3>
+            <div class="trading-memory-list">${tasks.length ? tasks.map(renderRuntimeTask).join('') : renderRuntimeEmpty('暂无任务状态')}</div>
+            <h3 class="runtime-section-title">最近工具调用</h3>
+            <div class="trading-memory-list">${toolCalls.length ? toolCalls.map(renderRuntimeToolCall).join('') : renderRuntimeEmpty('暂无工具调用')}</div>
+        </div>
+    `;
+}
+
+function renderRuntimeSummaryCard(title, lines) {
+    return `<div class="card runtime-card"><div class="card-body">
+        <div class="trading-memory-name">${escapeHtml(title)}</div>
+        <div class="trading-memory-meta">${(lines || []).map(line => escapeHtml(line)).join('<br>')}</div>
+    </div></div>`;
+}
+
+function renderRuntimeJob(job) {
+    const okClass = job.last_success === false ? 'badge-red' : job.running ? 'badge-gold' : 'badge-green';
+    return `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-record-header">
+            <div>
+                <div class="trading-memory-name">${escapeHtml(job.name || job.job_id || '-')}</div>
+                <div class="trading-memory-meta">${escapeHtml(job.job_id || '-')} · ${escapeHtml(job.safety_level || '-')} · external_side_effect=${escapeHtml(Boolean(job.external_side_effect))}</div>
+            </div>
+            <span class="badge ${okClass}">${job.running ? 'running' : job.last_success === false ? 'failed' : 'ok'}</span>
+        </div>
+        <div class="trading-memory-prices">
+            <span>enabled=${escapeHtml(Boolean(job.enabled))}</span>
+            <span>duration=${escapeHtml(job.last_duration_ms ?? '-')}ms</span>
+        </div>
+        ${job.last_error_summary ? `<div class="trading-memory-message">${escapeHtml(job.last_error_summary)}</div>` : ''}
+    </div></div>`;
+}
+
+function renderRuntimeTask(task) {
+    return `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-record-header">
+            <div>
+                <div class="trading-memory-name">${escapeHtml(task.task_id || '-')}</div>
+                <div class="trading-memory-meta">status=${escapeHtml(task.status || '-')} · age=${escapeHtml(task.age_seconds ?? '-')}s${task.goal_id ? ` · goal=${escapeHtml(task.goal_id)}` : ''}</div>
+            </div>
+            <span class="badge ${task.status === 'error' ? 'badge-red' : task.status === 'running' ? 'badge-gold' : 'badge-green'}">${escapeHtml(task.status || '-')}</span>
+        </div>
+        <div class="trading-memory-prices">
+            <span>result_count=${escapeHtml(task.result_count ?? '-')}</span>
+            <span>result_total=${escapeHtml(task.result_total ?? '-')}</span>
+        </div>
+        ${task.error_summary ? `<div class="trading-memory-message">${escapeHtml(task.error_summary)}</div>` : ''}
+    </div></div>`;
+}
+
+function renderRuntimeToolCall(call) {
+    const args = renderRuntimeObject(call.args_summary || {});
+    const contexts = Array.isArray(call.contexts) && call.contexts.length ? ` · contexts=${escapeHtml(call.contexts.join(','))}` : '';
+    return `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-record-header">
+            <div>
+                <div class="trading-memory-name">${escapeHtml(call.tool_name || '-')}</div>
+                <div class="trading-memory-meta">${escapeHtml(call.tool_timestamp || call.conversation_timestamp || '-')}${contexts}</div>
+            </div>
+            <span class="badge ${call.ok === false ? 'badge-red' : call.ok === true ? 'badge-green' : 'badge-muted'}">${call.ok === false ? 'failed' : call.ok === true ? 'ok' : 'unknown'}</span>
+        </div>
+        <div class="trading-memory-prices"><span>duration=${escapeHtml(call.duration_ms ?? '-')}ms</span></div>
+        ${args ? `<div class="trading-memory-message">args: ${args}</div>` : ''}
+        ${call.error_summary ? `<div class="trading-memory-meta">error: ${escapeHtml(call.error_summary)}</div>` : ''}
+    </div></div>`;
+}
+
+function renderRuntimeObject(value) {
+    if (!value || typeof value !== 'object') return '';
+    return Object.entries(value).map(([key, item]) => `${escapeHtml(key)}=${escapeHtml(Array.isArray(item) ? item.join(',') : item)}`).join(' · ');
+}
+
+function renderRuntimeEmpty(text) {
+    return `<div class="empty-state"><div class="empty-state-icon">RT</div><div class="empty-state-text">${escapeHtml(text)}</div></div>`;
+}
+
+function startRuntimeStatusPolling() {
+    refreshRuntimeStatus();
+    setInterval(refreshRuntimeStatus, RUNTIME_STATUS_POLL_MS);
+}
+
+function appendTradePlanToMessage(messageEl, plan) {
+    if (!messageEl || !plan || typeof window.renderTradePlanCard !== 'function') return;
+    const content = messageEl.querySelector('.message-content');
+    if (!content) return;
+    content.insertAdjacentHTML('beforeend', window.renderTradePlanCard(plan));
+}
+
+function handleNotificationMessage(data) {
+    if (data.type === 'alert') {
+        const msg = `${data.item}: 当前 ${data.current_price}p (${data.direction} ${data.price}p)`;
+        showNotification(msg, 'warning');
+        addChatMessage('system', msg);
+        loadSidebar();
+    } else if (data.type === 'watch') {
+        const freq = {'hourly': '每小时', 'daily': '每日', 'weekly': '每周'}[data.frequency] || data.frequency;
+        const msg = `⏰ ${freq}关注推送: ${data.item_name} — ${data.price_info || '暂无价格'}`;
+        showNotification(msg, 'info');
+        addChatMessage('system', msg);
+        queryItemPrice(data.item_id);
+    } else if (data.type === 'enriched_analysis') {
+        const typeMap = {'anomaly': '价格异常', 'opportunity': '套利机会', 'trend': '趋势分析'};
+        const priorityIcon = data.priority === 1 ? '🔴' : data.priority === 2 ? '🟡' : '🔵';
+        const label = typeMap[data.notification_type] || data.notification_type;
+        const msg = `${priorityIcon} ${label}: ${data.item_display}\n${data.analysis}`;
+        showNotification(msg, data.priority === 1 ? 'warning' : 'info');
+        addChatMessage('agent', msg);
+        loadSidebar();
+    } else if (data.type === 'goal_opportunity') {
+        const priorityIcon = data.priority === 1 ? '🔴' : '🟡';
+        const msg = `${priorityIcon} 目标机会: ${data.message}`;
+        showNotification(msg, data.priority === 1 ? 'warning' : 'info');
+        addChatMessage('agent', msg);
+    } else if (data.type === 'proactive_push') {
+        const actionMap = {'buy now': '立即买入', 'sell now': '立即卖出', 'watch': '持续关注'};
+        const typeMap = {'opportunity': '机会', 'warning': '警告', 'recommendation': '推荐'};
+        const priorityIcon = data.priority === 1 ? '🔴' : '🟡';
+        const label = typeMap[data.push_type] || data.push_type;
+        const action = actionMap[data.action_suggestion] || data.action_suggestion;
+        const msg = `${priorityIcon} [${label}] ${data.item_display}\n${data.message}\n建议: ${action}`;
+        showNotification(msg, data.priority === 1 ? 'warning' : 'info');
+        const messageEl = addChatMessage('agent', msg);
+        appendTradePlanToMessage(messageEl, data.trade_plan || data.data?.trade_plan);
+    }
+}
+
+window.handleNotificationMessage = handleNotificationMessage;
 
 function setupWebSocket() {
     // 标签页不可见时不连接
@@ -210,7 +416,7 @@ function setupWebSocket() {
         ws.onopen = () => {
             console.log('通知 WebSocket 已连接');
             wsReconnectDelay = 1000;
-            updateSidebarStatus('online');
+            refreshRuntimeStatus();
         };
 
         ws.onmessage = (event) => {
@@ -221,41 +427,7 @@ function setupWebSocket() {
                 console.warn('通知 WebSocket 消息解析失败:', e);
                 return;
             }
-            if (data.type === 'alert') {
-                const msg = `${data.item}: 当前 ${data.current_price}p (${data.direction} ${data.price}p)`;
-                showNotification(msg, 'warning');
-                addChatMessage('system', msg);
-                loadSidebar();
-            } else if (data.type === 'watch') {
-                const freq = {'hourly': '每小时', 'daily': '每日', 'weekly': '每周'}[data.frequency] || data.frequency;
-                const msg = `⏰ ${freq}关注推送: ${data.item_name} — ${data.price_info || '暂无价格'}`;
-                showNotification(msg, 'info');
-                addChatMessage('system', msg);
-                // 自动查询该物品价格
-                queryItemPrice(data.item_id);
-            } else if (data.type === 'enriched_analysis') {
-                const typeMap = {'anomaly': '价格异常', 'opportunity': '套利机会', 'trend': '趋势分析'};
-                const priorityIcon = data.priority === 1 ? '🔴' : data.priority === 2 ? '🟡' : '🔵';
-                const label = typeMap[data.notification_type] || data.notification_type;
-                const msg = `${priorityIcon} ${label}: ${data.item_display}\n${data.analysis}`;
-                showNotification(msg, data.priority === 1 ? 'warning' : 'info');
-                addChatMessage('agent', msg);
-                loadSidebar();
-            } else if (data.type === 'goal_opportunity') {
-                const priorityIcon = data.priority === 1 ? '🔴' : '🟡';
-                const msg = `${priorityIcon} 目标机会: ${data.message}`;
-                showNotification(msg, data.priority === 1 ? 'warning' : 'info');
-                addChatMessage('agent', msg);
-            } else if (data.type === 'proactive_push') {
-                const actionMap = {'buy now': '立即买入', 'sell now': '立即卖出', 'watch': '持续关注'};
-                const typeMap = {'opportunity': '机会', 'warning': '警告', 'recommendation': '推荐'};
-                const priorityIcon = data.priority === 1 ? '🔴' : '🟡';
-                const label = typeMap[data.push_type] || data.push_type;
-                const action = actionMap[data.action_suggestion] || data.action_suggestion;
-                const msg = `${priorityIcon} [${label}] ${data.item_display}\n${data.message}\n建议: ${action}`;
-                showNotification(msg, data.priority === 1 ? 'warning' : 'info');
-                addChatMessage('agent', msg);
-            }
+            handleNotificationMessage(data);
         };
 
         ws.onerror = (error) => {
@@ -400,6 +572,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initTheme();
     initParticleBg();
     loadSidebar();
+    startRuntimeStatusPolling();
     setupWebSocket();
     checkFirstVisit();
     addLoadingAnimations();
@@ -411,6 +584,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 主题切换按钮
     document.getElementById('theme-toggle')?.addEventListener('click', toggleTheme);
+    document.querySelector('.status-indicator')?.addEventListener('click', showRuntimeStatusPanel);
 
     // 设置按钮
     document.getElementById('settings-btn')?.addEventListener('click', () => {
@@ -697,18 +871,18 @@ function initCommandPalette() {
     }
 
     function renderCommands(commands) {
-        list.innerHTML = commands.map((cmd, i) => `
-            <div class="command-item ${i === 0 ? 'selected' : ''}" data-index="${i}">
-                ${cmd.name}
-            </div>
-        `).join('');
-
-        list.querySelectorAll('.command-item').forEach((el, i) => {
-            el.addEventListener('click', () => {
-                commands[i].action();
+        list.textContent = '';
+        commands.forEach((cmd, i) => {
+            const item = document.createElement('div');
+            item.className = `command-item ${i === 0 ? 'selected' : ''}`;
+            item.dataset.index = String(i);
+            item.textContent = cmd.name;
+            item.addEventListener('click', () => {
+                cmd.action();
                 modal.classList.remove('active');
                 input.value = '';
             });
+            list.appendChild(item);
         });
     }
 

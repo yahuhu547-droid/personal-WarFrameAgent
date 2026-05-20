@@ -1,0 +1,10 @@
+attrs>=22
+black
+build
+cattrs>=22
+isort
+pytest
+requests>=2
+sphinx
+twine
+websocket-client>=1.2

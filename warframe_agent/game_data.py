@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 from . import config
+from .tool_context import wrap_untrusted_model_text
 
 logger = logging.getLogger(__name__)
 
@@ -145,12 +146,12 @@ class GameDataStore:
         lines = [f"Mod: {mod['name']}"]
         desc = mod.get("description", [])
         if desc:
-            lines.append(f"效果: {desc[0] if isinstance(desc, list) else desc}")
+            lines.append(f"效果: {wrap_untrusted_model_text('game_data', desc[0] if isinstance(desc, list) else desc)}")
         level_stats = mod.get("levelStats", [])
         if level_stats:
             max_stats = level_stats[-1].get("stats", [])
             if max_stats:
-                lines.append(f"满级: {', '.join(max_stats)}")
+                lines.append(f"满级: {wrap_untrusted_model_text('game_data', ', '.join(max_stats))}")
         if mod.get("rarity"):
             lines.append(f"稀有度: {mod['rarity']}")
         if mod.get("compatName"):
@@ -163,7 +164,7 @@ class GameDataStore:
         if level_stats:
             max_stats = level_stats[-1].get("stats", [])
             if max_stats:
-                lines.append(f"满级效果: {max_stats[0]}")
+                lines.append(f"满级效果: {wrap_untrusted_model_text('game_data', max_stats[0])}")
         if arcane.get("rarity"):
             lines.append(f"稀有度: {arcane['rarity']}")
         return "\n".join(lines)
@@ -177,12 +178,12 @@ class GameDataStore:
             return None
         lines = [f"战甲: {wf['name']}"]
         if wf.get("description"):
-            lines.append(f"简介: {wf['description']}")
+            lines.append(f"简介: {wrap_untrusted_model_text('game_data', wf['description'])}")
         for ability in wf.get("abilities", [])[:4]:
             aname = ability.get("abilityName", "")
             adesc = ability.get("description", "")
             if aname:
-                lines.append(f"技能「{aname}」: {adesc}")
+                lines.append(f"技能「{aname}」: {wrap_untrusted_model_text('game_data', adesc)}")
         return "\n".join(lines)
 
     def get_ducat_value(self, item_id: str) -> int | None:

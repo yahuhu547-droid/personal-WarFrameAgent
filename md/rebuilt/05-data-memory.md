@@ -1,0 +1,193 @@
+# 05. 数据、缓存与记忆系统
+
+本项目同时使用静态数据、外部 API 缓存、JSON 长期记忆、SQLite 历史库和 JSONL 对话日志。
+
+## 1. 静态和构建数据
+
+| 文件/目录 | 用途 |
+|---|---|
+| `data/items_full.json` | 物品全量数据，Prime 分组、名称解析、市场查询的重要基础。 |
+| `data/rag_items.jsonl` | RAG 检索语料。 |
+| `data/generated_aliases.json` | 生成别名。 |
+| `data/item_dictionary_cache.json` | 物品字典缓存。 |
+| `data/item_aliases.json` | 手工或基础别名。 |
+| `data/custom_aliases.json` | Web/API 可维护的自定义别名。 |
+| `data/ducat_values.json` | 杜卡特价值。 |
+| `data/relics_list.json` | 遗物列表。 |
+| `data/relics_drop_data.json` | 遗物掉落。 |
+| `data/relic_vault_status.json` | 遗物封存状态。 |
+| `data/relic_sources.json` | 遗物来源；刷取路线推荐会读取它来说明某遗物可从哪些任务获得。 |
+
+相关构建工具：
+
+- `tools/build_item_data.py`
+- `tools/build_ollama_model.py`
+- `tools/build_embeddings.py`
+- `tools/generate_training_data.py`
+- `tools/merge_training_data.py`
+- `tools/finetune.py`
+- `tools/rebuild_ollama_model.py`
+
+## 2. 外部 API 缓存
+
+| 缓存 | 用途 | 相关模块 |
+|---|---|---|
+| `data/price_cache.db` | warframe.market 价格缓存。 | `warframe_agent/market.py` |
+| `data/game_events_cache.json` | 世界状态解析缓存。 | `warframe_agent/events.py` |
+| `data/worldstate_raw.json` | 原始世界状态数据。 | `warframe_agent/events.py` |
+
+`market.py` 还包含内存缓存和速率限制，用于减少重复请求和外部 API 压力。
+
+## 3. Agent 长期记忆
+
+实现文件：`warframe_agent/memory.py`。
+
+默认数据文件：`data/agent_memory.json`。
+
+### 主要数据结构
+
+| 结构 | 内容 |
+|---|---|
+| `UserProfile` | 用户画像。 |
+| `TradingPreferences` | 交易偏好。 |
+| `PriceAlert` | 价格提醒。 |
+| `WatchItem` | 关注物品。 |
+| `FissureAlert` | 裂缝订阅。 |
+| `CycleAlert` | 开放世界周期订阅。 |
+| `ProactiveSuggestion` | 主动建议记录。 |
+| `AgentMemory` | 统一记忆对象。 |
+
+### 记忆内容
+
+- 收藏物品。
+- 价格提醒。
+- 交易偏好；`TradingPreferences.opportunity_filter` 支持 `all`、`mod`、`arcane`，用于控制交易机会检测范围。
+- 关注列表。
+- 最近主动建议；`ProactiveSuggestion.data` 保存机会来源、策略、利润、ROI、rationale、`dedupe_key`、`profit_bucket` 和 `plan_signature` 等结构化字段。扫描内去重优先使用 `dedupe_key`，否则按 item、suggestion_type、source、strategy 区分，避免同一物品不同来源/策略的机会互相覆盖。
+- 活跃目标。
+- 交易结果。
+- 学到的模式。
+- 常见问题。
+- 裂缝和周期订阅。
+
+## 4. 交易记忆
+
+实现文件：`warframe_agent/trading_memory.py`。
+
+### 表范围
+
+| 表 | 用途 |
+|---|---|
+| `user_queries` | 用户查询摘要。 |
+| `market_snapshots` | 市场快照。 |
+| `recommendations` | 推荐记录。 |
+| `push_history` | 推送历史。 |
+
+### 设计特点
+
+- 使用 SQLite。
+- 默认保留 180 天。
+- 支持只读打开。
+- 用户查询只保存 deterministic summary，不保存完整原始 query/reply。
+- metadata 有白名单和安全过滤。
+- `push_history` 会记录主动交易机会的 `dedupe_key`、来源、策略、利润/ROI、`profit_bucket`、`required_quantity`、`plan_signature` 和建议类型；监控器用它做跨扫描 cooldown 去重，Web 服务重启后仍能抑制近期重复机会，且允许同一物品在不同 source/strategy 下保留不同机会。
+- 主动机会如果携带展示层 `trade_plan`，写入 `push_history` 前会改用 `trade_plan.safe_summary`，不会持久化玩家名、market/profile URL、whisper、buy/sell steps 或 raw orders；玩家变化但 source/item/strategy/profit bucket/quantity/signature 无实质变化时不会重复推送。
+
+### 安全召回
+
+实现文件：`warframe_agent/memory_recall.py`。
+
+`MemoryRecallService` 在 `user_queries`、`market_snapshots`、`recommendations` 和 `push_history` 上做只读召回，评分为：
+
+```text
+score = relevance * 0.6 + recency * 0.2 + salience * 0.2
+```
+
+Trace 只返回安全解释字段，例如 `item_match`、`intent_match`、`tool_match`、`recency`、`salience_reason`。ChatAgent 注入模型上下文时只使用 `format_for_model()` 生成的匿名摘要；Web 只读端点为 `GET /api/memory/recall`。
+
+## 5. 交易历史
+
+实现文件：`warframe_agent/trade_history.py`。
+
+用途：保存用户实际买入/卖出记录。
+
+能力：
+
+- 新增 buy/sell 交易。
+- 查询最近交易。
+- 查询指定物品交易。
+- 统计总花费、总收入、净利润。
+- 统计常交易物品。
+- 删除交易。
+
+Web API：
+
+- `GET /api/trades`
+- `POST /api/trades`
+- `DELETE /api/trades/{trade_id}`
+- `GET /api/trades/stats`
+- `GET /api/trades/item/{item_id}`
+
+## 6. 价格历史
+
+实现文件：`warframe_agent/price_history.py`。
+
+默认数据文件：`data/price_history.db`。
+
+能力：
+
+- 记录卖价和买价快照。
+- 查询近期价格。
+- 趋势摘要。
+- 移动平均。
+- 异常检测。
+- 线性趋势预测。
+- 结合事件上下文修正预测。
+- 清理旧数据。
+
+Web API：
+
+- `GET /api/history/{item_id}`
+- `POST /api/history/compare`
+- `GET /api/price/anomalies`
+
+## 7. 对话日志
+
+实现文件：`warframe_agent/conversation_log.py`。
+
+默认数据文件：`data/conversation_logs.jsonl`。
+
+记录内容：
+
+- 用户消息。
+- 助手回复。
+- 工具调用。
+- 上下文。
+- 评分。
+- 会话 ID。
+
+用途：
+
+- 排查回答问题。
+- 统计工具调用。
+- 回看用户反馈。
+- 支撑后续质量分析。
+
+## 8. 知识库和学习系统
+
+| 模块 | 用途 |
+|---|---|
+| `warframe_agent/knowledge.py` | 市场知识、品类健康度、均价、波动率、趋势、成交量趋势。 |
+| `warframe_agent/patterns.py` | 学习到的交易模式。 |
+| `warframe_agent/rules.py` | 主动推送和机会判断规则。 |
+| `warframe_agent/feedback.py` | 用户反馈和策略效果反馈。 |
+| `warframe_agent/goals.py` | 交易目标、进度和结果。 |
+
+## 9. 数据安全边界
+
+- API Key、token、cookie、authorization 等敏感字段不应进入日志、模型上下文或文档。
+- 外部数据进入模型上下文前应使用 `tool_context.py` 清洗。
+- 交易记忆避免保存完整用户原文和完整回复，只保存摘要和结构化字段。
+- 记忆召回、运行态 API 和最近工具调用视图都必须过滤敏感参数、消息原文、玩家名、profile 和私聊命令。
+- Riven、Baro、遗物价值等市场结果给模型时应去除玩家身份信息、profile 链接和 `/w` 私聊命令；遗物价值模型上下文只包含奖励 market_id、价格聚合、掉率、杜卡德值、EV 和建议。
+- 交易机会的展示层 `trade_plan` 可以包含玩家名、market URL、profile URL 和 whisper；写入模型上下文、长期记忆、交易记忆或工具观测时只能使用 `safe_summary`，不能保存 raw orders 或具体玩家身份。

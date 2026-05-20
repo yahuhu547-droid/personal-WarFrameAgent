@@ -13,8 +13,11 @@ from warframe_agent.riven import (
     _extract_weapon_name,
     _looks_like_riven_query,
     build_riven_whisper,
+    build_riven_market_cues,
     format_riven_results,
+    format_riven_results_for_model,
     parse_riven_query,
+    score_riven_result,
     search_rivens,
 )
 
@@ -363,6 +366,53 @@ class TestRivenStatusIntent:
         assert _riven_statuses_from_message("给出全部玩家") == ()
 
 
+# ── 紫卡评分 ──────────────────────────────────────────────────────────────────
+
+
+class TestRivenScoring:
+    def _result(self, pos_attrs, neg_attrs=None, price=100):
+        return RivenResult(
+            weapon="strun",
+            mod_name="score-test",
+            positive_attrs=[{"stat": stat, "value": 90} for stat in pos_attrs],
+            negative_attrs=[{"stat": stat, "value": -30} for stat in (neg_attrs or [])],
+            price=price,
+            seller="SecretSeller",
+            seller_status="online",
+        )
+
+    def test_good_roll_scores_higher_than_generic_roll(self):
+        good = score_riven_result(self._result(["critical_chance", "critical_damage", "multishot"], ["recoil"], 80))
+        generic = score_riven_result(self._result(["magazine_capacity", "ammo_maximum"], [], 80))
+
+        assert good.score > generic.score
+        assert good.rating in {"S", "A"}
+        assert "暴击" in "".join(good.positive_notes)
+
+    def test_harmful_negative_lowers_score(self):
+        safe_negative = score_riven_result(self._result(["critical_chance", "critical_damage"], ["recoil"], 100))
+        harmful_negative = score_riven_result(self._result(["critical_chance", "critical_damage"], ["critical_chance"], 100))
+
+        assert harmful_negative.score < safe_negative.score
+        assert any("负面" in note for note in harmful_negative.negative_notes)
+
+    def test_market_cues_price_position_and_low_confidence_for_small_sample(self):
+        page = RivenSearchPage(
+            results=[
+                self._result(["critical_chance"], [], 50),
+                self._result(["critical_chance", "critical_damage"], [], 100),
+            ],
+            total=2,
+        )
+
+        cues = build_riven_market_cues(page)
+        score = score_riven_result(page.results[1], query=RivenQuery("strun"), market_cues=cues)
+
+        assert score.price_position == "高于当前列表"
+        assert score.confidence == "低"
+        assert "不代表真实成交价" in score.disclaimer
+
+
 # ── 格式化 ────────────────────────────────────────────────────────────────────
 
 
@@ -385,7 +435,7 @@ class TestFormatOutput:
                 negative_attrs=[{"stat": "recoil", "value": 10.3}],
                 price=20,
                 seller="TestPlayer",
-                seller_status="online",
+                seller_status="ingame",
                 re_rolls=0,
             ),
         ]
@@ -415,8 +465,105 @@ class TestFormatOutput:
         output = format_riven_results(q, results)
         assert "/w OfflineSeller Hi!" not in output
 
+    def test_online_riven_uses_site_contact_hint_not_game_whisper(self):
+        q = RivenQuery(weapon_url_name="strun")
+        results = [RivenResult(weapon="strun", mod_name="strun-mod", price=20, seller="OnlineSeller", seller_status="online")]
+        output = format_riven_results(q, results)
+        assert "/w OnlineSeller Hi!" not in output
+        assert "站内" in output
+
     def test_riven_whisper_is_short_greeting(self):
         assert build_riven_whisper("Wlcos") == "/w Wlcos Hi!"
+
+
+class TestFormatModelContext:
+    def test_compact_model_context_contains_safe_fields_only(self):
+        q = RivenQuery(
+            weapon_url_name="strun",
+            positive_attrs=["critical_chance", "critical_damage"],
+            no_negative=True,
+            max_price=100,
+            seller_statuses=("ingame", "online"),
+        )
+        page = RivenSearchPage(
+            results=[
+                RivenResult(
+                    weapon="strun",
+                    mod_name="hexa-magnades",
+                    positive_attrs=[
+                        {"stat": "critical_chance", "value": 98.7},
+                        {"stat": "critical_damage", "value": 89.3},
+                    ],
+                    negative_attrs=[{"stat": "recoil", "value": -10.3}],
+                    price=20,
+                    seller="SecretSeller",
+                    seller_status="online",
+                    re_rolls=3,
+                ),
+                RivenResult(
+                    weapon="strun",
+                    mod_name="visicron",
+                    positive_attrs=[{"stat": "critical_chance", "value": 88.0}],
+                    negative_attrs=[],
+                    price=None,
+                    seller="SecondSeller",
+                    seller_status="ingame",
+                    re_rolls=0,
+                ),
+            ],
+            total=25,
+            page=2,
+            page_size=10,
+        )
+
+        context = format_riven_results_for_model(q, page, max_items=1)
+
+        assert "tool=riven_search" in context
+        assert "weapon=strun" in context
+        assert "positive_attrs=critical_chance,critical_damage" in context
+        assert "no_negative=True" in context
+        assert "max_price=100" in context
+        assert "seller_statuses=ingame,online" in context
+        assert "page=2" in context
+        assert "page_size=10" in context
+        assert "total=25" in context
+        assert "shown=11-20" in context
+        assert "has_next=True" in context
+        assert "mod_name=hexa-magnades" in context
+        assert "price=20" in context
+        assert "rerolls=3" in context
+        assert "seller_status=online" in context
+        assert "+critical_chance=98.7" in context
+        assert "-recoil=-10.3" in context
+        assert "score=" in context
+        assert "confidence=" in context
+        assert "price_position=" in context
+        assert "不代表真实成交价" in context
+        assert "visicron" not in context
+        for forbidden in [
+            "SecretSeller",
+            "SecondSeller",
+            "/w",
+            "profile",
+            "owner",
+            "auction",
+            "seller_id",
+            "id=",
+        ]:
+            assert forbidden not in context
+
+    def test_empty_model_context_is_safe_and_paginated(self):
+        q = RivenQuery(weapon_url_name="rubico", negative_attrs=["recoil"])
+        page = RivenSearchPage(results=[], total=0, page=1, page_size=10)
+
+        context = format_riven_results_for_model(q, page)
+
+        assert "tool=riven_search" in context
+        assert "weapon=rubico" in context
+        assert "negative_attrs=recoil" in context
+        assert "total=0" in context
+        assert "items=none" in context
+        assert "/w" not in context
 
 
 # ── API 集成测试（需要网络）──────────────────────────────────────────────────
@@ -601,3 +748,108 @@ class TestChatAgentRivenRouting:
         )
 
         assert agent._try_model_riven_parse("给出不存在武器双爆紫卡") is None
+
+    def test_tool_riven_search_returns_safe_model_context_with_unchanged_display(self):
+        from unittest.mock import patch
+        from warframe_agent.tool_registry import ToolResult
+
+        agent = self._make_agent()
+        fake_results = RivenSearchPage(results=[
+            RivenResult(
+                weapon="strun",
+                mod_name="strun-visicron",
+                positive_attrs=[{"stat": "critical_chance", "value": 100.0}],
+                negative_attrs=[],
+                price=50,
+                seller="LeakySeller",
+                seller_status="online",
+                re_rolls=3,
+            ),
+        ], total=1, page=1, page_size=10)
+
+        with patch("warframe_agent.riven.search_rivens", return_value=fake_results):
+            result = agent._tool_riven_search({"weapon": "斯特朗", "positive": "暴击率"})
+
+        assert isinstance(result, ToolResult)
+        assert result.ok is True
+        assert result.display_content == result.content
+        assert "LeakySeller" in result.display_content
+        assert "/w LeakySeller Hi!" not in result.display_content
+        assert "站内" in result.display_content
+        assert "tool=riven_search" in result.model_context
+        assert "mod_name=strun-visicron" in result.model_context
+        assert "price=50" in result.model_context
+        assert "seller_status=online" in result.model_context
+        assert "LeakySeller" not in result.model_context
+        assert "/w" not in result.model_context
+
+    def test_riven_value_question_includes_buying_analysis(self):
+        from unittest.mock import patch
+
+        agent = self._make_agent()
+        fake_results = RivenSearchPage(results=[
+            RivenResult(
+                weapon="strun",
+                mod_name="strun-visicron",
+                positive_attrs=[
+                    {"stat": "critical_chance", "value": 100.0},
+                    {"stat": "critical_damage", "value": 90.0},
+                ],
+                negative_attrs=[],
+                price=50,
+                seller="ValueSeller",
+                seller_status="ingame",
+                re_rolls=3,
+            ),
+            RivenResult(
+                weapon="strun",
+                mod_name="strun-dexicron",
+                positive_attrs=[{"stat": "base_damage_/_melee_damage", "value": 120.0}],
+                negative_attrs=[{"stat": "recoil", "value": -20.0}],
+                price=80,
+                seller="OtherSeller",
+                seller_status="ingame",
+                re_rolls=12,
+            ),
+        ], total=2, page=1, page_size=10)
+
+        with patch("warframe_agent.riven.search_rivens", return_value=fake_results):
+            answer = agent.answer("这个斯特朗紫卡值不值得买")
+
+        assert "购买分析" in answer
+        assert "价格区间" in answer
+        assert "词条" in answer
+        assert "洗卡" in answer
+        assert "结论" in answer
+        assert "I want to buy" not in answer
+
+    def test_deterministic_riven_history_uses_safe_model_context(self):
+        from unittest.mock import patch
+
+        agent = self._make_agent()
+        fake_results = RivenSearchPage(results=[
+            RivenResult(
+                weapon="strun",
+                mod_name="strun-visicron",
+                positive_attrs=[{"stat": "critical_chance", "value": 100.0}],
+                negative_attrs=[],
+                price=50,
+                seller="HistorySeller",
+                seller_status="online",
+                re_rolls=3,
+            ),
+        ], total=1, page=1, page_size=10)
+
+        with patch("warframe_agent.riven.search_rivens", return_value=fake_results):
+            answer = agent.answer("斯特朗紫卡暴击率")
+
+        assert "HistorySeller" in answer
+        assert "/w HistorySeller Hi!" not in answer
+        assert "站内" in answer
+        messages = agent.session.to_messages(limit=1)
+        history_text = "\n".join(message["content"] for message in messages)
+        assert "tool=riven_search" in history_text
+        assert "mod_name=strun-visicron" in history_text
+        assert "seller_status=online" in history_text
+        assert "HistorySeller" not in history_text
+        assert "/w" not in history_text

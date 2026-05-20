@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import config
+from .tool_context import wrap_untrusted_model_text
 
 EVENT_CACHE_PATH = config.DATA_DIR / "game_events_cache.json"
 EVENT_CACHE_TTL = config.EVENT_REFRESH_INTERVAL  # 30 分钟
@@ -168,6 +169,57 @@ _INVASION_MAP = {
     "/Lotus/Language/Menu/CorpusInvasionGeneric": "Corpus 入侵",
     "/Lotus/Language/Menu/GrineerInvasionGeneric": "Grineer 入侵",
     "/Lotus/Language/Menu/InfestedInvasionBoss": "Infested 入侵",
+}
+
+QUERY_EVENT_TYPES = ("void_fissure", "baro_visit", "invasion", "void_storm", "prime_resurgence")
+_QUERY_EVENT_TYPE_ALIASES = {
+    "fissure": "void_fissure",
+    "void_fissure": "void_fissure",
+    "裂缝": "void_fissure",
+    "裂隙": "void_fissure",
+    "虚空裂缝": "void_fissure",
+    "虚空裂隙": "void_fissure",
+    "开核桃": "void_fissure",
+    "遗物": "void_fissure",
+    "核桃": "void_fissure",
+    "baro": "baro_visit",
+    "baro_visit": "baro_visit",
+    "虚空商人": "baro_visit",
+    "奸商": "baro_visit",
+    "invasion": "invasion",
+    "入侵": "invasion",
+    "void_storm": "void_storm",
+    "虚空风暴": "void_storm",
+    "风暴": "void_storm",
+    "prime_resurgence": "prime_resurgence",
+    "resurgence": "prime_resurgence",
+    "prime resurgence": "prime_resurgence",
+    "prime 重生": "prime_resurgence",
+    "重生": "prime_resurgence",
+    "返厂": "prime_resurgence",
+}
+_UNSUPPORTED_QUERY_EVENT_ALIASES = {
+    "午夜电波": "午夜电波",
+    "电波": "午夜电波",
+    "nightwave": "午夜电波",
+    "仲裁": "仲裁",
+    "arbitration": "仲裁",
+    "突击": "突击",
+    "sortie": "突击",
+    "darvo": "每日特惠",
+    "每日特惠": "每日特惠",
+    "每日优惠": "每日特惠",
+    "扎里曼": "扎里曼",
+    "zariman": "扎里曼",
+    "赏金": "赏金",
+    "bounty": "赏金",
+}
+_EVENT_TYPE_TITLES = {
+    "void_fissure": "当前虚空裂缝/裂隙:",
+    "baro_visit": "当前虚空商人:",
+    "invasion": "当前入侵:",
+    "void_storm": "当前虚空风暴:",
+    "prime_resurgence": "当前 Prime 重生:",
 }
 
 # 节点名映射（常用节点）
@@ -364,6 +416,120 @@ def _limited_event_description(name: str, raw: dict[str, Any]) -> str:
     if isinstance(health, (int, float)):
         parts.append(f"进度: {health * 100:.0f}%")
     return " | ".join(parts)
+
+
+def normalize_query_event_type(event_type: str | None) -> str | None:
+    if event_type is None:
+        return None
+    text = str(event_type).strip()
+    lowered = text.lower()
+    if not lowered:
+        return None
+    if lowered in QUERY_EVENT_TYPES:
+        return lowered
+    if lowered in _QUERY_EVENT_TYPE_ALIASES:
+        return _QUERY_EVENT_TYPE_ALIASES[lowered]
+    if not re.fullmatch(r"[\w\s一-鿿-]{1,40}", text):
+        return None
+    for alias, normalized in sorted(_QUERY_EVENT_TYPE_ALIASES.items(), key=lambda item: len(item[0]), reverse=True):
+        if alias.lower() in lowered:
+            return normalized
+    return None
+
+
+def unsupported_event_type_label(event_type: str | None) -> str:
+    text = str(event_type or "").strip()
+    lowered = text.lower()
+    if not lowered:
+        return ""
+    for alias, label in sorted(_UNSUPPORTED_QUERY_EVENT_ALIASES.items(), key=lambda item: len(item[0]), reverse=True):
+        if alias.lower() in lowered:
+            return label
+    return ""
+
+
+def unsupported_event_type_message(event_type: str | None) -> str:
+    label = unsupported_event_type_label(event_type)
+    if not label:
+        label = str(event_type or "").strip() or "该事件类型"
+    return f"当前数据源暂不支持{label}查询，不会编造结果。"
+
+
+def is_supported_query_event_type(event_type: str | None) -> bool:
+    if event_type is None:
+        return True
+    return normalize_query_event_type(event_type) is not None
+
+
+def filter_events_by_type(events: list[GameEvent], event_type: str | None = None) -> list[GameEvent]:
+    normalized = normalize_query_event_type(event_type)
+    if normalized is None:
+        return events if event_type is None or not str(event_type).strip() else []
+    return [event for event in events if event.event_type == normalized]
+
+
+def format_events_for_display(events: list[GameEvent], event_type: str | None = None, limit: int = 20) -> str:
+    normalized = normalize_query_event_type(event_type)
+    if event_type is not None and str(event_type).strip() and normalized is None:
+        label = unsupported_event_type_label(event_type)
+        if label:
+            return unsupported_event_type_message(event_type)
+        return f"不支持的事件类型: {str(event_type).strip()}。支持: {', '.join(QUERY_EVENT_TYPES)}。"
+
+    selected = filter_events_by_type(events, normalized)
+    title = _EVENT_TYPE_TITLES.get(normalized or "", "当前游戏活动:")
+    if not selected:
+        return f"{title}\n暂无。"
+    lines = [title]
+    for event in selected[:limit]:
+        lines.append(f"- {event.description}")
+    return "\n".join(lines)
+
+
+def format_events_for_model(events: list[GameEvent], event_type: str | None = None, limit: int = 20) -> str:
+    normalized = normalize_query_event_type(event_type)
+    if event_type is not None and str(event_type).strip() and normalized is None:
+        safe_type = re.sub(r"\s+", " ", str(event_type).strip())[:80]
+        return f"tool=query_events\nerror=unsupported_type\ntype={safe_type}\nsupported={','.join(QUERY_EVENT_TYPES)}"
+
+    selected = filter_events_by_type(events, normalized)[:limit]
+    parts = [
+        "tool=query_events",
+        f"type={normalized or 'all'}",
+        f"count={len(selected)}",
+    ]
+    for event in selected:
+        parts.append(_event_model_line(event))
+    return "\n".join(parts)
+
+
+def _event_model_line(event: GameEvent) -> str:
+    fields = [
+        f"event={event.event_type}",
+        f"desc={_compact_event_description(event.description)}",
+    ]
+    if event.start_time:
+        fields.append(f"start={event.start_time}")
+    if event.end_time:
+        fields.append(f"end={event.end_time}")
+    if event.event_type == "baro_visit":
+        fields.append(f"baro_items={len(event.baro_items)}")
+    if event.event_type == "prime_resurgence" and event.prime_resurgence:
+        rotation = event.prime_resurgence
+        if rotation.featured_names:
+            fields.append(f"featured={'+'.join(rotation.featured_names)}")
+        if rotation.end_time:
+            fields.append(f"rotation_end={rotation.end_time}")
+        if rotation.next_featured_names:
+            fields.append(f"next={'+'.join(rotation.next_featured_names)}")
+    return " | ".join(fields)
+
+
+def _compact_event_description(description: str) -> str:
+    text = re.sub(r"\s+", " ", description).strip()
+    if len(text) > 120:
+        text = text[:117].rstrip() + "..."
+    return wrap_untrusted_model_text("worldstate", text, max_chars=220, max_lines=4)
 
 
 def _classify_event(raw: dict) -> GameEvent | None:

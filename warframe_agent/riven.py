@@ -117,6 +117,17 @@ class RivenResult:
 
 
 @dataclass
+class RivenScore:
+    score: int
+    rating: str
+    positive_notes: list[str] = field(default_factory=list)
+    negative_notes: list[str] = field(default_factory=list)
+    price_position: str = "样本不足"
+    confidence: str = "低"
+    disclaimer: str = "当前挂牌参考，不代表真实成交价"
+
+
+@dataclass
 class RivenSearchPage:
     results: list[RivenResult]
     total: int
@@ -195,7 +206,7 @@ def _extract_weapon_name(message: str, resolver: Callable[[str], str] | None) ->
 
     # 先去掉紫卡相关关键词，避免干扰武器名识别
     cleaned = message
-    noise_keywords = ["紫卡", "裂罅", "riven", "Riven", "查", "搜", "搜索", "查询", "帮我", "给我", "给出", "我要", "要", "找", "看看", "无负", "不要负", "在线", "在线玩家", "在线卖家", "在线的", "游戏中", "玩家", "卖家", "买家", "online"]
+    noise_keywords = ["紫卡", "裂罅", "riven", "Riven", "查", "搜", "搜索", "查询", "帮我", "给我", "给出", "我要", "要", "找", "看看", "这个", "值不值得", "值得买", "能买吗", "适合买", "评价", "分析", "无负", "不要负", "在线", "在线玩家", "在线卖家", "在线的", "游戏中", "玩家", "卖家", "买家", "online"]
     for kw in sorted(noise_keywords, key=len, reverse=True):
         cleaned = cleaned.replace(kw, " ")
 
@@ -421,10 +432,244 @@ def build_riven_whisper(user_name: str) -> str:
     return f"/w {user_name} Hi!"
 
 
+def _coerce_riven_page(page: RivenSearchPage | list[RivenResult]) -> RivenSearchPage:
+    if isinstance(page, list):
+        return RivenSearchPage(results=page, total=len(page))
+    return page
+
+
+HIGH_VALUE_RIVEN_STATS = {
+    "critical_chance": 24,
+    "critical_damage": 24,
+    "multishot": 22,
+    "base_damage_/_melee_damage": 20,
+    "toxin_damage": 14,
+    "heat_damage": 12,
+    "cold_damage": 12,
+    "electric_damage": 12,
+    "status_chance": 12,
+}
+MEDIUM_VALUE_RIVEN_STATS = {
+    "fire_rate_/_attack_speed": 10,
+    "slash_damage": 8,
+    "puncture_damage": 5,
+    "impact_damage": 4,
+    "projectile_speed": 6,
+    "punch_through": 6,
+    "reload_speed": 4,
+    "magazine_capacity": 3,
+    "ammo_maximum": 2,
+    "status_duration": 3,
+}
+LOW_IMPACT_NEGATIVES = {"recoil", "zoom", "ammo_maximum"}
+HARMFUL_NEGATIVES = {
+    "critical_chance",
+    "critical_damage",
+    "multishot",
+    "base_damage_/_melee_damage",
+    "fire_rate_/_attack_speed",
+    "status_chance",
+}
+
+
+def build_riven_market_cues(page: RivenSearchPage | list[RivenResult]) -> dict:
+    page = _coerce_riven_page(page)
+    prices = sorted(result.price for result in page.results if result.price is not None)
+    if not prices:
+        return {"sample_size": 0, "min_price": None, "max_price": None, "median_price": None, "confidence": "低"}
+    mid = len(prices) // 2
+    median = prices[mid] if len(prices) % 2 else (prices[mid - 1] + prices[mid]) / 2
+    confidence = "高" if len(prices) >= 8 else "中" if len(prices) >= 4 else "低"
+    return {
+        "sample_size": len(prices),
+        "min_price": prices[0],
+        "max_price": prices[-1],
+        "median_price": median,
+        "confidence": confidence,
+    }
+
+
+def score_riven_result(
+    result: RivenResult,
+    query: RivenQuery | None = None,
+    market_cues: dict | None = None,
+) -> RivenScore:
+    score = 35
+    positive_notes: list[str] = []
+    negative_notes: list[str] = []
+
+    positive_stats = [attr.get("stat", "") for attr in result.positive_attrs]
+    negative_stats = [attr.get("stat", "") for attr in result.negative_attrs]
+    for stat in positive_stats:
+        points = HIGH_VALUE_RIVEN_STATS.get(stat, MEDIUM_VALUE_RIVEN_STATS.get(stat, 0))
+        score += points
+        if points >= 20:
+            positive_notes.append(f"核心属性: {ATTR_DISPLAY_NAMES.get(stat, stat)}")
+        elif points >= 8:
+            positive_notes.append(f"有效属性: {ATTR_DISPLAY_NAMES.get(stat, stat)}")
+
+    if {"critical_chance", "critical_damage"}.issubset(set(positive_stats)):
+        score += 12
+        positive_notes.append("暴击组合优秀")
+    if {"critical_chance", "critical_damage", "multishot"}.issubset(set(positive_stats)):
+        score += 8
+        positive_notes.append("双爆多重组合稀缺")
+
+    for stat in negative_stats:
+        if stat in LOW_IMPACT_NEGATIVES:
+            score += 4
+            positive_notes.append(f"可接受负面: {ATTR_DISPLAY_NAMES.get(stat, stat)}")
+        elif stat in HARMFUL_NEGATIVES:
+            score -= 22
+            negative_notes.append(f"有害负面: {ATTR_DISPLAY_NAMES.get(stat, stat)}")
+        else:
+            score -= 8
+            negative_notes.append(f"负面属性: {ATTR_DISPLAY_NAMES.get(stat, stat)}")
+
+    if query and query.positive_attrs:
+        matched = set(query.positive_attrs).intersection(positive_stats)
+        score += len(matched) * 3
+    if result.price is None:
+        score -= 8
+        negative_notes.append("未标价，价格参考弱")
+
+    score = max(0, min(100, score))
+    cues = market_cues or {}
+    price_position = _riven_price_position(result.price, cues)
+    confidence = str(cues.get("confidence") or "低")
+    return RivenScore(
+        score=score,
+        rating=_riven_rating(score),
+        positive_notes=positive_notes,
+        negative_notes=negative_notes,
+        price_position=price_position,
+        confidence=confidence,
+    )
+
+
+def format_riven_score_label(score: RivenScore) -> str:
+    return f"属性评分 {score.score}/100 ({score.rating}) · 价格位置: {score.price_position} · 置信度: {score.confidence} · {score.disclaimer}"
+
+
+def _riven_rating(score: int) -> str:
+    if score >= 85:
+        return "S"
+    if score >= 70:
+        return "A"
+    if score >= 55:
+        return "B"
+    if score >= 40:
+        return "C"
+    return "D"
+
+
+def _riven_price_position(price: int | None, cues: dict) -> str:
+    if price is None or not cues or cues.get("sample_size", 0) < 2:
+        return "样本不足"
+    min_price = cues.get("min_price")
+    max_price = cues.get("max_price")
+    median = cues.get("median_price")
+    if min_price is None or max_price is None or median is None:
+        return "样本不足"
+    if price <= min_price:
+        return "当前列表低位"
+    if price >= max_price:
+        return "高于当前列表"
+    if price <= median * 0.9:
+        return "低于当前中位"
+    if price >= median * 1.1:
+        return "高于当前中位"
+    return "接近当前中位"
+
+
+def _safe_model_field(value: object, max_len: int = 120, forbidden_terms: tuple[str, ...] = ()) -> str:
+    text = str(value if value is not None else "").strip()
+    text = re.sub(r"https?://\S+", "[url-redacted]", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?i)/w\s+\S+", "[whisper-redacted]", text)
+    for term in forbidden_terms:
+        term = str(term or "").strip()
+        if term:
+            text = re.sub(re.escape(term), "[seller-redacted]", text, flags=re.IGNORECASE)
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_len:
+        return text[:max_len - 1] + "…"
+    return text
+
+
+def _format_model_attrs(result: RivenResult) -> str:
+    forbidden_terms = (result.seller,)
+    attr_parts = []
+    for attr in result.positive_attrs:
+        stat = _safe_model_field(attr.get("stat", ""), max_len=80, forbidden_terms=forbidden_terms)
+        value = _safe_model_field(attr.get("value", ""), max_len=40, forbidden_terms=forbidden_terms)
+        if stat:
+            attr_parts.append(f"+{stat}={value}")
+    for attr in result.negative_attrs:
+        stat = _safe_model_field(attr.get("stat", ""), max_len=80, forbidden_terms=forbidden_terms)
+        value = _safe_model_field(attr.get("value", ""), max_len=40, forbidden_terms=forbidden_terms)
+        if stat:
+            attr_parts.append(f"-{stat}={value}")
+    return ",".join(attr_parts) if attr_parts else "none"
+
+
+def _join_filter_values(values: list[str] | tuple[str, ...], empty: str = "none") -> str:
+    cleaned = [_safe_model_field(value, max_len=80) for value in values if _safe_model_field(value, max_len=80)]
+    return ",".join(cleaned) if cleaned else empty
+
+
+def format_riven_results_for_model(query: RivenQuery, page: RivenSearchPage | list[RivenResult], max_items: int = 8) -> str:
+    """格式化给模型读取的紫卡搜索摘要，刻意不包含卖家名、私聊命令或原始拍卖标识。"""
+    page = _coerce_riven_page(page)
+    max_items = max(0, max_items)
+    seller_statuses = _join_filter_values(query.seller_statuses, empty="all")
+    lines = [
+        "tool=riven_search",
+        f"weapon={_safe_model_field(query.weapon_url_name, max_len=80)}",
+        "filters: "
+        f"positive_attrs={_join_filter_values(query.positive_attrs)}; "
+        f"negative_attrs={_join_filter_values(query.negative_attrs)}; "
+        f"no_negative={query.no_negative}; "
+        f"max_price={query.max_price if query.max_price is not None else 'none'}; "
+        f"seller_statuses={seller_statuses}",
+        "pagination: "
+        f"page={page.page}; "
+        f"page_size={page.page_size}; "
+        f"total={page.total}; "
+        f"shown={page.start_index}-{page.end_index}; "
+        f"has_next={page.has_next}; "
+        f"has_prev={page.has_prev}",
+    ]
+
+    if not page.results or max_items == 0:
+        lines.append("items=none")
+        return "\n".join(lines)
+
+    lines.append("items:")
+    market_cues = build_riven_market_cues(page)
+    for index, result in enumerate(page.results[:max_items], page.start_index):
+        price = result.price if result.price is not None else "unpriced"
+        forbidden_terms = (result.seller,)
+        score = score_riven_result(result, query=query, market_cues=market_cues)
+        lines.append(
+            f"- index={index}; "
+            f"weapon={_safe_model_field(result.weapon, max_len=80, forbidden_terms=forbidden_terms)}; "
+            f"mod_name={_safe_model_field(result.mod_name, forbidden_terms=forbidden_terms)}; "
+            f"attrs={_format_model_attrs(result)}; "
+            f"price={price}; "
+            f"rerolls={result.re_rolls}; "
+            f"seller_status={_safe_model_field(result.seller_status, max_len=40, forbidden_terms=forbidden_terms)}; "
+            f"score={score.score}; rating={score.rating}; price_position={score.price_position}; "
+            f"confidence={score.confidence}; disclaimer={score.disclaimer}"
+        )
+    if len(page.results) > max_items:
+        lines.append(f"truncated_items={len(page.results) - max_items}")
+    return "\n".join(lines)
+
+
 def format_riven_results(query: RivenQuery, page: RivenSearchPage | list[RivenResult]) -> str:
     """格式化紫卡搜索结果。"""
-    if isinstance(page, list):
-        page = RivenSearchPage(results=page, total=len(page))
+    page = _coerce_riven_page(page)
 
     weapon_display = query.weapon_url_name.replace("_", " ").title()
     conditions = []
@@ -448,9 +693,12 @@ def format_riven_results(query: RivenQuery, page: RivenSearchPage | list[RivenRe
 
     lines = [header, f"共找到 {page.total} 条，展示第 {page.start_index}-{page.end_index} 条，按价格排序：", ""]
 
+    market_cues = build_riven_market_cues(page)
     for i, r in enumerate(page.results, page.start_index):
         price_str = f"{r.price}p" if r.price else "未定价"
+        riven_score = score_riven_result(r, query=query, market_cues=market_cues)
         lines.append(f"{i}. {r.mod_name} | {price_str} | {r.re_rolls}次洗卡")
+        lines.append(f"   {format_riven_score_label(riven_score)}")
 
         # 属性行
         attr_parts = []
@@ -467,8 +715,10 @@ def format_riven_results(query: RivenQuery, page: RivenSearchPage | list[RivenRe
         status_map = {"ingame": "游戏中", "online": "在线", "offline": "离线"}
         status = status_map.get(r.seller_status, r.seller_status)
         lines.append(f"   卖家: {r.seller} ({status})")
-        if r.seller and r.seller_status in {"ingame", "online"}:
+        if r.seller and r.seller_status == "ingame":
             lines.append(f"   招呼: {build_riven_whisper(r.seller)}")
+        elif r.seller and r.seller_status == "online":
+            lines.append("   卖家站内在线，建议打开拍卖页或站内沟通；游戏内交易先打招呼后再发送紫卡名称。")
 
     hints = []
     if page.has_next:

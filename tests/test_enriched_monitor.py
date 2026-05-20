@@ -1,7 +1,7 @@
 """测试规则驱动监控：机会检测、知识库集成、市场状态评估。"""
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from warframe_agent.monitor import (
     EnrichedNotification,
@@ -23,7 +23,19 @@ def test_detect_opportunities_finds_high_spread():
     opps = detect_opportunities(snapshots)
     assert len(opps) == 1
     assert opps[0].suggestion_type == "opportunity"
-    assert "价差" in opps[0].message
+    assert "买卖盘价差" in opps[0].message
+    assert "原因" in opps[0].message
+    assert "100p" in opps[0].message
+    assert "40p" in opps[0].message
+    assert "40%" in opps[0].message
+    assert opps[0].data["source"] == "spread"
+    assert opps[0].data["sell_price"] == 100
+    assert opps[0].data["buy_price"] == 40
+    assert opps[0].data["spread"] == 60
+    assert opps[0].data["spread_pct"] == 150.0
+    assert opps[0].data["threshold_pct"] == 40
+    assert "原因" in opps[0].data["rationale"]
+    assert "低买高卖" not in opps[0].message
 
 
 def test_detect_opportunities_ignores_low_spread():
@@ -39,6 +51,40 @@ def test_detect_opportunities_ignores_missing_prices():
         FavoriteSnapshot(item_id="c", item_display="C", sell_price=None, buy_price=None),
     ]
     assert detect_opportunities(snapshots) == []
+
+
+@patch("warframe_agent.monitor.load_item_data")
+def test_detect_opportunities_filters_mod_only(load_item_data_mock):
+    load_item_data_mock.return_value = {
+        "primed_flow": {"item_id": "primed_flow", "tags": ["mod"], "tradable": True, "modMaxRank": 10},
+        "arcane_energize": {"item_id": "arcane_energize", "tags": ["arcane_enhancement"]},
+        "mesa_prime_set": {"item_id": "mesa_prime_set", "tags": ["prime", "set"]},
+    }
+    snapshots = [
+        FavoriteSnapshot(item_id="primed_flow", item_display="Primed Flow", sell_price=100, buy_price=40),
+        FavoriteSnapshot(item_id="arcane_energize", item_display="Arcane Energize", sell_price=100, buy_price=40),
+        FavoriteSnapshot(item_id="mesa_prime_set", item_display="Mesa Prime Set", sell_price=100, buy_price=40),
+    ]
+
+    opps = detect_opportunities(snapshots, opportunity_filter="mod")
+
+    assert [opp.item_id for opp in opps] == ["primed_flow"]
+
+
+@patch("warframe_agent.monitor.load_item_data")
+def test_detect_opportunities_filters_arcane_only(load_item_data_mock):
+    load_item_data_mock.return_value = {
+        "primed_flow": {"item_id": "primed_flow", "tags": ["mod"], "tradable": True, "modMaxRank": 10},
+        "arcane_energize": {"item_id": "arcane_energize", "tags": ["arcane_enhancement"]},
+    }
+    snapshots = [
+        FavoriteSnapshot(item_id="primed_flow", item_display="Primed Flow", sell_price=100, buy_price=40),
+        FavoriteSnapshot(item_id="arcane_energize", item_display="Arcane Energize", sell_price=100, buy_price=40),
+    ]
+
+    opps = detect_opportunities(snapshots, opportunity_filter="arcane")
+
+    assert [opp.item_id for opp in opps] == ["arcane_energize"]
 
 
 # ── PriceMonitor with knowledge ──

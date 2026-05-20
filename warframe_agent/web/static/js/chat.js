@@ -33,7 +33,10 @@ function renderMarkdown(text) {
     if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
         try {
             const html = marked.parse(text);
-            return DOMPurify.sanitize(html);
+            return DOMPurify.sanitize(html, {
+                FORBID_TAGS: ['img'],
+                FORBID_ATTR: ['onerror', 'onload', 'onclick']
+            });
         } catch (e) {
             return escapeHtml(text);
         }
@@ -219,23 +222,59 @@ function extractItemIdFromText(text) {
 // ===== 私聊命令检测与高亮 =====
 
 function detectWhisperCommands(container) {
-    const text = container.textContent;
     const whisperPattern = /\/w\s+[\w]+\s+Hi!.*?(?:buy|sell).*/gi;
-    const matches = text.match(whisperPattern);
-    if (!matches) return;
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    const replacements = [];
 
-    let html = container.innerHTML;
-    matches.forEach(match => {
-        const escaped = match.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const regex = new RegExp(escaped, 'g');
-        html = html.replace(regex, `
-            <div class="whisper-command">
-                <div class="whisper-text">${match}</div>
-                <button class="whisper-copy-btn" onclick="copyWhisper(this)">复制私聊</button>
-            </div>
-        `);
+    while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const text = node.textContent || '';
+        whisperPattern.lastIndex = 0;
+        const matches = Array.from(text.matchAll(whisperPattern));
+        if (matches.length > 0) {
+            replacements.push({ node, matches });
+        }
+    }
+
+    replacements.forEach(({ node, matches }) => {
+        const fragment = document.createDocumentFragment();
+        const text = node.textContent || '';
+        let cursor = 0;
+
+        matches.forEach(match => {
+            const command = match[0];
+            const index = match.index || 0;
+            if (index > cursor) {
+                fragment.appendChild(document.createTextNode(text.slice(cursor, index)));
+            }
+            fragment.appendChild(createWhisperCommand(command));
+            cursor = index + command.length;
+        });
+
+        if (cursor < text.length) {
+            fragment.appendChild(document.createTextNode(text.slice(cursor)));
+        }
+
+        node.parentNode.replaceChild(fragment, node);
     });
-    container.innerHTML = html;
+}
+
+function createWhisperCommand(text) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'whisper-command';
+
+    const textDiv = document.createElement('div');
+    textDiv.className = 'whisper-text';
+    textDiv.textContent = text;
+
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'whisper-copy-btn';
+    copyBtn.textContent = '复制私聊';
+    copyBtn.addEventListener('click', () => copyWhisper(copyBtn));
+
+    wrapper.append(textDiv, copyBtn);
+    return wrapper;
 }
 
 function copyWhisper(btn) {
@@ -866,7 +905,15 @@ function createCustomQuickBtn(name, msg) {
     const btn = document.createElement('button');
     btn.className = 'quick-btn custom-quick-btn';
     btn.dataset.msg = msg;
-    btn.innerHTML = `<span>${name}</span><button class="remove-quick-btn" title="移除">&times;</button>`;
+
+    const nameSpan = document.createElement('span');
+    nameSpan.textContent = name;
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'remove-quick-btn';
+    removeBtn.title = '移除';
+    removeBtn.textContent = '×';
+    btn.append(nameSpan, removeBtn);
 
     btn.addEventListener('click', (e) => {
         if (e.target.classList.contains('remove-quick-btn')) {
@@ -930,21 +977,44 @@ function renderAliasList(aliases) {
     const list = document.getElementById('alias-list');
     if (!list) return;
 
+    list.textContent = '';
     if (aliases.length === 0) {
-        list.innerHTML = '<div class="alias-empty">暂无自定义别名</div>';
+        const empty = document.createElement('div');
+        empty.className = 'alias-empty';
+        empty.textContent = '暂无自定义别名';
+        list.appendChild(empty);
         return;
     }
 
-    list.innerHTML = aliases.map(a => `
-        <div class="alias-item">
-            <div class="alias-info">
-                <span class="alias-name">${escapeHtml(a.name)}</span>
-                <span class="alias-arrow">→</span>
-                <span class="alias-display">${escapeHtml(a.display || a.item_id)}</span>
-            </div>
-            <button class="alias-remove-btn" onclick="removeAlias('${escapeJsString(a.name)}')">&times;</button>
-        </div>
-    `).join('');
+    aliases.forEach(alias => {
+        const item = document.createElement('div');
+        item.className = 'alias-item';
+
+        const info = document.createElement('div');
+        info.className = 'alias-info';
+
+        const name = document.createElement('span');
+        name.className = 'alias-name';
+        name.textContent = alias.name;
+
+        const arrow = document.createElement('span');
+        arrow.className = 'alias-arrow';
+        arrow.textContent = '→';
+
+        const display = document.createElement('span');
+        display.className = 'alias-display';
+        display.textContent = alias.display || alias.item_id || '';
+
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'alias-remove-btn';
+        remove.textContent = '×';
+        remove.addEventListener('click', () => removeAlias(alias.name));
+
+        info.append(name, arrow, display);
+        item.append(info, remove);
+        list.appendChild(item);
+    });
 }
 
 async function searchItemsForAlias(query) {
@@ -961,24 +1031,36 @@ async function searchItemsForAlias(query) {
         const res = await fetch(`/api/search_items?q=${encodeURIComponent(query)}`);
         const data = await res.json();
 
+        resultsDiv.textContent = '';
         if (!data.items || data.items.length === 0) {
-            resultsDiv.innerHTML = '<div class="alias-search-empty">未找到匹配物品</div>';
+            const empty = document.createElement('div');
+            empty.className = 'alias-search-empty';
+            empty.textContent = '未找到匹配物品';
+            resultsDiv.appendChild(empty);
             resultsDiv.classList.add('active');
             return;
         }
 
-        resultsDiv.innerHTML = data.items.map(item => `
-            <div class="alias-search-item" data-item-id="${item.item_id}" data-display="${escapeHtml(item.display)}">
-                <span class="alias-search-display">${item.display}</span>
-                <span class="alias-search-id">${item.item_id}</span>
-            </div>
-        `).join('');
+        data.items.forEach(item => {
+            const el = document.createElement('div');
+            el.className = 'alias-search-item';
+            el.dataset.itemId = item.item_id || '';
+            el.dataset.display = item.display || '';
 
-        resultsDiv.querySelectorAll('.alias-search-item').forEach(el => {
+            const display = document.createElement('span');
+            display.className = 'alias-search-display';
+            display.textContent = item.display || '';
+
+            const id = document.createElement('span');
+            id.className = 'alias-search-id';
+            id.textContent = item.item_id || '';
+
+            el.append(display, id);
             el.addEventListener('click', () => {
                 selectAliasItem(el.dataset.itemId, el.dataset.display);
                 resultsDiv.classList.remove('active');
             });
+            resultsDiv.appendChild(el);
         });
 
         resultsDiv.classList.add('active');
@@ -1097,39 +1179,50 @@ function showItemNotFound(query) {
     const content = document.createElement('div');
     content.className = 'message-content';
 
+    const renderHint = (suggestions = []) => {
+        content.textContent = '';
+
+        const hint = document.createElement('div');
+        hint.className = 'not-found-hint';
+        hint.textContent = `未找到「${query}」`;
+        content.appendChild(hint);
+
+        if (suggestions.length > 0) {
+            const title = document.createElement('div');
+            title.className = 'suggestions-hint';
+            title.textContent = '你是不是想找：';
+
+            const buttons = document.createElement('div');
+            buttons.className = 'suggestion-buttons';
+            suggestions.forEach(suggestion => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'suggestion-btn';
+                btn.textContent = suggestion.name || suggestion.item_id || '';
+                btn.addEventListener('click', () => queryItemPrice(suggestion.item_id));
+                buttons.appendChild(btn);
+            });
+            content.append(title, buttons);
+        }
+
+        const aliasHint = document.createElement('div');
+        aliasHint.className = 'add-alias-hint';
+        const aliasText = document.createElement('span');
+        aliasText.textContent = '如果是你熟悉的叫法，可以';
+        const aliasBtn = document.createElement('button');
+        aliasBtn.type = 'button';
+        aliasBtn.className = 'alias-link-btn';
+        aliasBtn.textContent = '添加自定义别名';
+        aliasBtn.addEventListener('click', () => openAliasModal(query));
+        aliasHint.append(aliasText, aliasBtn);
+        content.appendChild(aliasHint);
+    };
+
     // 先尝试搜索候选
     fetch(`/api/resolve/${encodeURIComponent(query)}`)
         .then(res => res.json())
-        .then(data => {
-            let html = `<div class="not-found-hint">未找到「${escapeHtml(query)}」</div>`;
-
-            if (data.suggestions && data.suggestions.length > 0) {
-                html += '<div class="suggestions-hint">你是不是想找：</div>';
-                html += '<div class="suggestion-buttons">';
-                data.suggestions.forEach(s => {
-                    html += `<button class="suggestion-btn" onclick="queryItemPrice('${escapeJsString(s.item_id)}')">${escapeHtml(s.name)}</button>`;
-                });
-                html += '</div>';
-            }
-
-            html += `
-                <div class="add-alias-hint">
-                    <span>如果是你熟悉的叫法，可以</span>
-                    <button class="alias-link-btn" onclick="openAliasModal('${escapeJsString(query)}')">添加自定义别名</button>
-                </div>
-            `;
-
-            content.innerHTML = html;
-        })
-        .catch(() => {
-            content.innerHTML = `
-                <div class="not-found-hint">未找到「${escapeHtml(query)}」</div>
-                <div class="add-alias-hint">
-                    <span>如果是你熟悉的叫法，可以</span>
-                    <button class="alias-link-btn" onclick="openAliasModal('${escapeJsString(query)}')">添加自定义别名</button>
-                </div>
-            `;
-        });
+        .then(data => renderHint(data.suggestions || []))
+        .catch(() => renderHint());
 
     msg.appendChild(decoration);
     msg.appendChild(content);
