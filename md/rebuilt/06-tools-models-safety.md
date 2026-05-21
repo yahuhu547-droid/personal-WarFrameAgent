@@ -36,6 +36,8 @@
 - `riven_search`
 - `relic_value`
 
+攻略视频推荐不是模型专家工具，也不在用户提问时实时抓取 B 站；它是 `ChatAgent` 基于 `data/bilibili_recommendations.json` 的本地 curated 确定性能力，支持按具体武器或主武器/副武器/近战类别推荐；`build_expert`、`guide_expert`、`activity_expert` 已移除。
+
 ### 执行能力
 
 - required 参数校验。
@@ -87,6 +89,7 @@
 - Prime 套装、部件、缺件。
 - 市场链接、最低卖家、砍价等实时交易辅助；这些回复应走确定性订单数据路径，不交给 LLM 编造。
 - 活动、裂缝、周期、Prime 重生、Vault。
+- 攻略、配卡、打法类问题会在适用时追加本地 curated B 站视频链接推荐；“主武器/副武器/近战配卡视频”会按本地 `category` 分类返回，不依赖实时网页抓取。
 - 关注、提醒、收藏、交易记录。
 - 价格趋势和历史。
 

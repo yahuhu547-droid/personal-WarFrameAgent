@@ -61,7 +61,7 @@ def _trade_plan_step_text(step: dict) -> str:
     return "\n".join(trade_plan_step_lines(step))
 
 
-def build_trade_plan_card_elements(plan: dict) -> list[dict]:
+def build_trade_plan_card_elements(plan: dict, opportunity_id: str = "") -> list[dict]:
     if not isinstance(plan, dict):
         return []
     profit = plan.get("profit", 0)
@@ -79,6 +79,14 @@ def build_trade_plan_card_elements(plan: dict) -> list[dict]:
             ],
         }
     ]
+    if opportunity_id:
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"**机会ID：{opportunity_id}**\n在飞书输入 `{opportunity_id}` 查看买卖双方链接、玩家主页和游戏内私聊命令。\n该 ID 约 48 小时后过期；机会基于推送时快照，请以实时市场为准。",
+            },
+        })
     buy_steps = plan.get("buy_steps") or []
     if buy_steps:
         elements.append({"tag": "hr"})

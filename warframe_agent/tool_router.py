@@ -84,6 +84,10 @@ def select_candidate_tools(message: str, max_tools: int = MAX_CANDIDATE_TOOLS) -
         candidates = ["relic_value", "query_events", "event_expert"]
     elif any(token in lowered for token in ("去哪刷", "哪里刷", "怎么刷", "刷取", "掉落", "来源", "哪个裂缝", "适合开", "开这个核桃")):
         candidates = ["farming_route", "query_events", "relic_value", "event_expert"]
+    elif any(token in lowered for token in ("配卡", "配装", "build", "mod配置", "钢铁怎么配", "武器怎么配")):
+        candidates = ["riven_search", "query_events", "farming_route", "general_chat"]
+    elif any(token in lowered for token in ("攻略", "打法", "机制", "怎么玩", "怎么打", "流程")):
+        candidates = ["query_events", "farming_route", "general_chat"]
     elif any(token in lowered for token in ("baro", "虚空商人", "奸商", "裂缝", "裂隙", "开核桃", "活动", "入侵", "虚空风暴", "重生", "返厂", "resurgence", "vault", "午夜电波", "电波", "nightwave", "仲裁", "arbitration", "突击", "sortie", "darvo", "每日特惠", "每日优惠", "扎里曼", "zariman", "赏金", "bounty", "平原", "希图斯", "金星", "火卫二", "周期")):
         candidates = ["query_events", "event_expert"]
     elif any(token in lowered for token in ("专家", "分析")):

@@ -124,6 +124,22 @@ class MarketFormatterTests(unittest.TestCase):
             ("NextBulk", 6, 11, 66),
         ])
 
+    def test_build_buy_plan_uses_partial_quantity_from_next_price_tier(self):
+        orders = [
+            {"order_type": "sell", "platinum": 7, "quantity": 5, "user": {"ingame_name": "SevenPlat", "status": "ingame", "reputation": 5}, "rank": 0},
+            {"order_type": "sell", "platinum": 9, "quantity": 22, "user": {"ingame_name": "NinePlat", "status": "ingame", "reputation": 9}, "rank": 0},
+        ]
+
+        plan = build_buy_plan(orders, needed=21, rank_filter=0)
+
+        self.assertTrue(plan.fulfilled)
+        self.assertEqual(plan.total_quantity, 21)
+        self.assertEqual(plan.total_cost, 179)
+        self.assertEqual([(entry.user_name, entry.platinum, entry.quantity, entry.subtotal) for entry in plan.entries], [
+            ("SevenPlat", 7, 5, 35),
+            ("NinePlat", 9, 16, 144),
+        ])
+
     def test_build_buy_plan_reports_unfulfilled_when_quantity_insufficient(self):
         orders = [
             {"order_type": "sell", "platinum": 4, "quantity": 6, "user": {"ingame_name": "FewA", "status": "ingame", "reputation": 5}, "rank": 0},

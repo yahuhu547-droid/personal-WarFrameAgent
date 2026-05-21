@@ -25,6 +25,7 @@ from ..goals import create_goal, plan_for_goal, execute_plan, record_trade_outco
 from ..memory import AgentMemory, PriceAlert, MEMORY_PATH
 from ..memory_recall import MemoryRecallService
 from ..monitor import PriceMonitor, AlertNotification, WatchNotification, EnrichedNotification, ProactivePush
+from ..opportunity_lookup import OpportunityLookupStore
 from ..names import display_item_name
 from ..price_history import PriceHistoryDB
 from ..trade_history import TradeHistoryDB
@@ -2707,6 +2708,12 @@ async def broadcast_proactive_push(push: ProactivePush):
     raw_data = push.data if isinstance(push.data, dict) else {}
     trade_plan = raw_data.get("trade_plan")
     safe_summary = trade_plan.get("safe_summary") if isinstance(trade_plan, dict) else None
+    opportunity_id = ""
+    if push.push_type == "opportunity" and isinstance(trade_plan, dict):
+        try:
+            opportunity_id = OpportunityLookupStore().create(push.item_id, push.item_display, trade_plan)
+        except Exception as exc:
+            logger.debug("交易机会 ID 生成失败: %s", exc)
     payload_data = {key: value for key, value in raw_data.items() if key != "trade_plan"}
     message = {
         "type": "proactive_push",
@@ -2719,6 +2726,7 @@ async def broadcast_proactive_push(push: ProactivePush):
         "data": payload_data,
         "trade_plan": trade_plan,
         "safe_summary": safe_summary,
+        "opportunity_id": opportunity_id,
     }
     websocket_tasks = [ws.send_json(message) for ws in list(ws_connections)]
     if websocket_tasks:
@@ -2729,7 +2737,7 @@ async def broadcast_proactive_push(push: ProactivePush):
             delivery_tasks.append(asyncio.to_thread(
                 push_client.send_markdown,
                 f"交易机会: {push.item_display}",
-                format_trade_plan_push(trade_plan),
+                format_trade_plan_push(trade_plan, opportunity_id=opportunity_id),
             ))
         else:
             delivery_tasks.append(asyncio.to_thread(
@@ -2748,7 +2756,7 @@ async def broadcast_proactive_push(push: ProactivePush):
                         feishu_bot.send_card,
                         chat_id,
                         f"交易机会: {push.item_display}",
-                        build_trade_plan_card_elements(trade_plan),
+                        build_trade_plan_card_elements(trade_plan, opportunity_id=opportunity_id),
                     ))
         except Exception as exc:
             logger.debug("飞书交易机会推送失败: %s", exc)

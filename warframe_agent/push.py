@@ -134,21 +134,28 @@ def _format_trade_plan_step(step: dict) -> str:
     return "\n".join(result)
 
 
-def format_trade_plan_push(plan: dict) -> str:
+def format_trade_plan_push(plan: dict, opportunity_id: str = "") -> str:
     """格式化可执行交易计划，用于 WxPusher Markdown。"""
     if not isinstance(plan, dict):
         return ""
     display_name = plan.get("display_name") or plan.get("item_id") or "交易机会"
     profit = plan.get("profit", 0)
     profit_text = f"+{profit}" if isinstance(profit, (int, float)) and profit >= 0 else str(profit)
-    lines = [
-        f"## 交易机会：{display_name}",
+    lines = [f"## 交易机会：{display_name}"]
+    if opportunity_id:
+        lines.extend([
+            f"机会ID：{opportunity_id}",
+            f"在飞书输入 {opportunity_id} 查看买卖双方链接、玩家主页和游戏内私聊命令。",
+            "该 ID 约 48 小时后过期；机会基于推送时快照，请以实时市场为准。",
+            "",
+        ])
+    lines.extend([
         f"策略：{plan.get('display_strategy') or plan.get('strategy') or '-'}",
         f"成本：{plan.get('total_cost', 0)}p",
         f"收入：{plan.get('total_revenue', 0)}p",
         f"利润：{profit_text}p",
         f"ROI：{plan.get('roi_pct', 0)}%",
-    ]
+    ])
     if plan.get("risk_level"):
         lines.append(f"风险：{plan['risk_level']}")
     buy_steps = plan.get("buy_steps") or []

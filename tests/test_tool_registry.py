@@ -250,6 +250,13 @@ def test_execute_success_includes_internal_metadata():
     datetime.fromisoformat(result.metadata.timestamp)
 
 
+def test_default_registry_excludes_removed_subjective_experts():
+    registry = create_default_tool_registry()
+
+    for name in ("build_expert", "guide_expert", "activity_expert"):
+        assert registry.get(name) is None
+
+
 def test_execute_failure_includes_internal_metadata():
     registry = ToolRegistry()
     registry.register(ToolSpec(

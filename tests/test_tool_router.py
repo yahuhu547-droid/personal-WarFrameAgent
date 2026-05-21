@@ -50,6 +50,18 @@ class ToolRouterTests(unittest.TestCase):
         self.assertNotIn("query_price", candidates)
         self.assertNotIn("riven_search", candidates)
 
+    def test_select_candidate_tools_for_build_and_guide_questions(self):
+        build_candidates = select_candidate_tools("Saryn 钢铁怎么配卡")
+        guide_candidates = select_candidate_tools("虚空洪流攻略和打法")
+        activity_candidates = select_candidate_tools("这个活动怎么打收益高")
+
+        self.assertIn("riven_search", build_candidates)
+        self.assertIn("farming_route", guide_candidates)
+        self.assertIn("query_events", activity_candidates)
+        self.assertNotIn("build_expert", build_candidates)
+        self.assertNotIn("guide_expert", guide_candidates)
+        self.assertNotIn("activity_expert", activity_candidates)
+
     def test_candidate_tools_for_relic_value_query_include_relic_value(self):
         candidates = select_candidate_tools("Lith B1 值不值得开，杜卡德收益怎么样")
 

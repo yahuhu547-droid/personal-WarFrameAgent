@@ -68,3 +68,4 @@ def test_run_expert_handles_orchestrator_failure():
 def test_run_expert_rejects_unknown_domain():
     with pytest.raises(ValueError):
         ExpertRequest(domain="unknown", question="x", context="y")
+

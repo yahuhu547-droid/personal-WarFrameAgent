@@ -9,6 +9,7 @@ from warframe_agent.chat import ChatAgent, build_chat_messages, build_item_conte
 from warframe_agent.dictionary import ResolveResult
 from warframe_agent.events import EventTracker, GameEvent, PrimeResurgenceRotation, PrimeResurgenceItem, WorldCycle
 from warframe_agent.memory import AgentMemory
+from warframe_agent.opportunity_lookup import OpportunityLookupStore
 from warframe_agent.push import PushConfig
 from warframe_agent.relics import RelicDrop, RelicInfo
 from warframe_agent.trading_memory import TradingMemoryDB
@@ -52,6 +53,73 @@ PRIME_ITEMS = [
 
 
 class ChatTests(unittest.TestCase):
+    def test_returns_opportunity_detail_for_bare_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = OpportunityLookupStore(Path(tmp) / "lookup.db")
+            lookup_id = store.create("akbolto_prime_set", "Akbolto Prime", {
+                "display_name": "Akbolto Prime",
+                "display_strategy": "拆件买入 -> 完整套装订单卖出",
+                "strategy": "buy_parts_sell_set",
+                "item_id": "akbolto_prime_set",
+                "total_cost": 39,
+                "total_revenue": 80,
+                "profit": 35,
+                "roi_pct": 89.7,
+                "risk_level": "medium",
+                "buy_steps": [{
+                    "label": "Akbolto Prime Blueprint",
+                    "player": "SellerA",
+                    "unit_price": 10,
+                    "quantity": 1,
+                    "subtotal": 10,
+                    "market_url": "https://warframe.market/items/akbolto_prime_blueprint",
+                    "profile_url": "https://warframe.market/profile/SellerA",
+                    "whisper": "/w SellerA Hi! I want to buy.",
+                }],
+                "sell_steps": [],
+            })
+            agent = ChatAgent(opportunity_lookup_store=store, memory_path=Path(tmp) / "agent_memory.json")
+
+            reply = agent.answer(lookup_id)
+
+        self.assertIn(f"机会 {lookup_id}：Akbolto Prime", reply)
+        self.assertIn("https://warframe.market/profile/SellerA", reply)
+        self.assertIn("/w SellerA Hi! I want to buy.", reply)
+
+    def test_returns_opportunity_detail_for_opp_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = OpportunityLookupStore(Path(tmp) / "lookup.db")
+            lookup_id = store.create("akbolto_prime_set", "Akbolto Prime", {
+                "display_name": "Akbolto Prime",
+                "display_strategy": "拆件买入 -> 完整套装订单卖出",
+                "strategy": "buy_parts_sell_set",
+                "item_id": "akbolto_prime_set",
+                "total_cost": 39,
+                "total_revenue": 80,
+                "profit": 35,
+                "roi_pct": 89.7,
+                "risk_level": "medium",
+                "buy_steps": [],
+                "sell_steps": [],
+            })
+            agent = ChatAgent(opportunity_lookup_store=store, memory_path=Path(tmp) / "agent_memory.json")
+
+            opp_reply = agent.answer(f"/opp {lookup_id}")
+            zh_reply = agent.answer(f"/机会 {lookup_id}")
+
+        self.assertIn(f"机会 {lookup_id}：Akbolto Prime", opp_reply)
+        self.assertIn(f"机会 {lookup_id}：Akbolto Prime", zh_reply)
+
+    def test_missing_opportunity_id_does_not_fall_through_to_item_search(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = OpportunityLookupStore(Path(tmp) / "lookup.db")
+            agent = ChatAgent(opportunity_lookup_store=store, memory_path=Path(tmp) / "agent_memory.json")
+
+            reply = agent.answer("OP8K3A2Q")
+
+        self.assertIn("机会 ID OP8K3A2Q 不存在或已过期", reply)
+        self.assertNotIn("没有找到匹配的物品", reply)
+
     def test_chat_exit_commands(self):
         self.assertTrue(is_chat_exit("q"))
         self.assertTrue(is_chat_exit("quit"))
@@ -387,6 +455,89 @@ class ChatTests(unittest.TestCase):
         self.assertIn("最高收价: 3p", prompts[0])
         for forbidden in ["卖家 Seller", "买家 Buyer", "/w Seller", "/w Buyer"]:
             self.assertNotIn(forbidden, prompts[0])
+
+    def test_answer_appends_bilibili_recommendations_for_build_questions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_path = Path(tmp) / "bilibili_recommendations.json"
+            rec_path.write_text(json.dumps([{
+                "id": "torid",
+                "title": "托里德-射线荣光的继承者",
+                "url": "https://www.bilibili.com/video/BV1pZr5YREtY/",
+                "weapons": ["托里德"],
+                "aliases": ["托里德配卡"],
+                "topics": ["配卡"],
+            }], ensure_ascii=False), encoding="utf-8")
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: SAMPLE_ORDERS,
+                model_call=lambda prompt: "没有找到匹配的物品",
+                memory_path=Path(tmp) / "agent_memory.json",
+            )
+            agent.bilibili_recommendations_path = rec_path
+            answer = agent.answer("托里德怎么配卡")
+
+        self.assertIn("参考视频", answer)
+        self.assertIn("托里德-射线荣光的继承者", answer)
+        self.assertIn("https://www.bilibili.com/video/BV1pZr5YREtY/", answer)
+        self.assertNotIn("没有找到匹配的物品", answer)
+
+    def test_answer_returns_bilibili_recommendations_for_category_questions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_path = Path(tmp) / "bilibili_recommendations.json"
+            rec_path.write_text(json.dumps([
+                {
+                    "id": "burston",
+                    "title": "伯斯顿-步枪救星",
+                    "url": "https://www.bilibili.com/video/BV1dJ5LzREZk/",
+                    "weapons": ["伯斯顿"],
+                    "topics": ["配卡"],
+                    "category": "primary",
+                    "priority": 10,
+                },
+                {
+                    "id": "nikana",
+                    "title": "侍刃-近战老牌真神",
+                    "url": "https://www.bilibili.com/video/BV1eZPveRE39/",
+                    "weapons": ["侍刃"],
+                    "topics": ["配卡"],
+                    "category": "melee",
+                    "priority": 100,
+                },
+            ], ensure_ascii=False), encoding="utf-8")
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: SAMPLE_ORDERS,
+                model_call=lambda prompt: "没有找到匹配的物品",
+                memory_path=Path(tmp) / "agent_memory.json",
+            )
+            agent.bilibili_recommendations_path = rec_path
+            answer = agent.answer("推荐几个近战配卡视频")
+
+        self.assertIn("参考视频", answer)
+        self.assertIn("侍刃-近战老牌真神", answer)
+        self.assertIn("类型：近战", answer)
+        self.assertNotIn("伯斯顿-步枪救星", answer)
+        self.assertNotIn("没有找到匹配的物品", answer)
+
+    def test_answer_does_not_append_bilibili_recommendations_for_price_questions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_path = Path(tmp) / "bilibili_recommendations.json"
+            rec_path.write_text(json.dumps([{
+                "id": "torid",
+                "title": "托里德-射线荣光的继承者",
+                "url": "https://www.bilibili.com/video/BV1pZr5YREtY/",
+                "weapons": ["托里德"],
+            }], ensure_ascii=False), encoding="utf-8")
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: SAMPLE_ORDERS,
+                model_call=lambda prompt: "unused",
+                memory_path=Path(tmp) / "agent_memory.json",
+            )
+            agent.bilibili_recommendations_path = rec_path
+            answer = agent.answer("充沛多少钱")
+
+        self.assertNotIn("参考视频", answer)
 
     def test_deterministic_price_answer_history_uses_safe_summary(self):
         import tempfile

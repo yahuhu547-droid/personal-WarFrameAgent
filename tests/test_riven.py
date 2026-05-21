@@ -1,5 +1,7 @@
 """紫卡（Riven）搜索功能测试。"""
 
+import json
+
 import pytest
 
 from warframe_agent.riven import (

@@ -72,6 +72,7 @@ DYNAMIC_PLAN_TIMEOUT_SECONDS = 120  # 动态执行超时
 PUSH_CONFIG_PATH = DATA_DIR / "push_config.json"
 FEISHU_CONFIG_PATH = DATA_DIR / "feishu_config.json"
 KNOWLEDGE_BASE_PATH = DATA_DIR / "knowledge_base.json"
+BILIBILI_RECOMMENDATIONS_PATH = DATA_DIR / "bilibili_recommendations.json"
 KNOWLEDGE_UPDATE_INTERVAL = 3      # 每 N 次扫描更新知识库
 EVENT_REFRESH_INTERVAL = 1800      # 游戏事件刷新间隔（秒）
 MAX_AUTO_GOALS = 3                 # 自动目标上限

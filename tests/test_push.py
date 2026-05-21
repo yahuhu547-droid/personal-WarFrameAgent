@@ -235,6 +235,24 @@ class TestTradePlanPushFormatting:
         assert "https://warframe.market/profile/SellerPush" in text
         assert "`/w SellerPush Hi! I want to buy.`" in text
 
+    def test_format_trade_plan_push_includes_opportunity_id_hint(self):
+        text = format_trade_plan_push({
+            "display_name": "Akbolto Prime",
+            "display_strategy": "拆件买入 -> 完整套装订单卖出",
+            "total_cost": 39,
+            "total_revenue": 80,
+            "profit": 35,
+            "roi_pct": 89.7,
+            "risk_level": "medium",
+            "buy_steps": [],
+            "sell_steps": [],
+        }, opportunity_id="OP8K3A2Q")
+
+        assert "机会ID：OP8K3A2Q" in text
+        assert "在飞书输入 OP8K3A2Q" in text
+        assert "48 小时" in text
+        assert "请以实时市场为准" in text
+
 
 class TestShouldSendDailyReport:
     def test_returns_false_when_disabled(self):

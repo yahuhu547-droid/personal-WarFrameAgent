@@ -75,7 +75,8 @@
 | 交易策略 | 低风险赋能翻转、中风险 Prime 拆件、高风险 Vault 投机模板。 | `warframe_agent/strategies.py` | `tests/test_rules.py` |
 | 主动监控 | 收藏、价格提醒、关注列表、异常、目标相关机会。 | `warframe_agent/monitor.py` | `tests/test_monitor.py` |
 | 目标系统 | 活跃目标、自动生成、执行、进度、收益记录。 | `warframe_agent/goals.py` | `tests/test_goals.py` |
-| 自学习 | 反馈、规则、模式、知识库滚动更新。 | `warframe_agent/feedback.py`、`warframe_agent/rules.py`、`warframe_agent/patterns.py`、`warframe_agent/knowledge.py` | `tests/test_feedback.py`、`tests/test_knowledge.py` |
+| 自学习 | 反馈、规则、模式、客观市场知识库滚动更新。 | `warframe_agent/feedback.py`、`warframe_agent/rules.py`、`warframe_agent/patterns.py`、`warframe_agent/knowledge.py` | `tests/test_feedback.py`、`tests/test_knowledge.py` |
+| 攻略视频推荐 | 攻略、配卡、打法类问题自动推荐本地维护的 B 站公开视频链接；支持主武器、副武器、近战分类推荐；只存视频元数据，不保存画面识别出的 Mod、赋能或灵化结论。 | `warframe_agent/bilibili_recommendations.py`、`data/bilibili_recommendations.json`、`warframe_agent/chat.py` | `tests/test_bilibili_recommendations.py`、`tests/test_chat.py` |
 
 ## 8. 推送与外部入口
 

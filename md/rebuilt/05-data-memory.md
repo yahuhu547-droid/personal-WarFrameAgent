@@ -105,6 +105,10 @@ score = relevance * 0.6 + recency * 0.2 + salience * 0.2
 
 Trace 只返回安全解释字段，例如 `item_match`、`intent_match`、`tool_match`、`recency`、`salience_reason`。ChatAgent 注入模型上下文时只使用 `format_for_model()` 生成的匿名摘要；Web 只读端点为 `GET /api/memory/recall`。
 
+### 机会 ID 短期详情
+
+交易机会推送如果带有可执行 `trade_plan`，系统会生成 `OPxxxxxx` 短 ID，并把完整买卖计划快照保存到 `data/opportunity_lookup.db`。该库只用于飞书/聊天输入 ID 后返回 warframe.market 链接、玩家主页和游戏内私聊命令，默认 48 小时过期，并在读写时清理。ID 回复会按 `trade_plan.source`/`strategy` 展示不同计划，并在机会标题中优先显示英文 market 名，后跟游戏内中文名，例如 `Arcane Energize（游戏内：充沛赋能）`：Prime 武器/战甲按完整套装订单说明部件交付；赋能按 R0 数量阶梯聚合买入并显示满级卖出买家；普通 MOD 显示 R0/低级买入与满级卖出，不按赋能的 21 个 R0 合成规则计算。长期 `push_history` 仍只保存安全摘要，不保存玩家名、链接或 whisper。
+
 ## 5. 交易历史
 
 实现文件：`warframe_agent/trade_history.py`。
@@ -182,6 +186,9 @@ Web API：
 | `warframe_agent/rules.py` | 主动推送和机会判断规则。 |
 | `warframe_agent/feedback.py` | 用户反馈和策略效果反馈。 |
 | `warframe_agent/goals.py` | 交易目标、进度和结果。 |
+| `warframe_agent/bilibili_recommendations.py` | 本地 curated B 站攻略视频推荐；数据来自 `data/bilibili_recommendations.json`，只保存标题、链接、适用主题、别名、武器分类等元数据。 |
+
+`data/bilibili_recommendations.json` 不作为主观知识库使用，不保存视频画面中识别到的 Mod、赋能、灵化阶段或其他不稳定判断。每条记录可用 `category` 标注 `primary`、`secondary`、`melee`，供“主武器/副武器/近战配卡视频”这类泛分类问题匹配；`needs_review: true` 的记录会被加载器跳过，避免未确认标题或武器名进入推荐。
 
 ## 9. 数据安全边界
 

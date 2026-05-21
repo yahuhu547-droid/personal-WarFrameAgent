@@ -10,6 +10,12 @@ from typing import AsyncIterator, Callable, Iterable
 import requests
 
 from . import config
+from .bilibili_recommendations import (
+    BilibiliRecommendationService,
+    BilibiliRecommendationStore,
+    format_bilibili_recommendations,
+    is_bilibili_recommendation_intent,
+)
 from .experts import ExpertRequest, run_expert
 from .dictionary import ItemResolver, normalize_lookup_key
 from .events import EventTracker
@@ -20,6 +26,13 @@ from .market import MarketOrder, best_buyers, best_sellers, fetch_orders
 from .memory import AgentMemory, normalize_opportunity_filter
 from .memory_recall import MemoryRecallService
 from .names import display_item_name, english_name, load_item_data
+from .opportunity_lookup import (
+    OpportunityLookupStore,
+    format_opportunity_lookup_reply,
+    is_opportunity_lookup_id,
+    normalize_opportunity_lookup_id,
+    opportunity_not_found_message,
+)
 from .price_history import PriceHistoryDB
 from .push import PushConfig
 from .rag import smart_search_rag
@@ -367,6 +380,7 @@ class ChatAgent:
         knowledge: MarketKnowledge | None = None,
         event_tracker: EventTracker | None = None,
         trading_memory_db=None,
+        opportunity_lookup_store: OpportunityLookupStore | None = None,
     ):
         self.resolver = resolver or ItemResolver()
         self.order_fetcher = order_fetcher
@@ -382,6 +396,8 @@ class ChatAgent:
         self.knowledge = knowledge
         self.event_tracker = event_tracker
         self.trading_memory_db = trading_memory_db
+        self.opportunity_lookup_store = opportunity_lookup_store or OpportunityLookupStore()
+        self.bilibili_recommendations_path = config.BILIBILI_RECOMMENDATIONS_PATH
         self.game_data = GameDataStore()
         self.model_orchestrator = None
         self.tool_registry = self._build_tool_registry()
@@ -533,6 +549,10 @@ class ChatAgent:
     def answer(self, message: str) -> str:
         self._reload_memory()
         stripped = message.strip()
+        if is_opportunity_lookup_id(stripped):
+            result = self._handle_opportunity_lookup([stripped])
+            self._log_answer(message, result)
+            return result
         if stripped.startswith("/"):
             return self._handle_agent_command(stripped)
         opportunity_control = self._try_opportunity_control(message)
@@ -547,6 +567,11 @@ class ChatAgent:
             self._log_answer(message, cycle_result)
             return cycle_result
         self._remember_common_question(message)
+        direct_bilibili = self._try_direct_bilibili_recommendations(message)
+        if direct_bilibili:
+            self.session.add_exchange(message, direct_bilibili)
+            self._log_answer(message, direct_bilibili)
+            return direct_bilibili
         baro_followup = self._try_baro_order_followup(message)
         baro_followup_display = self._tool_result_display_text(baro_followup)
         if baro_followup_display:
@@ -622,9 +647,15 @@ class ChatAgent:
             routed = self._try_router_result(message)
             routed_display = self._tool_result_display_text(routed)
             if routed_display:
+                routed_display = self._append_bilibili_recommendations(message, routed_display)
                 self.session.add_exchange(message, self._tool_result_history_text(routed))
                 self._log_answer(message, routed_display)
                 return routed_display
+            bilibili_recommendations = self._build_bilibili_recommendations(message)
+            if bilibili_recommendations:
+                self.session.add_exchange(message, bilibili_recommendations)
+                self._log_answer(message, bilibili_recommendations)
+                return bilibili_recommendations
             result = "没有找到匹配的物品，请输入 warframe.market 的 item_id，例如：充沛 / arcane_energize"
             self._log_answer(message, result)
             return result
@@ -650,19 +681,43 @@ class ChatAgent:
                 checked = _self_check(answer, contexts)
                 if checked:
                     answer = checked
+                answer = self._append_bilibili_recommendations(message, answer)
                 self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
                 self._log_answer(message, answer, contexts)
                 return answer
         except Exception as exc:
             logger.debug("LLM 调用失败，使用回退: %s", exc)
-            result = fallback_answer(message, contexts, llm_failed=True)
+            result = self._append_bilibili_recommendations(message, fallback_answer(message, contexts, llm_failed=True))
             self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
             self._log_answer(message, result, contexts)
             return result
-        result = fallback_answer(message, contexts)
+        result = self._append_bilibili_recommendations(message, fallback_answer(message, contexts))
         self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
         self._log_answer(message, result, contexts)
         return result
+
+    def _try_direct_bilibili_recommendations(self, message: str) -> str | None:
+        lowered = message.lower()
+        explicit_video = any(token in lowered for token in ("b站", "bilibili", "视频", "教程"))
+        build_or_guide = any(token in lowered for token in ("攻略", "打法", "怎么玩", "怎么打", "配卡", "配装", "build", "mod配置"))
+        if not (explicit_video or build_or_guide):
+            return None
+        return self._build_bilibili_recommendations(message, empty_message=explicit_video) or None
+
+    def _build_bilibili_recommendations(self, message: str, *, empty_message: bool = False) -> str:
+        try:
+            service = BilibiliRecommendationService(BilibiliRecommendationStore(self.bilibili_recommendations_path))
+            matches = service.recommend(message, limit=3)
+            return format_bilibili_recommendations(matches, empty_message=empty_message)
+        except Exception as exc:
+            logger.debug("B 站视频推荐失败: %s", exc)
+            return "暂未收录相关 B 站视频。" if empty_message and is_bilibili_recommendation_intent(message) else ""
+
+    def _append_bilibili_recommendations(self, message: str, answer: str) -> str:
+        recommendations = self._build_bilibili_recommendations(message)
+        if not recommendations:
+            return answer
+        return f"{answer}\n\n{recommendations}" if answer else recommendations
 
     def _log_answer(self, message: str, reply: str, contexts=None) -> None:
         tool_calls = self._consume_tool_execution_metadata()
@@ -845,6 +900,11 @@ class ChatAgent:
         """流式版本的 answer，逐 token yield。对于不需要 LLM 的路径，一次性 yield 全文。"""
         self._reload_memory()
         stripped = message.strip()
+        if is_opportunity_lookup_id(stripped):
+            result = self._handle_opportunity_lookup([stripped])
+            self._log_answer(message, result)
+            yield result
+            return
         if stripped.startswith("/"):
             result = self._handle_agent_command(stripped)
             self._log_answer(message, result)
@@ -867,6 +927,12 @@ class ChatAgent:
             yield cycle_result
             return
         self._remember_common_question(message)
+        direct_bilibili = self._try_direct_bilibili_recommendations(message)
+        if direct_bilibili:
+            self.session.add_exchange(message, direct_bilibili)
+            self._log_answer(message, direct_bilibili)
+            yield direct_bilibili
+            return
         baro_followup = self._try_baro_order_followup(message)
         baro_followup_display = self._tool_result_display_text(baro_followup)
         if baro_followup_display:
@@ -953,9 +1019,16 @@ class ChatAgent:
             routed = self._try_router_result(message)
             routed_display = self._tool_result_display_text(routed)
             if routed_display:
+                routed_display = self._append_bilibili_recommendations(message, routed_display)
                 self.session.add_exchange(message, self._tool_result_history_text(routed))
                 self._log_answer(message, routed_display)
                 yield routed_display
+                return
+            bilibili_recommendations = self._build_bilibili_recommendations(message)
+            if bilibili_recommendations:
+                self.session.add_exchange(message, bilibili_recommendations)
+                self._log_answer(message, bilibili_recommendations)
+                yield bilibili_recommendations
                 return
             result = "没有找到匹配的物品，请输入 warframe.market 的 item_id，例如：充沛 / arcane_energize"
             self._log_answer(message, result)
@@ -985,7 +1058,7 @@ class ChatAgent:
                 yield token
         except Exception as exc:
             logger.debug("流式 LLM 失败，使用回退: %s", exc)
-            result = fallback_answer(message, contexts, llm_failed=True)
+            result = self._append_bilibili_recommendations(message, fallback_answer(message, contexts, llm_failed=True))
             self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
             self._log_answer(message, result, contexts)
             yield result
@@ -995,10 +1068,14 @@ class ChatAgent:
             checked = _self_check(reply_text, contexts)
             if checked:
                 reply_text = checked
+            recommendations = self._build_bilibili_recommendations(message)
+            if recommendations:
+                yield "\n\n" + recommendations
+                reply_text = f"{reply_text}\n\n{recommendations}"
             self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
             self._log_answer(message, reply_text, contexts)
         else:
-            result = fallback_answer(message, contexts)
+            result = self._append_bilibili_recommendations(message, fallback_answer(message, contexts))
             self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
             self._log_answer(message, result, contexts)
             yield result
@@ -1047,6 +1124,8 @@ class ChatAgent:
             return self._handle_strategy_command(tokens[1:])
         if command in {"/vault", "/resurgence", "/重生"}:
             return self._handle_vault_command()
+        if command in {"/opp", "/opportunity", "/机会"}:
+            return self._handle_opportunity_lookup(tokens[1:])
         return "未知的 Agent 命令，输入 /help 查看可用命令"
 
     def _command_help(self) -> str:
@@ -1063,6 +1142,7 @@ class ChatAgent:
             "/pref max 5",
             "/push opportunity off|on  暂停/开启交易机会推送",
             "/push opportunity filter mod|arcane|all  设置交易机会检测范围",
+            "/opp 机会ID       查看推送机会的市场链接和游戏内私聊命令",
             "/goal              查看当前目标",
             "/goal set 目标描述   创建新目标",
             "/goal done ID      标记目标完成",
@@ -1115,6 +1195,17 @@ class ChatAgent:
         self._persist_memory()
         label = {"all": "全部", "mod": "仅 MOD", "arcane": "仅赋能"}[opportunity_filter]
         return f"已设置交易机会检测范围：{label}。价格提醒、关注推送和每日报告不受影响。"
+
+    def _handle_opportunity_lookup(self, args: list[str]) -> str:
+        if not args:
+            return "用法：/opp OP8K3A2Q，或直接输入机会 ID。"
+        lookup_id = normalize_opportunity_lookup_id(args[0])
+        if not is_opportunity_lookup_id(lookup_id):
+            return "机会 ID 格式不正确。请使用类似 OP8K3A2Q 的 ID。"
+        detail = self.opportunity_lookup_store.get(lookup_id)
+        if detail is None:
+            return opportunity_not_found_message(lookup_id)
+        return format_opportunity_lookup_reply(detail)
 
     def _handle_push_command(self, args: list[str]) -> str:
         normalized = [arg.strip().lower() for arg in args if arg.strip()]
@@ -2261,11 +2352,13 @@ class ChatAgent:
 
     def _tool_expert(self, domain: str, args: dict) -> ToolResult:
         orchestrator = self._expert_orchestrator()
+        question = str(args.get("question") or args.get("__message") or "")
+        context = str(args.get("context") or "")
         return run_expert(
             ExpertRequest(
                 domain=domain,
-                question=str(args.get("question") or args.get("__message") or ""),
-                context=str(args.get("context") or ""),
+                question=question,
+                context=context,
             ),
             orchestrator,
         )

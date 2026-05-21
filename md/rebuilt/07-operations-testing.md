@@ -63,6 +63,7 @@ Web 应用 lifespan 会启动和停止监控器及飞书机器人。
 | `data/trade_history.db` | 交易历史。 |
 | `data/price_cache.db` | 市场价格缓存。 |
 | `data/conversation_logs.jsonl` | 对话日志。 |
+| `data/bilibili_recommendations.json` | 本地 curated B 站攻略视频推荐数据，包含具体武器、主武器/副武器/近战分类、别名和待确认标记。 |
 
 配置注意事项：
 
@@ -87,6 +88,7 @@ Web 应用 lifespan 会启动和停止监控器及飞书机器人。
 - `tests/test_tool_registry.py`
 - `tests/test_tool_router.py`
 - `tests/test_tool_context.py`
+- `tests/test_bilibili_recommendations.py`
 - `tests/test_router.py`
 - `tests/test_plan.py`
 - `tests/test_dynamic_plan.py`
@@ -175,6 +177,14 @@ python -m pytest tests/test_tool_context.py
 python -m pytest tests/test_riven.py tests/test_baro.py
 ```
 
+B 站攻略视频推荐变更建议先运行：
+
+```bash
+python -m pytest tests/test_bilibili_recommendations.py tests/test_chat.py -q
+```
+
+该集合覆盖本地推荐数据加载、`needs_review` 跳过、主武器/副武器/近战分类推荐、具体武器配卡问题命中对应视频，以及价格类问题不出现视频推荐。
+
 紫卡解析、评分、价格位置、置信度和安全模型上下文变更建议运行：
 
 ```bash
@@ -221,6 +231,10 @@ python -m pytest tests/test_push.py tests/test_feishu.py tests/test_web_ui_playw
 其中 `test_market_formatter` 覆盖批量买入聚合和 safe summary；`test_mod_flipper` 覆盖赋能 R0 quantity 聚合；`test_set_profit` 覆盖 Prime 只展示选中策略路径、ROI、流动性、风险等级、机会分数和模型上下文安全；`test_chat`/`test_web_api` 覆盖展示层含玩家链接而模型上下文保持安全；`test_proactive_push` 覆盖 push history 只保存安全摘要和按 profit bucket/quantity/signature 去重；`test_push`/`test_feishu`/Playwright 覆盖 WxPusher、飞书和 WebSocket 的可执行交易计划展示。
 
 手工 smoke 可通过聊天发送 `暂停交易机会`、`开启交易机会`、`交易机会只检测MOD`、`交易机会只检测赋能`、`交易机会检测全部`，再检查 `/api/push/config` 和 `data/agent_memory.json` 中对应状态是否更新。
+
+### 交易机会 ID 验证
+
+当 WxPusher 收到带 `机会ID：OPxxxxxx` 的交易机会后，可在飞书或聊天框直接输入该 ID，也可输入 `/opp OPxxxxxx` 或 `/机会 OPxxxxxx`。预期回复包含买入/卖出步骤、warframe.market 链接、玩家主页、游戏内私聊命令、机会标题后的游戏内中文名和 48 小时有效期提示。赋能机会应重点检查数量阶梯，例如 7p 库存 5 个、9p 库存 22 个、需求 21 个时，回复应显示 `7p × 5` 和 `9p × 16`，总成本 179p。普通 MOD 不应显示“需要 R0 × 21”。Prime 武器 Set 应和战甲 Set 一样说明游戏内需交付完整部件组合。过期或不存在的 ID 应返回明确过期提示，不应落入普通物品搜索。
 
 Web UI 相关变更应额外运行 Playwright 测试，并实际打开本地页面验证主要路径。交易机会卡片变更应确认 `trade_plan` 步骤、quantity、market/profile 链接和复制 whisper 都可见且 XSS payload 不执行。Playwright Python 包不等于浏览器已安装；如果缺少 Chromium，需要单独执行 `python -m playwright install chromium`。
 

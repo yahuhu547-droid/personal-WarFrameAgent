@@ -109,6 +109,10 @@
 - 聊天新增 `交易机会只检测MOD`、`交易机会只检测赋能`、`交易机会检测全部` 和 `/push opportunity filter ...`。
 - Web 广播侧按最新 `push_proactive` 配置跳过交易机会 opportunity，但不影响 warning、价格提醒、关注、日报、裂缝或周期提醒。
 
+### 2026-05-20 攻略知识方向调整
+
+本阶段取消“主观知识库”方向：不再把视频画面识别出的 Mod、赋能、灵化阶段等不稳定内容写入 Agent 知识库。替代方案是维护 `data/bilibili_recommendations.json`，在用户询问攻略、配卡、打法或教程时推荐相关 B 站公开视频链接；当前能力以 `02-feature-scope.md` 和源码为准。
+
 ### 更早阶段
 
 - 基础交易 Agent。

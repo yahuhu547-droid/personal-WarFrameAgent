@@ -114,6 +114,31 @@ def test_analyze_arcane_flip_aggregates_rank0_quantities_for_rank5():
     assert result.trade_plan["total_revenue"] == 150
 
 
+def test_analyze_arcane_flip_uses_partial_quantity_from_next_price_tier():
+    def mock_orders(item_id):
+        return [
+            {"order_type": "sell", "platinum": 7, "quantity": 5, "user": {"ingame_name": "SevenPlat", "status": "ingame", "reputation": 5}, "rank": 0},
+            {"order_type": "sell", "platinum": 9, "quantity": 22, "user": {"ingame_name": "NinePlat", "status": "ingame", "reputation": 9}, "rank": 0},
+            {"order_type": "buy", "platinum": 210, "quantity": 1, "user": {"ingame_name": "Rank5Buyer", "status": "ingame", "reputation": 10}, "rank": 5},
+        ]
+
+    result = analyze_mod_flip("arcane_energize", 5, "LEGENDARY", mock_orders)
+
+    assert result is not None
+    assert result.required_quantity == 21
+    assert result.r0_buy_price == 179
+    assert result.r10_sell_price == 210
+    assert result.flip_profit == 31
+    assert round(result.roi_pct, 1) == 17.3
+    assert [(step["player"], step["unit_price"], step["quantity"], step["subtotal"]) for step in result.trade_plan["buy_steps"]] == [
+        ("SevenPlat", 7, 5, 35),
+        ("NinePlat", 9, 16, 144),
+    ]
+    assert result.trade_plan["total_cost"] == 179
+    assert result.trade_plan["total_revenue"] == 210
+    assert result.trade_plan["profit"] == 31
+
+
 def test_analyze_arcane_flip_returns_none_when_rank0_quantity_insufficient():
     def mock_orders(item_id):
         return [

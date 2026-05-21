@@ -154,6 +154,24 @@ def test_build_trade_plan_card_elements_contains_actionable_steps():
     assert "/w SetBuyerFS Hi! I want to sell." in serialized
 
 
+def test_trade_plan_card_includes_opportunity_id_hint():
+    elements = build_trade_plan_card_elements({
+        "display_name": "Akbolto Prime",
+        "display_strategy": "拆件买入 -> 完整套装订单卖出",
+        "total_cost": 39,
+        "total_revenue": 80,
+        "profit": 35,
+        "roi_pct": 89.7,
+        "risk_level": "medium",
+        "buy_steps": [],
+        "sell_steps": [],
+    }, opportunity_id="OP8K3A2Q")
+
+    text = "\n".join(str(element) for element in elements)
+    assert "机会ID：OP8K3A2Q" in text
+    assert "在飞书输入 `OP8K3A2Q`" in text
+
+
 def test_worker_script_converts_data_dir_to_path():
     from warframe_agent.feishu import _FEISHU_WORKER_SCRIPT
 
