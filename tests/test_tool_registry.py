@@ -71,6 +71,51 @@ def test_list_tool_schemas_exports_ollama_function_format():
     }]
 
 
+def test_to_params_exports_openmanus_function_format():
+    registry = ToolRegistry()
+    registry.register(ToolSpec(
+        name="query_price",
+        description="查询价格",
+        parameters={"item_name": {"type": "string", "description": "物品名称"}},
+        required=("item_name",),
+    ))
+
+    assert registry.to_params() == registry.list_tool_schemas()
+
+
+def test_get_tool_and_tool_map_expose_registered_specs_read_only():
+    registry = ToolRegistry()
+    spec = ToolSpec(
+        name="query_price",
+        description="查询价格",
+        parameters={"item_name": {"type": "string", "description": "物品名称"}},
+        required=("item_name",),
+    )
+
+    registry.register(spec)
+
+    assert registry.get_tool("query_price") is spec
+    assert registry.tool_map["query_price"] is spec
+    with pytest.raises(TypeError):
+        registry.tool_map["other"] = spec
+
+
+def test_execute_accepts_openmanus_style_tool_input_keyword():
+    registry = ToolRegistry()
+    registry.register(ToolSpec(
+        name="query_price",
+        description="查询价格",
+        parameters={"item_name": {"type": "string", "description": "物品名称"}},
+        required=("item_name",),
+        handler=lambda args: f"{args['item_name']} 45p",
+    ))
+
+    result = registry.execute(name="query_price", tool_input={"item_name": "充沛"})
+
+    assert result.ok is True
+    assert result.content == "充沛 45p"
+
+
 def test_execute_calls_handler_and_wraps_content():
     registry = ToolRegistry()
     registry.register(ToolSpec(
@@ -102,6 +147,19 @@ def test_execute_success_populates_display_and_model_context():
     assert result.content == "充沛 45p"
     assert result.display_content == "充沛 45p"
     assert result.model_context == "充沛 45p"
+
+
+def test_handler_none_is_not_reported_as_success():
+    registry = ToolRegistry()
+    registry.register(ToolSpec(name="maybe_empty", description="empty", parameters={}))
+    registry.with_handler("maybe_empty", lambda args: None)
+
+    result = registry.execute("maybe_empty", {})
+
+    assert result.ok is False
+    assert result.error == "工具无结果: maybe_empty"
+    assert result.display_content is None
+    assert result.model_context is None
 
 
 def test_execute_model_context_compresses_long_content_without_changing_display():

@@ -4,7 +4,8 @@ import logging
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Callable
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +58,15 @@ class ToolRegistry:
     def get(self, name: str) -> ToolSpec | None:
         return self._tools.get(name)
 
+    def get_tool(self, name: str) -> ToolSpec | None:
+        return self.get(name)
+
     def names(self) -> set[str]:
         return set(self._tools)
+
+    @property
+    def tool_map(self) -> Mapping[str, ToolSpec]:
+        return MappingProxyType(self._tools)
 
     def with_handler(self, name: str, handler: Callable[[dict[str, Any]], str | ToolResult | None]) -> None:
         spec = self.get(name)
@@ -97,6 +105,9 @@ class ToolRegistry:
             schemas.append(schema)
         return schemas
 
+    def to_params(self, names: set[str] | None = None, skill: str | None = None) -> list[dict[str, Any]]:
+        return self.list_tool_schemas(names=names, skill=skill)
+
     def candidate_names(self, skill: str | None = None, include_side_effects: bool = False) -> set[str]:
         return {
             spec.name
@@ -112,7 +123,16 @@ class ToolRegistry:
             specs = [spec for spec in specs if spec.skill == skill]
         return specs
 
-    def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+    def execute(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        tool_input: dict[str, Any] | None = None,
+    ) -> ToolResult:
+        if arguments is not None and tool_input is not None:
+            raise TypeError("Pass either arguments or tool_input, not both")
+        arguments = dict(arguments if arguments is not None else (tool_input or {}))
         started = time.perf_counter()
         spec = self.get(name)
         if not spec:
@@ -157,6 +177,13 @@ def _coerce_handler_output_to_tool_result(
             metadata=metadata,
             display_content=display_content if output.ok else None,
             model_context=model_context if output.ok else None,
+        )
+    if output is None:
+        error = f"工具无结果: {tool_name}"
+        return ToolResult(
+            ok=False,
+            error=error,
+            metadata=_build_metadata(tool_name, arguments, False, error, started),
         )
     metadata = _build_metadata(tool_name, arguments, True, None, started)
     return ToolResult(
