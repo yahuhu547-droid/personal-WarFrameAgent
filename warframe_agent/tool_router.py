@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import config
-from .tool_context import format_plan_results_for_model, tool_result_model_context
+from .tool_context import format_plan_results_for_model, summarize_tool_arguments_for_model, tool_result_model_context
 from .tool_registry import create_default_tool_registry
 
 
@@ -21,6 +22,27 @@ MAX_CANDIDATE_TOOLS = 6
 class ToolCall:
     name: str
     arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class AgentStep:
+    iteration: int
+    tool_name: str
+    args_summary: dict[str, Any]
+    raw_arguments_safe: bool
+    raw_arguments: dict[str, Any] | None
+    ok: bool
+    error: str | None
+    duration_ms: float
+    result_summary: str | None = None
+
+
+@dataclass
+class AgentTrace:
+    steps: list[AgentStep] = field(default_factory=list)
+    termination_reason: str | None = None
+    iterations: int = 0
+    final_answer: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,12 +85,14 @@ def _format_plan_results(goal: str, results: list[tuple[PlanStep, Any]]) -> str:
 def execute_plan(
     plan: ExecutionPlan,
     tool_executor: Callable[[ToolCall], Any],
+    trace: AgentTrace | None = None,
+    iteration: int = 0,
 ) -> list[tuple[PlanStep, Any]]:
     """顺序执行 plan 的每一步，收集 (step, result) 对。"""
     results = []
     for step in plan.steps:
         tc = ToolCall(name=step.tool, arguments=step.arguments)
-        result = tool_executor(tc)
+        result = _execute_tool_call_with_trace(tc, tool_executor, trace=trace, iteration=iteration)
         results.append((step, result))
     return results
 
@@ -177,6 +201,7 @@ def react_loop(
     max_iterations: int = config.MAX_TOOL_ITERATIONS,
     model: str = config.REACT_MODEL,
     candidate_tools: set[str] | None = None,
+    trace: AgentTrace | None = None,
 ) -> str | None:
     """ReAct 循环：使用 Ollama 原生 tool calling 进行多步推理。
 
@@ -236,25 +261,34 @@ def react_loop(
         {"role": "user", "content": message},
     ]
 
-    for _ in range(max_iterations):
+    for iteration in range(1, max_iterations + 1):
+        if trace is not None:
+            trace.iterations = iteration
         try:
             response = model_call(messages)
         except Exception:
+            _finish_trace(trace, "model_error", iteration=iteration)
             return None
 
         # 检查是否有 tool_calls
         tool_calls = _extract_tool_calls(response, valid_names=selected_tools)
         if not tool_calls:
             if _looks_like_tool_call_response(response):
+                _finish_trace(trace, "tool_call_parse_failed", iteration=iteration)
                 return None
-            return response.strip() if response.strip() else None
+            final_answer = response.strip()
+            if final_answer:
+                _finish_trace(trace, "final_answer", iteration=iteration, final_answer=final_answer)
+                return final_answer
+            _finish_trace(trace, "empty_response", iteration=iteration)
+            return None
 
         # 检查是否有 plan 调用 — 优先处理
         plan_calls = [tc for tc in tool_calls if tc.name == "plan"]
         if plan_calls:
             plan = _parse_plan(plan_calls[0])
             if plan:
-                step_results = execute_plan(plan, tool_executor)
+                step_results = execute_plan(plan, tool_executor, trace=trace, iteration=iteration)
                 aggregated = _format_plan_results(plan.goal, step_results)
                 messages.append({"role": "assistant", "content": response})
                 messages.append({"role": "tool", "content": aggregated})
@@ -263,13 +297,133 @@ def react_loop(
         # 执行普通工具调用并回传结果
         messages.append({"role": "assistant", "content": response})
         for tc in tool_calls:
-            result = tool_executor(tc)
+            result = _execute_tool_call_with_trace(tc, tool_executor, trace=trace, iteration=iteration)
             messages.append({
                 "role": "tool",
                 "content": tool_result_model_context(tc.name, result, fallback=f"工具 {tc.name} 执行失败或无结果"),
             })
 
+    _finish_trace(trace, "max_iterations", iteration=max_iterations)
     return None
+
+
+def _execute_tool_call_with_trace(
+    tool_call: ToolCall,
+    tool_executor: Callable[[ToolCall], Any],
+    *,
+    trace: AgentTrace | None,
+    iteration: int,
+) -> Any:
+    started = time.perf_counter()
+    try:
+        result = tool_executor(tool_call)
+    except Exception as exc:
+        _append_trace_step(
+            trace,
+            tool_call,
+            iteration=iteration,
+            ok=False,
+            error=type(exc).__name__,
+            duration_ms=_elapsed_ms(started),
+            result_summary=None,
+        )
+        raise
+
+    result_context = tool_result_model_context(
+        tool_call.name,
+        result,
+        fallback=f"工具 {tool_call.name} 执行失败或无结果",
+    )
+    ok = _tool_result_ok(result)
+    error = _tool_result_error(result)
+    if not ok and not error:
+        error = "empty_result"
+    metadata = getattr(result, "metadata", None)
+    duration_ms = getattr(metadata, "duration_ms", None)
+    _append_trace_step(
+        trace,
+        tool_call,
+        iteration=iteration,
+        ok=ok,
+        error=error,
+        duration_ms=duration_ms if isinstance(duration_ms, (int, float)) else _elapsed_ms(started),
+        result_summary=result_context,
+    )
+    return result
+
+
+def _append_trace_step(
+    trace: AgentTrace | None,
+    tool_call: ToolCall,
+    *,
+    iteration: int,
+    ok: bool,
+    error: str | None,
+    duration_ms: float,
+    result_summary: str | None,
+) -> None:
+    if trace is None:
+        return
+    raw_arguments_safe = _raw_arguments_safe(tool_call.arguments)
+    trace.steps.append(AgentStep(
+        iteration=iteration,
+        tool_name=tool_call.name,
+        args_summary=_summarize_trace_arguments(tool_call.arguments),
+        raw_arguments_safe=raw_arguments_safe,
+        raw_arguments=dict(tool_call.arguments) if raw_arguments_safe else None,
+        ok=ok,
+        error=error,
+        duration_ms=max(0.0, float(duration_ms)),
+        result_summary=result_summary,
+    ))
+
+
+def _finish_trace(
+    trace: AgentTrace | None,
+    reason: str,
+    *,
+    iteration: int,
+    final_answer: str | None = None,
+) -> None:
+    if trace is None:
+        return
+    trace.termination_reason = reason
+    trace.iterations = max(trace.iterations, iteration)
+    if final_answer is not None:
+        trace.final_answer = final_answer
+
+
+def _tool_result_ok(result: Any) -> bool:
+    ok = getattr(result, "ok", None)
+    if isinstance(ok, bool):
+        return ok
+    return result is not None
+
+
+def _tool_result_error(result: Any) -> str | None:
+    error = getattr(result, "error", None)
+    return str(error) if error else None
+
+
+def _summarize_trace_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    try:
+        summary = json.loads(summarize_tool_arguments_for_model(arguments, max_chars=4000))
+    except Exception:
+        return {}
+    return summary if isinstance(summary, dict) else {}
+
+
+def _raw_arguments_safe(arguments: dict[str, Any]) -> bool:
+    return not any(_is_sensitive_argument_key(str(key)) for key in arguments)
+
+
+def _is_sensitive_argument_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(token in lowered for token in ("password", "token", "secret", "api_key", "apikey", "authorization", "cookie"))
+
+
+def _elapsed_ms(started: float) -> float:
+    return max(0.0, (time.perf_counter() - started) * 1000)
 
 
 def _looks_like_tool_call_response(response: str) -> bool:

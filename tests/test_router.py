@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from warframe_agent.tool_registry import ToolResult
 from warframe_agent.tool_router import (
+    AgentTrace,
     ToolCall,
     build_router_prompt,
     parse_tool_call,
@@ -134,6 +135,55 @@ class ReactLoopTests(unittest.TestCase):
         tool_messages = [m for m in seen_messages[-1] if m["role"] == "tool"]
         self.assertEqual(tool_messages[-1]["content"], "compact context")
         self.assertNotIn("RAW_TAIL_SENTINEL", tool_messages[-1]["content"])
+
+    def test_react_loop_records_agent_trace_for_tool_call(self):
+        trace = AgentTrace()
+        call_count = [0]
+
+        def mock_model_call(messages):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return '{"tool": "query_price", "args": {"item_name": "充沛", "token": "secret-token"}}'
+            return "充沛当前价格45p"
+
+        result = react_loop(
+            message="充沛多少钱",
+            tool_executor=lambda tc: ToolResult(ok=True, content="raw", model_context="safe compact context"),
+            model_call=mock_model_call,
+            max_iterations=3,
+            trace=trace,
+        )
+
+        self.assertEqual(result, "充沛当前价格45p")
+        self.assertEqual(trace.termination_reason, "final_answer")
+        self.assertEqual(trace.final_answer, "充沛当前价格45p")
+        self.assertEqual(len(trace.steps), 1)
+        step = trace.steps[0]
+        self.assertEqual(step.iteration, 1)
+        self.assertEqual(step.tool_name, "query_price")
+        self.assertTrue(step.ok)
+        self.assertEqual(step.args_summary["item_name"], "充沛")
+        self.assertEqual(step.args_summary["token"], "[REDACTED]")
+        self.assertFalse(step.raw_arguments_safe)
+        self.assertIsNone(step.raw_arguments)
+        self.assertEqual(step.result_summary, "safe compact context")
+
+    def test_react_loop_trace_records_max_iteration_stop(self):
+        trace = AgentTrace()
+
+        result = react_loop(
+            message="充沛多少钱",
+            tool_executor=lambda tc: None,
+            model_call=lambda messages: '{"tool": "query_price", "args": {"item_name": "充沛"}}',
+            max_iterations=1,
+            trace=trace,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(trace.termination_reason, "max_iterations")
+        self.assertEqual(len(trace.steps), 1)
+        self.assertFalse(trace.steps[0].ok)
+        self.assertEqual(trace.steps[0].error, "empty_result")
 
     def test_chat_agent_react_query_events_uses_safe_compact_model_context(self):
         from warframe_agent.chat import ChatAgent
