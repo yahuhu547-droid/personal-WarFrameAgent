@@ -402,6 +402,7 @@ class ChatAgent:
         self.model_orchestrator = None
         self.tool_registry = self._build_tool_registry()
         self.tool_execution_metadata = []
+        self.last_agent_trace = None
         self._last_baro_recommendations = []
         self._baro_item_info_lookup = None
 
@@ -2025,15 +2026,19 @@ class ChatAgent:
         return self._try_router_legacy_result(message)
 
     def _try_react_loop(self, message: str) -> str | None:
-        from .tool_router import react_loop
+        from .tool_router import AgentTrace, react_loop
+        trace = AgentTrace()
+        self.last_agent_trace = trace
         try:
             return react_loop(
                 message=message,
                 tool_executor=lambda tc: self._run_tool_call(tc, message),
                 model_call=self._react_model_call,
+                trace=trace,
             )
         except Exception as exc:
             logger.debug("ReAct 循环失败: %s", exc)
+            self.last_agent_trace = trace
             return None
 
     def _react_model_call(self, messages: list[dict]) -> str:

@@ -276,6 +276,51 @@ class ReactLoopTests(unittest.TestCase):
         for forbidden in ["Seller_RAW_ORDER_SENTINEL", "Buyer_RAW_ORDER_SENTINEL", "/w", "RAW_ORDER_SENTINEL"]:
             self.assertNotIn(forbidden, tool_content)
 
+    def test_chat_agent_react_loop_saves_last_agent_trace_without_leaking(self):
+        from warframe_agent.chat import ChatAgent
+        from warframe_agent.dictionary import ResolveResult
+
+        class FakeResolver:
+            aliases = {"充沛": "arcane_energize"}
+            generated_aliases = {}
+
+            def resolve(self, name):
+                if name in self.aliases:
+                    return ResolveResult(self.aliases[name], "alias", name)
+                raise LookupError(name)
+
+        seen_messages = []
+
+        def fake_model_call(messages):
+            seen_messages.append(messages)
+            if len(seen_messages) == 1:
+                return '{"tool":"query_price","args":{"item_name":"充沛","token":"secret-token"}}'
+            return "充沛当前价格45p"
+
+        agent = ChatAgent(
+            resolver=FakeResolver(),
+            order_fetcher=lambda item_id: [
+                {"type": "sell", "platinum": 5, "quantity": 1, "user": {"ingameName": "Seller_RAW_ORDER_SENTINEL", "status": "ingame", "reputation": 10}},
+            ],
+            model_call=lambda prompt: "unused",
+            rag_search=lambda msg: [],
+        )
+        agent._react_model_call = fake_model_call
+
+        result = agent._try_react_loop("充沛多少钱")
+
+        self.assertEqual(result, "充沛当前价格45p")
+        for forbidden in ["AgentTrace", "duration_ms", "args_summary", "secret-token"]:
+            self.assertNotIn(forbidden, result)
+        trace = agent.last_agent_trace
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.termination_reason, "final_answer")
+        self.assertEqual(len(trace.steps), 1)
+        self.assertEqual(trace.steps[0].tool_name, "query_price")
+        self.assertEqual(trace.steps[0].args_summary["token"], "[REDACTED]")
+        self.assertFalse(trace.steps[0].raw_arguments_safe)
+        self.assertIsNone(trace.steps[0].raw_arguments)
+
     @patch("warframe_agent.mod_flipper.fetch_item_statistics", return_value={"volume_48h": 12})
     @patch("warframe_agent.scout.scout_mod_candidates", return_value=[])
     def test_chat_agent_react_mod_flipper_uses_domain_model_context(self, mock_scout, mock_stats):
