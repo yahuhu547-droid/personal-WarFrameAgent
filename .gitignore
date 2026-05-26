@@ -56,8 +56,31 @@ _ws_reply.txt
 test_ui.py
 
 # Claude memory (per-user)
+.claude/settings.local.json
+.claude/worktrees/
 .claude/memory/
 !.claude/memory/.gitkeep
 
 # Test screenshots
 md/test_screenshots/
+
+# Local agent research dependencies and downloaded reference repos
+.playwright-cli/
+.pytest_tmp/
+.venv.broken.*/
+Extra Resource/
+output/
+githubProduct/.venvs/
+githubProduct/caches/
+githubProduct/local-cache/
+githubProduct/tools/
+githubProduct/*/
+!githubProduct/local_requirements/
+!githubProduct/local_requirements/**
+!githubProduct/*.md
+!githubProduct/*.json
+!githubProduct/local_agent_env.ps1
+githubProduct/**/.venv/
+githubProduct/**/.venv-*/
+githubProduct/**/node_modules/
+githubProduct/**/config/config.toml

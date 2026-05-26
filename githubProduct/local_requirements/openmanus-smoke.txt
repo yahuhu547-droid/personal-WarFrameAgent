@@ -1,0 +1,24 @@
+# Minimal dependency set for importing OpenManus Manus locally.
+# Use this before the full project install because upstream requirements have
+# a Pillow resolver conflict and include heavy benchmark packages.
+pydantic~=2.10.6
+openai~=1.66.3
+tenacity~=9.0.0
+loguru~=0.7.3
+tiktoken~=0.9.0
+colorama~=0.4.6
+
+browser-use==0.1.40
+playwright~=1.51.0
+mcp~=1.5.0
+docker~=7.1.0
+
+requests~=2.32.3
+beautifulsoup4~=4.13.3
+googlesearch-python~=1.3.0
+baidusearch~=1.0.3
+duckduckgo_search~=7.5.3
+
+pillow~=10.4.0
+daytona==0.21.8
+structlog==25.4.0
