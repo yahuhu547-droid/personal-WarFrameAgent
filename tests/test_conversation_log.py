@@ -38,6 +38,55 @@ def test_conversation_log_round_trips_tool_calls(tmp_path, monkeypatch):
     assert entries[0].tool_calls == tool_calls
 
 
+def test_log_conversation_sanitizes_messages_contexts_and_tool_calls_before_persisting(tmp_path, monkeypatch):
+    import warframe_agent.conversation_log as conversation_log
+
+    log_path = tmp_path / "conversation_logs.jsonl"
+    monkeypatch.setattr(conversation_log, "LOG_PATH", log_path)
+
+    entry = ConversationEntry(
+        user_message="充沛最低卖家 token=secret-token /w Seller hi",
+        assistant_reply=(
+            "最低卖家: Seller，价格 5p\n"
+            "购买私聊: /w Seller Hi! I want to buy.\n"
+            "市场链接: https://warframe.market/items/arcane_energize\n"
+            "profile: https://warframe.market/profile/Seller"
+        ),
+        contexts=["arcane_energize", "unsafe context token=secret-token"],
+        tool_calls=[{
+            "tool_name": "query_price",
+            "args_summary": {
+                "item_name": "arcane_energize",
+                "token": "secret-token",
+                "message_context": "raw user message",
+            },
+            "error": "Authorization: Bearer abc token=secret-token",
+            "message_context": "raw user message",
+        }],
+    )
+
+    log_conversation(entry)
+
+    raw = log_path.read_text(encoding="utf-8")
+    for forbidden in [
+        "secret-token",
+        "token=",
+        "/w",
+        "Seller",
+        "warframe.market/profile",
+        "warframe.market/items",
+        "Bearer abc",
+        "message_context",
+        "raw user message",
+    ]:
+        assert forbidden not in raw
+    data = json.loads(raw)
+    assert data["contexts"] == ["arcane_energize"]
+    assert data["tool_calls"][0]["args_summary"]["token"] == "[REDACTED]"
+    assert "message_context" not in data["tool_calls"][0]["args_summary"]
+    assert entry.user_message.startswith("充沛最低卖家")
+
+
 def test_query_tool_call_history_returns_recent_flattened_tool_calls(tmp_path, monkeypatch):
     import warframe_agent.conversation_log as conversation_log
 

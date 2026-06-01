@@ -126,7 +126,10 @@ def format_baro_report(recommendations: list[BaroRecommendation]) -> str:
     if not recommendations:
         return "Baro 库存中没有可分析的 Mod 或赋能。"
 
-    lines = ["## Baro Mod / 赋能价格"]
+    lines = [
+        "## Baro Mod / 赋能价格",
+        "仅展示可分析的 Mod / 赋能；装饰、外观等非交易项暂不做价格分析。",
+    ]
     for r in recommendations:
         lines.append(
             f"- {_summary_name(r.market_id)}{_rank_suffix(r)} | "

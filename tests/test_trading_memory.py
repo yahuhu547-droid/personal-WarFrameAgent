@@ -160,6 +160,239 @@ class TradingMemoryDBTests(unittest.TestCase):
         self.assertEqual(records[0].item_name, "arcane_energize")
         self.assertEqual(records[0].metadata, {"channel": "websocket"})
 
+    def test_push_quality_summary_aggregates_safe_pushes_and_outcomes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = TradingMemoryDB(Path(tmp) / "trading_memory.db")
+            db.record_push(
+                "opportunity",
+                "交易机会 arcane_energize",
+                item_name="arcane_energize",
+                metadata={
+                    "opportunity_source": "mod_flipper",
+                    "strategy": "arcane_rank0_to_max",
+                    "profit": 40,
+                    "roi_pct": 30,
+                    "profile_url": "https://warframe.market/profile/SecretSeller",
+                    "whisper": "/w SecretSeller hi",
+                },
+            )
+            db.record_push(
+                "opportunity",
+                "交易机会 arcane_energize again",
+                item_name="arcane_energize",
+                metadata={
+                    "opportunity_source": "mod_flipper",
+                    "strategy": "arcane_rank0_to_max",
+                    "profit": 30,
+                },
+            )
+            db.record_opportunity_outcome(
+                "OPGOOD1",
+                "arcane_energize",
+                "mod_flipper",
+                "arcane_rank0_to_max",
+                "completed",
+                40,
+                50,
+                "good",
+                {"safe_summary": {"roi_pct": 30, "profile_url": "https://warframe.market/profile/SecretSeller"}},
+            )
+            db.record_opportunity_outcome(
+                "OPBAD1",
+                "arcane_energize",
+                "mod_flipper",
+                "arcane_rank0_to_max",
+                "rejected",
+                40,
+                0,
+                "bad",
+                {"safe_summary": {"roi_pct": 30, "whisper": "/w SecretSeller hi"}},
+            )
+
+            summaries = db.summarize_push_quality(limit=20)
+            db.close()
+
+        self.assertEqual(len(summaries), 1)
+        signal = summaries[0]
+        self.assertEqual(signal.item_name, "arcane_energize")
+        self.assertEqual(signal.source, "mod_flipper")
+        self.assertEqual(signal.strategy, "arcane_rank0_to_max")
+        self.assertEqual(signal.category, "arcane")
+        self.assertEqual(signal.sent_count, 2)
+        self.assertEqual(signal.reviewed_count, 2)
+        self.assertEqual(signal.completed_count, 1)
+        self.assertEqual(signal.accepted_count, 0)
+        self.assertEqual(signal.rejected_count, 1)
+        self.assertEqual(signal.pending_count, 0)
+        self.assertEqual(signal.good_count, 1)
+        self.assertEqual(signal.bad_count, 1)
+        self.assertEqual(signal.avg_expected_profit, 40.0)
+        self.assertEqual(signal.avg_actual_profit, 25.0)
+        self.assertEqual(signal.avg_profit_delta, -15.0)
+        self.assertEqual(signal.good_rate, 0.5)
+        self.assertEqual(signal.completion_rate, 0.5)
+        self.assertEqual(signal.rejection_rate, 0.5)
+        self.assertEqual(signal.false_positive_rate, 0.5)
+        serialized = str(signal)
+        for forbidden in ["SecretSeller", "profile", "/w", "whisper"]:
+            self.assertNotIn(forbidden, serialized)
+
+    def test_push_quality_summary_filters_by_item_source_and_since(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = TradingMemoryDB(Path(tmp) / "trading_memory.db")
+            db.record_push(
+                "opportunity",
+                "Rhino Prime set",
+                item_name="rhino_prime_set",
+                metadata={"opportunity_source": "set_profit", "strategy": "buy_parts_sell_set", "profit": 25},
+            )
+            db.record_push(
+                "opportunity",
+                "Arcane flip",
+                item_name="arcane_energize",
+                metadata={"opportunity_source": "mod_flipper", "strategy": "arcane_rank0_to_max", "profit": 35},
+            )
+            db.record_opportunity_outcome(
+                "OPSET1",
+                "rhino_prime_set",
+                "set_profit",
+                "buy_parts_sell_set",
+                "completed",
+                25,
+                30,
+                "good",
+                {},
+            )
+            cutoff = "9999-01-01T00:00:00"
+
+            set_only = db.summarize_push_quality(item_name="rhino_prime_set", source="set_profit")
+            future = db.summarize_push_quality(since=cutoff)
+            db.close()
+
+        self.assertEqual(len(set_only), 1)
+        self.assertEqual(set_only[0].item_name, "rhino_prime_set")
+        self.assertEqual(set_only[0].source, "set_profit")
+        self.assertEqual(set_only[0].category, "prime_set")
+        self.assertEqual(set_only[0].sent_count, 1)
+        self.assertEqual(set_only[0].reviewed_count, 1)
+        self.assertEqual(future, [])
+
+    def test_record_and_query_opportunity_outcomes_stores_safe_metadata_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "memory.db"
+            db = TradingMemoryDB(db_path=db_path)
+            record_id = db.record_opportunity_outcome(
+                "arcane_energize",
+                "flip_candidate",
+                "accepted",
+                metadata={
+                    "safe_summary": "Bought below usual sell range.",
+                    "personal_score": 8,
+                    "market_score": 7,
+                    "personal_reasons": ["fits_watchlist", "good_margin"],
+                    "player": "SensitiveSeller",
+                    "profile_url": "https://warframe.market/profile/SensitiveSeller",
+                    "whisper": "/w SensitiveSeller hi",
+                    "token": "secret-token",
+                    "orders": [{"user": {"ingameName": "SensitiveSeller"}}],
+                },
+            )
+            records = db.get_opportunity_outcomes(item_name="arcane_energize")
+            db.close()
+
+            conn = sqlite3.connect(db_path)
+            stored_json = conn.execute("SELECT metadata_json FROM opportunity_outcomes").fetchone()[0]
+            conn.close()
+
+        self.assertIsInstance(record_id, int)
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record.item_name, "arcane_energize")
+        self.assertEqual(record.opportunity_type, "flip_candidate")
+        self.assertEqual(record.outcome, "accepted")
+        self.assertEqual(record.metadata, {
+            "safe_summary": "Bought below usual sell range.",
+            "personal_score": 8,
+            "market_score": 7,
+            "personal_reasons": ["fits_watchlist", "good_margin"],
+        })
+        serialized = str(record) + stored_json
+        for forbidden in [
+            "player",
+            "profile_url",
+            "whisper",
+            "token",
+            "SensitiveSeller",
+            "secret-token",
+            "/w",
+            "orders",
+            "ingameName",
+        ]:
+            self.assertNotIn(forbidden, serialized)
+
+    def test_filters_opportunity_outcomes_by_item_type_and_since(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = TradingMemoryDB(db_path=Path(tmp) / "memory.db")
+            db.record_opportunity_outcome("item_a", "flip_candidate", "accepted")
+            cutoff = "9999-01-01T00:00:00"
+            db.record_opportunity_outcome("item_b", "watchlist_review", "rejected")
+
+            self.assertEqual(
+                [r.item_name for r in db.get_opportunity_outcomes(opportunity_type="watchlist_review")],
+                ["item_b"],
+            )
+            self.assertEqual([r.outcome for r in db.get_opportunity_outcomes(item_name="item_a")], ["accepted"])
+            self.assertEqual(db.get_opportunity_outcomes(since=cutoff), [])
+            db.close()
+
+    def test_opportunity_outcome_review_roundtrip_is_sanitized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = TradingMemoryDB(Path(tmp) / "trading_memory.db")
+            db.record_opportunity_outcome(
+                opportunity_id="OPABC123",
+                item_name="arcane_energize",
+                source="mod_flipper",
+                strategy="arcane_rank0_to_max",
+                status="completed",
+                expected_profit=40,
+                actual_profit=35,
+                user_feedback="good",
+                metadata={
+                    "safe_summary": {
+                        "roi_pct": 25,
+                        "risk_level": "medium",
+                        "strategy": "/w SellerName hi",
+                        "plan_signature": "https://warframe.market/profile/SellerName",
+                        "source": "token=secret",
+                    },
+                    "player": "SellerName",
+                    "profile_url": "https://warframe.market/profile/SellerName",
+                    "whisper": "/w SellerName hello",
+                    "token": "secret",
+                },
+            )
+
+            records = db.get_opportunity_outcomes(limit=10)
+            db.close()
+
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record.opportunity_id, "OPABC123")
+        self.assertEqual(record.status, "completed")
+        self.assertEqual(record.actual_profit, 35)
+        self.assertEqual(record.metadata, {"safe_summary": {"roi_pct": 25, "risk_level": "medium"}})
+
+    def test_opportunity_outcomes_filter_by_status_and_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = TradingMemoryDB(Path(tmp) / "trading_memory.db")
+            db.record_opportunity_outcome("OP1", "gauss_prime_set", "set_profit", "buy_parts_sell_set", "skipped", 20, 0, "ignored", {})
+            db.record_opportunity_outcome("OP2", "arcane_energize", "mod_flipper", "arcane_rank0_to_max", "completed", 40, 50, "good", {})
+
+            records = db.get_opportunity_outcomes(status="completed", item_name="arcane_energize", limit=5)
+            db.close()
+
+        self.assertEqual([record.opportunity_id for record in records], ["OP2"])
+
     def test_filters_by_item_type_source_and_since(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = TradingMemoryDB(db_path=Path(tmp) / "memory.db")
@@ -202,10 +435,17 @@ class TradingMemoryDBTests(unittest.TestCase):
             db.record_market_snapshot("item", "scan", {"price": 1})
             db.record_recommendation("item", "opportunity")
             db.record_push("daily", "message")
+            db.record_opportunity_outcome("item", "flip_candidate", "accepted")
             db.close()
 
             conn = sqlite3.connect(db_path)
-            for table in ["user_queries", "market_snapshots", "recommendations", "push_history"]:
+            for table in [
+                "user_queries",
+                "market_snapshots",
+                "recommendations",
+                "push_history",
+                "opportunity_outcomes",
+            ]:
                 conn.execute(f"UPDATE {table} SET timestamp = ?", ("2000-01-01T00:00:00",))
             conn.commit()
             conn.close()
@@ -219,6 +459,7 @@ class TradingMemoryDBTests(unittest.TestCase):
             "market_snapshots": 1,
             "recommendations": 1,
             "push_history": 1,
+            "opportunity_outcomes": 1,
         })
 
     def test_malformed_json_payload_returns_empty_dict(self):

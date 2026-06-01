@@ -275,8 +275,9 @@ def _to_market_orders(orders: Iterable[dict], order_type: str, rank_filter: int 
             continue
         mod_rank = order.get("rank") if order.get("rank") is not None else order.get("mod_rank")
         # 如果指定了等级过滤，只保留该等级的订单
-        if rank_filter is not None and mod_rank is not None and mod_rank != rank_filter:
-            continue
+        if rank_filter is not None:
+            if mod_rank is None or mod_rank != rank_filter:
+                continue
         result.append(
             MarketOrder(
                 order_type=order_type,

@@ -22,11 +22,50 @@ _CATEGORY_KEYWORDS = {
 
 
 OPPORTUNITY_FILTERS = {"all", "mod", "arcane"}
+RISK_APPETITES = {"low", "medium", "high"}
+PROFILE_CATEGORIES = {"mod", "arcane", "prime_set", "prime_part", "riven", "baro"}
 
 
 def normalize_opportunity_filter(value: str | None) -> str:
     normalized = (value or "all").strip().lower()
     return normalized if normalized in OPPORTUNITY_FILTERS else "all"
+
+
+def normalize_risk_appetite(value: str | None) -> str:
+    normalized = (value or "medium").strip().lower()
+    return normalized if normalized in RISK_APPETITES else "medium"
+
+
+def normalize_profile_categories(values: list[str] | str | None) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        raw_values = re.split(r"[,，/、\s]+", values)
+    else:
+        raw_values = values
+    result = []
+    for value in raw_values:
+        normalized = str(value or "").strip().lower()
+        if normalized in PROFILE_CATEGORIES and normalized not in result:
+            result.append(normalized)
+    return result
+
+
+def normalize_budget_range(budget_min: int, budget_max: int) -> tuple[int, int]:
+    low = max(0, int(budget_min or 0))
+    high = max(0, int(budget_max or 0))
+    if high and low > high:
+        low, high = high, low
+    return low, high
+
+
+def parse_budget_range(value: str) -> tuple[int, int] | None:
+    numbers = [int(match) for match in re.findall(r"\d+", value or "")]
+    if not numbers:
+        return None
+    if len(numbers) == 1:
+        return 0, numbers[0]
+    return normalize_budget_range(numbers[0], numbers[1])
 
 
 @dataclass(frozen=True)
@@ -102,9 +141,22 @@ class TradingPreferences:
     crossplay: bool = True
     max_results: int = 5
     opportunity_filter: str = "all"
+    risk_appetite: str = "medium"
+    budget_min: int = 0
+    budget_max: int = 0
+    preferred_categories: list[str] = field(default_factory=list)
+    max_turnaround_days: int = 7
+    min_roi_pct: int = 0
 
     def __post_init__(self):
         object.__setattr__(self, "opportunity_filter", normalize_opportunity_filter(self.opportunity_filter))
+        object.__setattr__(self, "risk_appetite", normalize_risk_appetite(self.risk_appetite))
+        budget_min, budget_max = normalize_budget_range(self.budget_min, self.budget_max)
+        object.__setattr__(self, "budget_min", budget_min)
+        object.__setattr__(self, "budget_max", budget_max)
+        object.__setattr__(self, "preferred_categories", normalize_profile_categories(self.preferred_categories))
+        object.__setattr__(self, "max_turnaround_days", max(1, int(self.max_turnaround_days or 1)))
+        object.__setattr__(self, "min_roi_pct", max(0, int(self.min_roi_pct or 0)))
 
 
 @dataclass(frozen=True)
@@ -231,6 +283,12 @@ class AgentMemory:
                 "crossplay": self.preferences.crossplay,
                 "max_results": self.preferences.max_results,
                 "opportunity_filter": self.preferences.opportunity_filter,
+                "risk_appetite": self.preferences.risk_appetite,
+                "budget_min": self.preferences.budget_min,
+                "budget_max": self.preferences.budget_max,
+                "preferred_categories": list(self.preferences.preferred_categories),
+                "max_turnaround_days": self.preferences.max_turnaround_days,
+                "min_roi_pct": self.preferences.min_roi_pct,
             },
             "price_alerts": [
                 {
@@ -347,6 +405,12 @@ class AgentMemory:
         crossplay: bool | None = None,
         max_results: int | None = None,
         opportunity_filter: str | None = None,
+        risk_appetite: str | None = None,
+        budget_min: int | None = None,
+        budget_max: int | None = None,
+        preferred_categories: list[str] | str | None = None,
+        max_turnaround_days: int | None = None,
+        min_roi_pct: int | None = None,
     ) -> "AgentMemory":
         return replace(
             self,
@@ -355,6 +419,12 @@ class AgentMemory:
                 crossplay=self.preferences.crossplay if crossplay is None else crossplay,
                 max_results=self.preferences.max_results if max_results is None else max_results,
                 opportunity_filter=self.preferences.opportunity_filter if opportunity_filter is None else opportunity_filter,
+                risk_appetite=self.preferences.risk_appetite if risk_appetite is None else risk_appetite,
+                budget_min=self.preferences.budget_min if budget_min is None else budget_min,
+                budget_max=self.preferences.budget_max if budget_max is None else budget_max,
+                preferred_categories=self.preferences.preferred_categories if preferred_categories is None else preferred_categories,
+                max_turnaround_days=self.preferences.max_turnaround_days if max_turnaround_days is None else max_turnaround_days,
+                min_roi_pct=self.preferences.min_roi_pct if min_roi_pct is None else min_roi_pct,
             ),
         )
 
@@ -370,6 +440,31 @@ class AgentMemory:
                 return self
         if key == "opportunity_filter":
             return self.with_updated_preferences(opportunity_filter=value)
+        if key in {"risk", "risk_appetite"}:
+            normalized = (value or "").strip().lower()
+            if normalized not in RISK_APPETITES:
+                return self
+            return self.with_updated_preferences(risk_appetite=normalized)
+        if key in {"budget", "budget_range"}:
+            parsed = parse_budget_range(value)
+            if parsed is None:
+                return self
+            return self.with_updated_preferences(budget_min=parsed[0], budget_max=parsed[1])
+        if key in {"categories", "preferred_categories"}:
+            categories = normalize_profile_categories(value)
+            if not categories:
+                return self
+            return self.with_updated_preferences(preferred_categories=categories)
+        if key in {"turnaround", "max_turnaround_days"}:
+            try:
+                return self.with_updated_preferences(max_turnaround_days=int(value))
+            except ValueError:
+                return self
+        if key in {"min_roi", "min_roi_pct"}:
+            try:
+                return self.with_updated_preferences(min_roi_pct=int(value))
+            except ValueError:
+                return self
         return self
 
     def with_favorite_item(self, item_id: str) -> "AgentMemory":

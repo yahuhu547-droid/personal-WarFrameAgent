@@ -123,3 +123,38 @@ def test_display_and_model_format_include_ev_but_model_context_is_safe():
         "RAW_ORDER_SENTINEL",
     ]:
         assert forbidden not in model_context
+
+
+def test_format_relic_value_marks_target_part_when_requested():
+    report = analyze_relic_value(
+        make_relic(),
+        order_fetcher=lambda item_id: [
+            {"type": "sell", "platinum": 8, "quantity": 1, "user": {"ingameName": "Seller", "status": "ingame"}},
+            {"type": "buy", "platinum": 5, "quantity": 1, "user": {"ingameName": "Buyer", "status": "ingame"}},
+        ],
+        game_data=FakeGameData({
+            "braton_prime_blueprint": 15,
+            "paris_prime_string": 45,
+            "forma_blueprint": None,
+        }),
+    )
+
+    text = format_relic_value_for_display(report, target_part="Braton Prime Blueprint")
+
+    assert "目标部件" in text
+    assert "Braton Prime Blueprint" in text
+    assert "25.33%" in text
+    assert "估值 5p" in text
+
+
+def test_format_relic_value_reports_missing_target_part():
+    report = analyze_relic_value(
+        make_relic(),
+        order_fetcher=lambda item_id: [],
+        game_data=FakeGameData(),
+    )
+
+    text = format_relic_value_for_display(report, target_part="Missing Prime Part")
+
+    assert "未找到目标部件" in text
+    assert "Missing Prime Part" in text

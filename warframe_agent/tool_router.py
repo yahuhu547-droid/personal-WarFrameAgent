@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import re
 import time
@@ -8,7 +10,7 @@ from typing import Any, Callable
 
 from . import config
 from .tool_context import format_plan_results_for_model, summarize_tool_arguments_for_model, tool_result_model_context
-from .tool_registry import create_default_tool_registry
+from .tool_registry import ToolRegistry, create_default_tool_registry
 
 
 _DEFAULT_REGISTRY = create_default_tool_registry()
@@ -16,6 +18,8 @@ TOOL_SCHEMAS = _DEFAULT_REGISTRY.list_tool_schemas()
 TOOLS = _DEFAULT_REGISTRY.list_tools()
 CORE_READ_ONLY_TOOLS = {"query_price", "price_trend", "query_set", "query_events", "riven_search", "relic_value", "farming_route"}
 MAX_CANDIDATE_TOOLS = 6
+PLAN_READ_ONLY_SAFETY_LEVELS = {"read_only", "model_only"}
+PLAN_CONFIRMABLE_BLOCKED_REASONS = {"missing_verification"}
 
 
 @dataclass(frozen=True)
@@ -38,11 +42,43 @@ class AgentStep:
 
 
 @dataclass
+class AgentPlanStep:
+    index: int
+    tool_name: str
+    purpose: str
+    args_summary: dict[str, Any]
+    status: str = "pending"
+    ok: bool | None = None
+    error_present: bool = False
+    duration_ms: float | None = None
+    result_present: bool = False
+    verification_note: str = ""
+    blocked_reason: str = ""
+
+
+@dataclass
+class AgentPlanSnapshot:
+    goal: str
+    steps: list[AgentPlanStep] = field(default_factory=list)
+    status: str = "idle"
+    iteration: int = 0
+    verification_note: str = ""
+    blocked_reason: str = ""
+    review: "PlanReviewSummary | None" = None
+
+
+@dataclass
 class AgentTrace:
     steps: list[AgentStep] = field(default_factory=list)
     termination_reason: str | None = None
     iterations: int = 0
     final_answer: str | None = None
+    status: str = "idle"
+    started_at: float | None = None
+    ended_at: float | None = None
+    max_iterations: int = 0
+    duration_ms: float | None = None
+    plan: AgentPlanSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +92,213 @@ class PlanStep:
 class ExecutionPlan:
     goal: str
     steps: list[PlanStep]
+
+
+@dataclass(frozen=True)
+class PlanReviewIssue:
+    step_index: int
+    tool_name: str
+    code: str
+
+
+@dataclass(frozen=True)
+class PlanReviewSummary:
+    status: str = "ok"
+    verification_note: str = "plan_review=ok; issues=0; unknown=0; side_effect=0; sensitive_args=0; verification=0"
+    blocked_reason: str = ""
+    issue_count: int = 0
+    unknown_tool_count: int = 0
+    non_exposed_tool_count: int = 0
+    side_effect_tool_count: int = 0
+    sensitive_argument_count: int = 0
+    verification_gap_count: int = 0
+    issues: tuple[PlanReviewIssue, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+
+@dataclass(frozen=True)
+class PlanConfirmationRequest:
+    status: str
+    confirmable: bool
+    confirmation_token: str = ""
+    blocked_reason: str = ""
+    verification_note: str = ""
+
+
+def review_execution_plan(plan: ExecutionPlan, registry: ToolRegistry | None = None, *, require_verification: bool = True) -> PlanReviewSummary:
+    registry = registry or _DEFAULT_REGISTRY
+    issues: list[PlanReviewIssue] = []
+    unknown_tool_count = 0
+    non_exposed_tool_count = 0
+    side_effect_tool_count = 0
+    sensitive_argument_count = 0
+    verification_gap_count = 0
+
+    for index, step in enumerate(plan.steps, start=1):
+        step_issues = _review_plan_step(step, index, registry, require_verification=require_verification)
+        issues.extend(step_issues)
+        unknown_tool_count += sum(1 for issue in step_issues if issue.code == "unknown_tool")
+        non_exposed_tool_count += sum(1 for issue in step_issues if issue.code == "non_exposed_tool")
+        side_effect_tool_count += sum(1 for issue in step_issues if issue.code == "side_effect_tool")
+        sensitive_argument_count += sum(1 for issue in step_issues if issue.code == "sensitive_arguments")
+        verification_gap_count += sum(1 for issue in step_issues if issue.code == "missing_verification")
+
+    blocked_reason = _primary_plan_review_reason(issues)
+    status = "blocked" if blocked_reason else "ok"
+    issue_count = len(issues)
+    verification_note = (
+        f"plan_review={status}; issues={issue_count}; unknown={unknown_tool_count}; "
+        f"side_effect={side_effect_tool_count}; sensitive_args={sensitive_argument_count}; "
+        f"verification={verification_gap_count}"
+    )
+    return PlanReviewSummary(
+        status=status,
+        verification_note=verification_note,
+        blocked_reason=blocked_reason,
+        issue_count=issue_count,
+        unknown_tool_count=unknown_tool_count,
+        non_exposed_tool_count=non_exposed_tool_count,
+        side_effect_tool_count=side_effect_tool_count,
+        sensitive_argument_count=sensitive_argument_count,
+        verification_gap_count=verification_gap_count,
+        issues=tuple(issues),
+    )
+
+
+def build_plan_confirmation_request(
+    plan: ExecutionPlan,
+    review: PlanReviewSummary | None = None,
+    registry: ToolRegistry | None = None,
+) -> PlanConfirmationRequest:
+    review = review or review_execution_plan(plan, registry)
+    if review.ok:
+        return PlanConfirmationRequest(
+            status="not_required",
+            confirmable=False,
+            blocked_reason="",
+            verification_note="plan_confirmation=not_required",
+        )
+    if not _is_confirmable_plan_review(review):
+        return PlanConfirmationRequest(
+            status="not_confirmable",
+            confirmable=False,
+            blocked_reason=review.blocked_reason,
+            verification_note=(
+                f"plan_confirmation=not_confirmable; blocked_reason={review.blocked_reason or 'unknown'}; "
+                f"{review.verification_note}"
+            ),
+        )
+    relaxed_review = review_execution_plan(plan, registry, require_verification=False)
+    if not relaxed_review.ok:
+        return PlanConfirmationRequest(
+            status="not_confirmable",
+            confirmable=False,
+            blocked_reason=review.blocked_reason,
+            verification_note=(
+                f"plan_confirmation=not_confirmable; blocked_reason={review.blocked_reason}; "
+                f"relaxed_review={relaxed_review.verification_note}"
+            ),
+        )
+    token = _build_plan_confirmation_token(plan, review.blocked_reason)
+    return PlanConfirmationRequest(
+        status="requires_confirmation",
+        confirmable=True,
+        confirmation_token=token,
+        blocked_reason=review.blocked_reason,
+        verification_note=(
+            f"plan_confirmation=requires_confirmation; blocked_reason={review.blocked_reason}; "
+            f"relaxed_review={relaxed_review.verification_note}"
+        ),
+    )
+
+
+def _is_confirmable_plan_review(review: PlanReviewSummary) -> bool:
+    if review.blocked_reason not in PLAN_CONFIRMABLE_BLOCKED_REASONS:
+        return False
+    return review.issue_count == review.verification_gap_count
+
+
+def _build_plan_confirmation_token(plan: ExecutionPlan, blocked_reason: str) -> str:
+    payload = {
+        "version": 1,
+        "blocked_reason": blocked_reason,
+        "goal": str(plan.goal or ""),
+        "steps": [
+            {
+                "tool": str(step.tool or ""),
+                "arguments": step.arguments,
+                "purpose": str(step.purpose or ""),
+            }
+            for step in plan.steps
+        ],
+    }
+    encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
+    return f"plan_confirm_{digest}"
+
+
+def _plan_confirmation_token_matches(request: PlanConfirmationRequest, provided_token: str | None) -> bool:
+    if not request.confirmable or not provided_token:
+        return False
+    return hmac.compare_digest(str(provided_token), request.confirmation_token)
+
+
+def _review_plan_step(
+    step: PlanStep,
+    index: int,
+    registry: ToolRegistry,
+    *,
+    require_verification: bool,
+) -> list[PlanReviewIssue]:
+    issues: list[PlanReviewIssue] = []
+    spec = registry.get(step.tool)
+    if spec is None:
+        issues.append(PlanReviewIssue(index, step.tool, "unknown_tool"))
+    else:
+        if not getattr(spec, "expose_schema", True):
+            issues.append(PlanReviewIssue(index, step.tool, "non_exposed_tool"))
+        if _is_plan_side_effect_tool(spec):
+            issues.append(PlanReviewIssue(index, step.tool, "side_effect_tool"))
+    if _find_sensitive_argument_paths(step.arguments):
+        issues.append(PlanReviewIssue(index, step.tool, "sensitive_arguments"))
+    if require_verification and not str(step.purpose or "").strip():
+        issues.append(PlanReviewIssue(index, step.tool, "missing_verification"))
+    return issues
+
+
+def _primary_plan_review_reason(issues: list[PlanReviewIssue]) -> str:
+    priority = ("unknown_tool", "non_exposed_tool", "side_effect_tool", "sensitive_arguments", "missing_verification")
+    codes = {issue.code for issue in issues}
+    for code in priority:
+        if code in codes:
+            return code
+    return ""
+
+
+def _is_plan_side_effect_tool(spec: Any) -> bool:
+    if bool(getattr(spec, "side_effect", False)):
+        return True
+    safety_level = str(getattr(spec, "safety_level", "read_only") or "read_only")
+    return safety_level not in PLAN_READ_ONLY_SAFETY_LEVELS
+
+
+def _find_sensitive_argument_paths(arguments: Any, *, prefix: str = "") -> list[str]:
+    paths: list[str] = []
+    if isinstance(arguments, dict):
+        for key, value in arguments.items():
+            key_text = str(key)
+            path = f"{prefix}.{key_text}" if prefix else key_text
+            if _is_sensitive_argument_key(key_text):
+                paths.append(path)
+            paths.extend(_find_sensitive_argument_paths(value, prefix=path))
+    elif isinstance(arguments, list):
+        for index, value in enumerate(arguments):
+            path = f"{prefix}[{index}]" if prefix else f"[{index}]"
+            paths.extend(_find_sensitive_argument_paths(value, prefix=path))
+    return paths
 
 
 def _parse_plan(tc: ToolCall) -> ExecutionPlan | None:
@@ -82,6 +325,18 @@ def _format_plan_results(goal: str, results: list[tuple[PlanStep, Any]]) -> str:
     return format_plan_results_for_model(goal, results)
 
 
+def _format_plan_review_blocked_message(review: PlanReviewSummary) -> str:
+    reason = review.blocked_reason or "unknown"
+    return (
+        "计划审查未通过："
+        f"{reason}。"
+        f"issues={review.issue_count}; unknown={review.unknown_tool_count}; "
+        f"side_effect={review.side_effect_tool_count}; sensitive_args={review.sensitive_argument_count}; "
+        f"verification={review.verification_gap_count}。"
+        "请移除敏感参数、改用只读工具，或补充步骤验证说明后再试。"
+    )
+
+
 def execute_plan(
     plan: ExecutionPlan,
     tool_executor: Callable[[ToolCall], Any],
@@ -90,10 +345,37 @@ def execute_plan(
 ) -> list[tuple[PlanStep, Any]]:
     """顺序执行 plan 的每一步，收集 (step, result) 对。"""
     results = []
-    for step in plan.steps:
+    for index, step in enumerate(plan.steps, start=1):
         tc = ToolCall(name=step.tool, arguments=step.arguments)
-        result = _execute_tool_call_with_trace(tc, tool_executor, trace=trace, iteration=iteration)
+        _mark_trace_plan_step(trace, index, status="running")
+        started = time.perf_counter()
+        try:
+            result = _execute_tool_call_with_trace(tc, tool_executor, trace=trace, iteration=iteration)
+        except Exception:
+            _mark_trace_plan_step(
+                trace,
+                index,
+                status="failed",
+                ok=False,
+                error_present=True,
+                duration_ms=_elapsed_ms(started),
+                result_present=False,
+            )
+            if trace is not None and trace.plan is not None:
+                trace.plan.status = "failed"
+            raise
+        _mark_trace_plan_step(
+            trace,
+            index,
+            status="completed",
+            ok=_tool_result_ok(result),
+            error_present=bool(_tool_result_error(result)),
+            duration_ms=_elapsed_ms(started),
+            result_present=result is not None,
+        )
         results.append((step, result))
+    if trace is not None and trace.plan is not None and trace.plan.status != "failed":
+        trace.plan.status = "completed"
     return results
 
 
@@ -109,15 +391,17 @@ def select_candidate_tools(message: str, max_tools: int = MAX_CANDIDATE_TOOLS) -
     elif any(token in lowered for token in ("去哪刷", "哪里刷", "怎么刷", "刷取", "掉落", "来源", "哪个裂缝", "适合开", "开这个核桃")):
         candidates = ["farming_route", "query_events", "relic_value", "event_expert"]
     elif any(token in lowered for token in ("配卡", "配装", "build", "mod配置", "钢铁怎么配", "武器怎么配")):
-        candidates = ["riven_search", "query_events", "farming_route", "general_chat"]
+        candidates = ["riven_search", "query_events", "farming_route"]
     elif any(token in lowered for token in ("攻略", "打法", "机制", "怎么玩", "怎么打", "流程")):
-        candidates = ["query_events", "farming_route", "general_chat"]
+        candidates = ["query_events", "farming_route"]
     elif any(token in lowered for token in ("baro", "虚空商人", "奸商", "裂缝", "裂隙", "开核桃", "活动", "入侵", "虚空风暴", "重生", "返厂", "resurgence", "vault", "午夜电波", "电波", "nightwave", "仲裁", "arbitration", "突击", "sortie", "darvo", "每日特惠", "每日优惠", "扎里曼", "zariman", "赏金", "bounty", "平原", "希图斯", "金星", "火卫二", "周期")):
         candidates = ["query_events", "event_expert"]
     elif any(token in lowered for token in ("专家", "分析")):
         candidates = ["market_expert", "query_price", "price_trend", "plan", "query_set", "set_profit"]
     elif any(token in lowered for token in ("对比", "比较", "分别", "多个")):
         candidates = ["plan", "query_price", "price_trend", "market_expert", "query_set", "set_profit"]
+    elif any(token in lowered for token in ("计划", "规划", "目标", "路线图", "roadmap", "plan")):
+        candidates = ["plan", "investment_advisor", "mod_flipper", "set_profit", "query_price", "price_trend"]
     elif any(token in lowered for token in ("投资", "预算", "roi", "倒卖", "翻转", "利润", "赚", "套利")):
         candidates = ["investment_advisor", "mod_flipper", "set_profit", "market_expert", "query_price", "price_trend"]
     elif any(token in lowered for token in ("prime", "套装", "缺", "补齐", "拆件", "整套")):
@@ -202,6 +486,7 @@ def react_loop(
     model: str = config.REACT_MODEL,
     candidate_tools: set[str] | None = None,
     trace: AgentTrace | None = None,
+    plan_confirmation_token: str | None = None,
 ) -> str | None:
     """ReAct 循环：使用 Ollama 原生 tool calling 进行多步推理。
 
@@ -261,6 +546,8 @@ def react_loop(
         {"role": "user", "content": message},
     ]
 
+    _start_trace(trace, max_iterations=max_iterations)
+
     for iteration in range(1, max_iterations + 1):
         if trace is not None:
             trace.iterations = iteration
@@ -288,8 +575,33 @@ def react_loop(
         if plan_calls:
             plan = _parse_plan(plan_calls[0])
             if plan:
-                step_results = execute_plan(plan, tool_executor, trace=trace, iteration=iteration)
-                aggregated = _format_plan_results(plan.goal, step_results)
+                try:
+                    review = review_execution_plan(plan)
+                    _register_trace_plan(trace, plan, iteration=iteration, review=review)
+                    if not review.ok:
+                        confirmation = build_plan_confirmation_request(plan, review)
+                        if _plan_confirmation_token_matches(confirmation, plan_confirmation_token):
+                            confirmed_review = review_execution_plan(plan, require_verification=False)
+                            _register_trace_plan(trace, plan, iteration=iteration, review=confirmed_review)
+                            _mark_trace_plan_confirmed(trace, review)
+                            step_results = execute_plan(plan, tool_executor, trace=trace, iteration=iteration)
+                            aggregated = _format_plan_results(plan.goal, step_results)
+                            messages.append({"role": "assistant", "content": response})
+                            messages.append({"role": "tool", "content": aggregated})
+                            continue
+                        blocked_answer = _format_plan_review_blocked_message(review)
+                        if confirmation.confirmable:
+                            blocked_answer += (
+                                f" confirmation_required=true; confirmation_token={confirmation.confirmation_token}; "
+                                f"confirmable_reason={confirmation.blocked_reason}."
+                            )
+                        _finish_trace(trace, "plan_blocked", iteration=iteration, final_answer=blocked_answer)
+                        return blocked_answer
+                    step_results = execute_plan(plan, tool_executor, trace=trace, iteration=iteration)
+                    aggregated = _format_plan_results(plan.goal, step_results)
+                except Exception:
+                    _finish_trace(trace, "tool_error", iteration=iteration)
+                    raise
                 messages.append({"role": "assistant", "content": response})
                 messages.append({"role": "tool", "content": aggregated})
                 continue  # 让 LLM 从聚合结果中生成最终回答
@@ -297,7 +609,11 @@ def react_loop(
         # 执行普通工具调用并回传结果
         messages.append({"role": "assistant", "content": response})
         for tc in tool_calls:
-            result = _execute_tool_call_with_trace(tc, tool_executor, trace=trace, iteration=iteration)
+            try:
+                result = _execute_tool_call_with_trace(tc, tool_executor, trace=trace, iteration=iteration)
+            except Exception:
+                _finish_trace(trace, "tool_error", iteration=iteration)
+                raise
             messages.append({
                 "role": "tool",
                 "content": tool_result_model_context(tc.name, result, fallback=f"工具 {tc.name} 执行失败或无结果"),
@@ -305,6 +621,89 @@ def react_loop(
 
     _finish_trace(trace, "max_iterations", iteration=max_iterations)
     return None
+
+
+def _start_trace(trace: AgentTrace | None, *, max_iterations: int) -> None:
+    if trace is None:
+        return
+    trace.steps.clear()
+    trace.status = "running"
+    trace.started_at = time.time()
+    trace.ended_at = None
+    trace.duration_ms = None
+    trace.max_iterations = max(0, int(max_iterations))
+    trace.termination_reason = None
+    trace.iterations = 0
+    trace.final_answer = None
+    trace.plan = None
+
+
+def _register_trace_plan(
+    trace: AgentTrace | None,
+    plan: ExecutionPlan,
+    *,
+    iteration: int,
+    review: PlanReviewSummary | None = None,
+) -> PlanReviewSummary:
+    review = review or review_execution_plan(plan)
+    if trace is None:
+        return review
+    issues_by_step: dict[int, list[PlanReviewIssue]] = {}
+    for issue in review.issues:
+        issues_by_step.setdefault(issue.step_index, []).append(issue)
+    trace.plan = AgentPlanSnapshot(
+        goal=str(plan.goal or ""),
+        status="blocked" if not review.ok else "running",
+        iteration=iteration,
+        verification_note=review.verification_note,
+        blocked_reason=review.blocked_reason,
+        review=review,
+        steps=[
+            AgentPlanStep(
+                index=index,
+                tool_name=step.tool,
+                purpose=str(step.purpose or ""),
+                args_summary=_summarize_trace_arguments(step.arguments),
+                status=(
+                    "blocked"
+                    if issues_by_step.get(index)
+                    else "skipped"
+                    if not review.ok
+                    else "pending"
+                ),
+                verification_note=(
+                    f"plan_step_review=blocked; reason={_primary_plan_review_reason(issues_by_step.get(index, []))}"
+                    if issues_by_step.get(index)
+                    else "plan_step_review=ok"
+                ),
+                blocked_reason=_primary_plan_review_reason(issues_by_step.get(index, [])),
+            )
+            for index, step in enumerate(plan.steps, start=1)
+        ],
+    )
+    return review
+
+
+def _mark_trace_plan_confirmed(trace: AgentTrace | None, original_review: PlanReviewSummary) -> None:
+    if trace is None or trace.plan is None:
+        return
+    trace.plan.verification_note = (
+        "plan_review=confirmed; "
+        f"original_blocked_reason={original_review.blocked_reason or 'unknown'}; "
+        f"relaxed_review={trace.plan.verification_note}"
+    )
+
+
+def _mark_trace_plan_step(trace: AgentTrace | None, index: int, **updates) -> None:
+    plan = getattr(trace, "plan", None) if trace is not None else None
+    if plan is None:
+        return
+    for step in plan.steps:
+        if step.index == index:
+            for key, value in updates.items():
+                if hasattr(step, key):
+                    setattr(step, key, value)
+            return
 
 
 def _execute_tool_call_with_trace(
@@ -389,6 +788,10 @@ def _finish_trace(
         return
     trace.termination_reason = reason
     trace.iterations = max(trace.iterations, iteration)
+    trace.status = "error" if reason in {"model_error", "tool_error"} else "finished"
+    trace.ended_at = time.time()
+    if trace.started_at is not None:
+        trace.duration_ms = max(0.0, (trace.ended_at - trace.started_at) * 1000)
     if final_answer is not None:
         trace.final_answer = final_answer
 

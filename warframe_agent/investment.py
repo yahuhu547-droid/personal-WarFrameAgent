@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,8 @@ class PrimeInvestment:
     part_details: list[dict]  # 各部件价格明细
     set_item_id: str        # 套装 item_id
     trade_plan: dict | None = None
+    personal_score: float = 0.0
+    personal_reasons: list[str] | None = None
 
 
 _FIELD_SEPARATOR = " | "
@@ -75,6 +77,8 @@ def format_prime_investment_results_for_model(
             f"risk_level={_format_model_value(result.risk_level)}",
             f"volume_48h={result.volume_48h}",
             f"part_count={len(result.part_details)}",
+            f"personal_score={result.personal_score}",
+            f"personal_reasons={','.join(result.personal_reasons or [])}",
         ]
         lines.append(_FIELD_SEPARATOR.join(fields))
 
@@ -83,6 +87,22 @@ def format_prime_investment_results_for_model(
         lines.append(f"omitted={omitted}")
 
     return "\n".join(lines)
+
+
+def resolve_investment_preference_defaults(
+    memory,
+    *,
+    budget: int | None,
+    min_roi_pct: float | None,
+    fallback_budget: int,
+    fallback_min_roi_pct: float,
+) -> tuple[int, float]:
+    preferences = getattr(memory, "preferences", None)
+    preference_budget = getattr(preferences, "budget_max", 0) or 0
+    preference_roi = getattr(preferences, "min_roi_pct", 0) or 0
+    resolved_budget = budget if budget is not None else (preference_budget or fallback_budget)
+    resolved_min_roi = min_roi_pct if min_roi_pct is not None else (preference_roi or fallback_min_roi_pct)
+    return max(0, int(resolved_budget)), max(0.0, float(resolved_min_roi))
 
 
 def _assess_risk(volume_48h: int | None, supply_count: int, demand_count: int) -> str:
@@ -203,8 +223,8 @@ def analyze_prime_investment(
     set_buy_price = set_seller.platinum if set_seller else None  # 买套装的成本
     set_sell_price = set_buyer.platinum if set_buyer else None   # 卖套装的收入
 
-    all_supply += sum(1 for o in set_orders if o.get("order_type") == "sell")
-    all_demand += sum(1 for o in set_orders if o.get("order_type") == "buy")
+    all_supply += sum(1 for o in set_orders if (o.get("order_type") or o.get("type")) == "sell")
+    all_demand += sum(1 for o in set_orders if (o.get("order_type") or o.get("type")) == "buy")
 
     # 策略 A: 散买部件 → 整套卖出
     profit_a = (
@@ -342,6 +362,7 @@ def scan_prime_investments(
     min_roi_pct: float = 10.0,
     limit: int = 30,
     scout_fn: Callable[[list], list[str]] | None = None,
+    personal_profile=None,
 ) -> list[PrimeInvestment]:
     """扫描所有 Prime 套装，找出套利机会。"""
     groups = build_prime_groups(items)
@@ -357,23 +378,37 @@ def scan_prime_investments(
     # 智能预筛选
     if scout_fn is not None:
         try:
-            scouted_ids = scout_fn(all_candidates[:30])
+            scouted_ids = scout_fn(all_candidates)
             if scouted_ids:
                 id_set = set(scouted_ids)
                 candidates = [g for g in all_candidates if g.base_id in id_set]
                 logger.info("Scout 预筛选: %d → %d 个投资候选", len(all_candidates), len(candidates))
             else:
-                candidates = all_candidates[:30]
+                candidates = all_candidates
         except Exception as exc:
             logger.debug("Scout 预筛选失败，使用原始列表: %s", exc)
-            candidates = all_candidates[:30]
+            candidates = all_candidates
     else:
-        candidates = all_candidates[:30]
+        candidates = all_candidates
 
     results = []
-    for group in candidates[:30]:
+    for group in candidates:
         try:
             result = analyze_prime_investment(group, order_fetcher, budget)
+            if result and personal_profile is not None:
+                from .personal_scoring import score_personal_fit
+
+                fit = score_personal_fit(
+                    item_id=result.set_item_id,
+                    source="investment",
+                    strategy=(result.trade_plan or {}).get("strategy", result.strategy),
+                    total_cost=result.buy_cost,
+                    profit=result.total_profit,
+                    roi_pct=result.roi_pct,
+                    risk_level=result.risk_level,
+                    profile=personal_profile,
+                )
+                result = replace(result, personal_score=fit.personal_score, personal_reasons=fit.reasons)
             if result and result.roi_pct >= min_roi_pct:
                 results.append(result)
         except Exception as exc:
@@ -382,4 +417,6 @@ def scan_prime_investments(
 
     # 按 ROI% 降序排列
     results.sort(key=lambda r: r.roi_pct, reverse=True)
+    if personal_profile is not None:
+        results.sort(key=lambda r: (r.personal_score, r.total_profit, r.roi_pct), reverse=True)
     return results[:limit]

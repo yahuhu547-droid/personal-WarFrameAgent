@@ -1,7 +1,7 @@
 ﻿import unittest
 from unittest.mock import patch
 
-from warframe_agent.market import fetch_orders, clear_cache
+from warframe_agent.market import best_sellers, fetch_orders, clear_cache
 
 
 class MarketClientTests(unittest.TestCase):
@@ -43,6 +43,16 @@ class MarketClientTests(unittest.TestCase):
             orders = fetch_orders("arcane_energize")
 
         self.assertEqual(orders, [{"type": "sell", "platinum": 10}])
+
+    def test_best_sellers_rank_filter_excludes_unknown_rank_orders(self):
+        orders = [
+            {"type": "sell", "platinum": 1, "quantity": 1, "user": {"ingameName": "UnknownRank", "status": "ingame"}},
+            {"type": "sell", "platinum": 5, "quantity": 1, "rank": 0, "user": {"ingameName": "RankZero", "status": "ingame"}},
+        ]
+
+        sellers = best_sellers(orders, limit=2, rank_filter=0)
+
+        self.assertEqual([seller.user_name for seller in sellers], ["RankZero"])
 
 
 if __name__ == "__main__":

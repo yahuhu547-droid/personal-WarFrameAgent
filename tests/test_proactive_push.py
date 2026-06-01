@@ -299,6 +299,7 @@ def test_run_proactive_push_sanitizes_trade_plan_before_recording(mock_load, tmp
 
     push_fn.assert_called_once()
     records = db.get_push_history(item_name="arcane_energize")
+    quality = db.summarize_push_quality(item_name="arcane_energize", source="arcane_flip")
     db.close()
     assert len(records) == 1
     metadata = records[0].metadata
@@ -312,6 +313,12 @@ def test_run_proactive_push_sanitizes_trade_plan_before_recording(mock_load, tmp
     assert metadata["roi_pct"] == 42.9
     assert metadata["profit_bucket"] == "40_50"
     assert metadata["plan_signature"] == "sig-display-only"
+    assert len(quality) == 1
+    assert quality[0].source == "arcane_flip"
+    assert quality[0].strategy == "arcane_r0_to_r5"
+    assert quality[0].category == "arcane"
+    assert quality[0].sent_count == 1
+    assert quality[0].reviewed_count == 0
     assert "trade_plan" not in metadata
     assert "buy_steps" not in metadata
     assert "sell_steps" not in metadata
@@ -555,6 +562,132 @@ def test_run_proactive_push_deduplicates_before_limit(mock_load):
     assert [call.args[0].item_id for call in push_fn.call_args_list] == [
         "carrier_prime_set", "akarius_prime_set", "volt_prime_set",
     ]
+
+
+def _seed_push_quality(
+    db: TradingMemoryDB,
+    item_name: str,
+    *,
+    source: str,
+    strategy: str,
+    good: bool,
+    count: int = 5,
+) -> None:
+    for idx in range(count):
+        db.record_push(
+            "opportunity",
+            f"{item_name} history {idx}",
+            item_name=item_name,
+            metadata={
+                "source": "rule_proactive_push",
+                "opportunity_source": source,
+                "suggestion_type": "opportunity",
+                "strategy": strategy,
+                "profile_url": "https://warframe.market/profile/UnsafeHistory",
+                "whisper": "/w UnsafeHistory hi",
+            },
+        )
+        db.record_opportunity_outcome(
+            f"OPQ{idx}{item_name[:4]}",
+            item_name,
+            source,
+            strategy,
+            "completed" if good else "rejected",
+            50,
+            65 if good else 0,
+            "good" if good else "bad",
+            {"profile_url": "https://warframe.market/profile/UnsafeHistory"},
+        )
+
+
+@patch("warframe_agent.monitor.AgentMemory.load")
+def test_run_proactive_push_quality_tie_breaks_same_priority_with_enough_reviews(mock_load, tmp_path):
+    mock_load.return_value = AgentMemory(
+        preferences=TradingPreferences(),
+        price_alerts=[], favorite_items=[], common_questions=[], watchlist=[],
+    )
+    db = TradingMemoryDB(db_path=tmp_path / "trading_memory.db")
+    _seed_push_quality(db, "arcane_bad_quality", source="spread", strategy="quality_flip", good=False)
+    _seed_push_quality(db, "arcane_good_quality", source="spread", strategy="quality_flip", good=True)
+    push_fn = MagicMock()
+    monitor = PriceMonitor(on_proactive_push=push_fn, trading_memory_db=db)
+    scan = ScanResult(suggestions=[
+        ProactiveSuggestion(
+            item_id="arcane_bad_quality",
+            suggestion_type="opportunity",
+            priority=2,
+            message="bad quality first",
+            data={"source": "spread", "strategy": "quality_flip", "profit": 50},
+        ),
+        ProactiveSuggestion(
+            item_id="arcane_good_quality",
+            suggestion_type="opportunity",
+            priority=2,
+            message="good quality second",
+            data={"source": "spread", "strategy": "quality_flip", "profit": 50},
+        ),
+    ])
+
+    monitor._run_proactive_push(scan, MarketState())
+
+    assert [call.args[0].item_id for call in push_fn.call_args_list] == [
+        "arcane_good_quality",
+        "arcane_bad_quality",
+    ]
+    good_push = push_fn.call_args_list[0].args[0]
+    bad_push = push_fn.call_args_list[1].args[0]
+    assert good_push.data["push_quality_score"] == 1
+    assert bad_push.data["push_quality_score"] == -1
+    current_records = [
+        record for record in db.get_push_history(item_name="arcane_good_quality")
+        if record.metadata.get("dedupe_key")
+    ]
+    db.close()
+    assert len(current_records) == 1
+    metadata = current_records[0].metadata
+    assert metadata["push_quality_score"] == 1
+    assert metadata["push_quality_reviewed_count"] == 5
+    encoded = json.dumps(metadata, ensure_ascii=False)
+    for forbidden in ["UnsafeHistory", "warframe.market", "profile_url", "whisper", "/w"]:
+        assert forbidden not in encoded
+
+
+@patch("warframe_agent.monitor.AgentMemory.load")
+def test_run_proactive_push_quality_ignores_low_sample_history(mock_load, tmp_path):
+    mock_load.return_value = AgentMemory(
+        preferences=TradingPreferences(),
+        price_alerts=[], favorite_items=[], common_questions=[], watchlist=[],
+    )
+    db = TradingMemoryDB(db_path=tmp_path / "trading_memory.db")
+    _seed_push_quality(db, "arcane_low_bad", source="spread", strategy="quality_flip", good=False, count=2)
+    _seed_push_quality(db, "arcane_low_good", source="spread", strategy="quality_flip", good=True, count=2)
+    push_fn = MagicMock()
+    monitor = PriceMonitor(on_proactive_push=push_fn, trading_memory_db=db)
+    scan = ScanResult(suggestions=[
+        ProactiveSuggestion(
+            item_id="arcane_low_bad",
+            suggestion_type="opportunity",
+            priority=2,
+            message="low sample bad first",
+            data={"source": "spread", "strategy": "quality_flip", "profit": 50},
+        ),
+        ProactiveSuggestion(
+            item_id="arcane_low_good",
+            suggestion_type="opportunity",
+            priority=2,
+            message="low sample good second",
+            data={"source": "spread", "strategy": "quality_flip", "profit": 50},
+        ),
+    ])
+
+    monitor._run_proactive_push(scan, MarketState())
+
+    db.close()
+    assert [call.args[0].item_id for call in push_fn.call_args_list] == [
+        "arcane_low_bad",
+        "arcane_low_good",
+    ]
+    assert all("push_quality_score" not in call.args[0].data for call in push_fn.call_args_list)
 
 
 @patch("warframe_agent.monitor.evaluate_market_state", return_value=MarketState())

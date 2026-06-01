@@ -3,10 +3,13 @@ from __future__ import annotations
 
 from warframe_agent.set_profit import (
     SetProfitResult,
+    _count_orders,
     analyze_set_profit,
     format_set_profit_results_for_model,
     scan_all_set_profits,
 )
+from warframe_agent.memory import AgentMemory
+from warframe_agent.personal_profile import build_personal_profile
 from warframe_agent.warframes import PrimeGroup
 
 
@@ -35,6 +38,17 @@ def _mock_orders(item_id):
         ],
     }
     return data.get(item_id, [])
+
+
+def test_count_orders_accepts_type_field_orders():
+    orders = [
+        {"type": "sell", "platinum": 10, "quantity": 1},
+        {"type": "buy", "platinum": 12, "quantity": 1},
+        {"order_type": "sell", "platinum": 11, "quantity": 1},
+    ]
+
+    assert _count_orders(orders, "sell") == 2
+    assert _count_orders(orders, "buy") == 1
 
 
 def test_analyze_single_set():
@@ -384,6 +398,46 @@ def test_scan_all_set_profits_sorts_by_opportunity_score(monkeypatch):
     assert [result.base_id for result in results] == ["fast_prime", "slow_prime"]
 
 
+def test_scan_all_set_profits_applies_personal_profile_sorting(monkeypatch):
+    safe_fit = _result(
+        "safe_prime", "Safe Prime", "buy_parts_sell_set", 20,
+        best_cost=50,
+        roi_pct=40,
+        risk_level="low",
+        opportunity_score=20,
+    )
+    risky_market = _result(
+        "risky_prime", "Risky Prime", "buy_parts_sell_set", 45,
+        best_cost=50,
+        roi_pct=90,
+        risk_level="high",
+        opportunity_score=120,
+    )
+    groups = {
+        "risky_prime": PrimeGroup(base_id="risky_prime", items={"set": "risky_prime_set", "blueprint": "risky_prime_blueprint"}, en_title="Risky Prime"),
+        "safe_prime": PrimeGroup(base_id="safe_prime", items={"set": "safe_prime_set", "blueprint": "safe_prime_blueprint"}, en_title="Safe Prime"),
+    }
+    monkeypatch.setattr("warframe_agent.set_profit.build_prime_groups", lambda items: groups)
+
+    def fake_analyze(group, order_fetcher):
+        return risky_market if group.base_id == "risky_prime" else safe_fit
+
+    monkeypatch.setattr("warframe_agent.set_profit.analyze_set_profit", fake_analyze)
+    memory = AgentMemory.default().with_updated_preferences(
+        risk_appetite="low",
+        budget_min=1,
+        budget_max=100,
+        preferred_categories=["prime_set"],
+        min_roi_pct=20,
+    )
+    profile = build_personal_profile(memory)
+
+    results = scan_all_set_profits([{}], min_profit=1, limit=2, personal_profile=profile)
+
+    assert [result.base_id for result in results] == ["safe_prime", "risky_prime"]
+    assert results[0].personal_score > results[1].personal_score
+
+
 def test_format_set_profit_results_for_model_includes_scores_without_trade_targets():
     result = _result(
         "rhino_prime", "Rhino Prime", "买部件→卖套装", 25,
@@ -415,3 +469,64 @@ def test_format_set_profit_results_for_model_includes_scores_without_trade_targe
     assert "demand_count=1" in formatted
     for forbidden in ["SecretSeller", "profile", "/w", "whisper", "buy_steps"]:
         assert forbidden not in formatted
+
+
+def test_set_profit_result_can_carry_personal_score():
+    result = SetProfitResult(
+        base_id="gauss_prime",
+        display_name="Gauss Prime",
+        set_buy_price=100,
+        parts_sell_total=120,
+        set_sell_price=130,
+        parts_buy_total=90,
+        profit_buy_parts_sell_set=30,
+        profit_buy_set_sell_parts=20,
+        best_strategy="买部件→卖套装",
+        best_profit=30,
+        volume_48h=20,
+        part_count=4,
+        best_cost=100,
+        best_revenue=130,
+        roi_pct=30.0,
+        personal_score=88.5,
+        personal_reasons=["预算匹配", "偏好品类匹配"],
+    )
+
+    assert result.personal_score == 88.5
+    assert result.personal_reasons == ["预算匹配", "偏好品类匹配"]
+
+def test_scan_all_set_profits_considers_candidates_after_first_15(monkeypatch):
+    groups = {
+        f"item_{index}_prime": PrimeGroup(
+            base_id=f"item_{index}_prime",
+            items={
+                "set": f"item_{index}_prime_set",
+                "blueprint": f"item_{index}_prime_blueprint",
+            },
+            en_title=f"Item {index} Prime",
+        )
+        for index in range(15)
+    }
+    groups["late_item_prime"] = PrimeGroup(
+        base_id="late_item_prime",
+        items={"set": "late_item_prime_set", "blueprint": "late_item_prime_blueprint"},
+        en_title="Late Item Prime",
+    )
+    monkeypatch.setattr("warframe_agent.set_profit.build_prime_groups", lambda items: groups)
+
+    def fake_analyze(group, order_fetcher):
+        if group.base_id != "late_item_prime":
+            return None
+        return _result(
+            "late_item_prime",
+            "Late Item Prime",
+            "buy_parts_sell_set",
+            50,
+            opportunity_score=50,
+        )
+
+    monkeypatch.setattr("warframe_agent.set_profit.analyze_set_profit", fake_analyze)
+
+    results = scan_all_set_profits([{}], min_profit=1, limit=5)
+
+    assert [result.base_id for result in results] == ["late_item_prime"]

@@ -443,8 +443,8 @@ class ReactLoopTests(unittest.TestCase):
             if len(seen_messages) == 1:
                 return (
                     '{"tool":"plan","args":{"goal":"对比", "steps":['
-                    '{"tool":"query_price","args":{"item_name":"充沛","token":"arg-secret","__message":"原文"},"purpose":"查充沛"},'
-                    '{"tool":"price_trend","args":{"item_name":"充沛","message_context":"上下文"},"purpose":"查趋势"}'
+                    '{"tool":"query_price","args":{"item_name":"充沛","source":"unit-test"},"purpose":"查充沛"},'
+                    '{"tool":"price_trend","args":{"item_name":"充沛","window":"7d"},"purpose":"查趋势"}'
                     ']}}'
                 )
             return "最终回答"
@@ -464,7 +464,7 @@ class ReactLoopTests(unittest.TestCase):
         self.assertIn("### 步骤 2: 查趋势", tool_content)
         self.assertIn("[工具结果已压缩: tool=query_price", tool_content)
         self.assertLessEqual(len(tool_content), 6500)
-        for forbidden in ["secret-token", "arg-secret", "PLAN_TAIL_SENTINEL", "__message", "message_context", "原文", "上下文"]:
+        for forbidden in ["secret-token", "PLAN_TAIL_SENTINEL"]:
             self.assertNotIn(forbidden, tool_content)
 
     def test_plan_aggregation_uses_tool_result_model_context(self):

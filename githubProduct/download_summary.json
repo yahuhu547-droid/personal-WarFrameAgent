@@ -1,50 +1,183 @@
-[
-  {
-    "repo": "leonardodalinky/pywmapi",
-    "status": "downloaded",
-    "branch": "main",
-    "target": "F:\\giteeProject\\warframe\\githubProduct\\pywmapi"
-  },
-  {
-    "repo": "JonathanSourdough/Warframe-Market-Overlay",
-    "status": "downloaded",
-    "branch": "master",
-    "target": "F:\\giteeProject\\warframe\\githubProduct\\Warframe-Market-Overlay"
-  },
-  {
-    "repo": "Emanem/wfdrops",
-    "status": "downloaded",
-    "branch": "main",
-    "target": "F:\\giteeProject\\warframe\\githubProduct\\wfdrops"
-  },
-  {
-    "repo": "GamerNoTitle/AaTMbot",
-    "status": "downloaded",
-    "branch": "master",
-    "target": "F:\\giteeProject\\warframe\\githubProduct\\AaTMbot"
-  },
-  {
-    "repo": "cjtho/WarframeRivenPricer",
-    "status": "downloaded",
-    "branch": "main",
-    "target": "F:\\giteeProject\\warframe\\githubProduct\\WarframeRivenPricer"
-  },
-  {
-    "repo": "kronthto/warframe-relic-value",
-    "status": "downloaded",
-    "branch": "master",
-    "target": "F:\\giteeProject\\warframe\\githubProduct\\warframe-relic-value"
-  },
-  {
-    "repo": "Engusseus/Warframe-Market-Set-Profit-Analyzer",
-    "status": "downloaded",
-    "branch": "main",
-    "target": "F:\\giteeProject\\warframe\\githubProduct\\Warframe-Market-Set-Profit-Analyzer"
-  },
-  {
-    "repo": "Luis-Munu/Warframe-Market-deal-finder",
-    "status": "downloaded",
-    "branch": "Update-1.6.0-Tons-of-stuff",
-    "target": "F:\\giteeProject\\warframe\\githubProduct\\Warframe-Market-deal-finder"
+{
+  "updated_at": "2026-05-29",
+  "projects": [
+    {
+      "name": "PaddleOCR",
+      "url": "https://github.com/PaddlePaddle/PaddleOCR",
+      "path": "githubProduct/PaddleOCR",
+      "purpose": "Chinese OCR and document/UI text recognition"
+    },
+    {
+      "name": "PySceneDetect",
+      "url": "https://github.com/Breakthrough/PySceneDetect",
+      "path": "githubProduct/PySceneDetect",
+      "purpose": "video scene detection and keyframe extraction"
+    },
+    {
+      "name": "imagehash",
+      "url": "https://github.com/JohannesBuchner/imagehash",
+      "path": "githubProduct/imagehash",
+      "purpose": "perceptual hash icon similarity"
+    },
+    {
+      "name": "ultralytics",
+      "url": "https://github.com/ultralytics/ultralytics",
+      "path": "githubProduct/ultralytics",
+      "purpose": "YOLO region detection training/inference reference"
+    },
+    {
+      "name": "label-studio",
+      "url": "https://github.com/HumanSignal/label-studio",
+      "path": "githubProduct/label-studio",
+      "purpose": "human review and multimodal labeling"
+    },
+    {
+      "name": "cvat",
+      "url": "https://github.com/cvat-ai/cvat",
+      "path": "githubProduct/cvat",
+      "purpose": "image/video bounding box annotation"
+    },
+    {
+      "name": "warframe-items",
+      "url": "https://github.com/WFCD/warframe-items",
+      "path": "githubProduct/warframe-items",
+      "purpose": "Warframe item/icon metadata source"
+    }
+  ],
+  "previous_references": [
+    {
+      "repo": "leonardodalinky/pywmapi",
+      "purpose": "warframe.market API reference"
+    },
+    {
+      "repo": "JonathanSourdough/Warframe-Market-Overlay",
+      "purpose": "Warframe market overlay reference"
+    },
+    {
+      "repo": "Emanem/wfdrops",
+      "purpose": "Warframe drop data reference"
+    },
+    {
+      "repo": "GamerNoTitle/AaTMbot",
+      "purpose": "automation assistant reference"
+    },
+    {
+      "repo": "cjtho/WarframeRivenPricer",
+      "purpose": "Riven price reference"
+    },
+    {
+      "repo": "kronthto/warframe-relic-value",
+      "purpose": "relic value reference"
+    },
+    {
+      "repo": "Engusseus/Warframe-Market-Set-Profit-Analyzer",
+      "purpose": "set profit reference"
+    },
+    {
+      "repo": "Luis-Munu/Warframe-Market-deal-finder",
+      "purpose": "market opportunity reference"
+    }
+  ],
+  "personal_agent_projects": [
+    {
+      "name": "CowAgent",
+      "url": "https://github.com/zhayujie/CowAgent",
+      "path": "githubProduct/CowAgent",
+      "commit": "2e6d9e0",
+      "status": "downloaded",
+      "learning_status": "read_reported",
+      "primary_learning_focus": "Chinese personal Agent harness with channels, planning, memory, tools, skills, scheduler, MCP, and browser support",
+      "warframe_mapping": "Runtime status, ToolRegistry safety summary, natural-language command bridges, and future multi-channel control surface",
+      "remaining_gap": "CowAgent-style channels, scheduler task creation, skills, and MCP hot-reload are not yet first-class Warframe Agent product features"
+    },
+    {
+      "name": "OpenManus",
+      "url": "https://github.com/FoundationAgents/OpenManus",
+      "path": "githubProduct/OpenManus",
+      "commit": "52a13f2",
+      "status": "downloaded",
+      "learning_status": "smoke_import_passed",
+      "primary_learning_focus": "Minimal ReAct and tool-calling loop with browser, file editor, AskHuman, and terminate tools",
+      "warframe_mapping": "Agent Trace, AgentRun lifecycle, AgentPlan snapshot, planning mode, and safe tool-observation UI",
+      "remaining_gap": "Browser and GUI automation remain mostly verification-only in Warframe Agent, not an end-user Agent capability"
+    },
+    {
+      "name": "LangManus",
+      "url": "https://github.com/Darwin-lfl/langmanus",
+      "path": "githubProduct/langmanus",
+      "commit": "a69eabf",
+      "status": "downloaded",
+      "learning_status": "read_reported",
+      "primary_learning_focus": "Coordinator, planner, supervisor, researcher, coder, browser, and reporter multi-agent workflow",
+      "warframe_mapping": "Next architecture decision for whether Warframe Agent needs explicit roles beyond single Agent plus tool routing",
+      "remaining_gap": "No productized coordinator/planner/supervisor/reporter split exists yet inside Warframe Agent"
+    },
+    {
+      "name": "OpenHuman",
+      "url": "https://github.com/tinyhumansai/openhuman",
+      "path": "githubProduct/OpenHuman",
+      "commit": "d997394",
+      "status": "downloaded",
+      "learning_status": "read_reported",
+      "primary_learning_focus": "Local-first long-term memory, Memory Tree, Obsidian-style Markdown vault, channels, model routing, and voice",
+      "warframe_mapping": "Personal profile, safe conversation log vault, memory recall trace, and long-term preference summaries",
+      "remaining_gap": "Inspectable Markdown/Obsidian-style knowledge vault and personal data connector ingestion are not yet implemented"
+    },
+    {
+      "name": "EchoBot",
+      "url": "https://github.com/KdaiP/EchoBot",
+      "path": "githubProduct/EchoBot",
+      "commit": "08e97a4",
+      "status": "downloaded",
+      "learning_status": "read_reported",
+      "primary_learning_focus": "Decision, Roleplay, and Agent split for persona response, voice/Live2D UX, skills, async tasks, and long-term memory",
+      "warframe_mapping": "Chat mode layering, natural-language confirmations, and separation of immediate user-facing replies from safe background actions",
+      "remaining_gap": "Persona, voice, Live2D, and fast companion reply versus slow background task orchestration are not yet migrated"
+    },
+    {
+      "name": "Open-AutoGLM",
+      "url": "https://github.com/zai-org/Open-AutoGLM",
+      "path": "githubProduct/Open-AutoGLM",
+      "commit": "86f5538",
+      "status": "downloaded",
+      "learning_status": "runtime_deferred",
+      "primary_learning_focus": "Phone and GUI Agent loop with visual-language perception, ADB/HDC actions, sensitive-action confirmation, and human takeover",
+      "warframe_mapping": "Safety-confirmed action design and future browser or GUI automation boundary planning",
+      "remaining_gap": "No phone, desktop GUI, or VLM action loop is implemented; current Playwright use is test verification"
+    },
+    {
+      "name": "OpenClaw",
+      "url": "https://github.com/openclaw/openclaw",
+      "path": "githubProduct/OpenClaw",
+      "commit": "5d018034",
+      "status": "downloaded",
+      "learning_status": "read_reported",
+      "primary_learning_focus": "Always-on personal assistant gateway with channels, extensions, skills, memory, voice, canvas, and plugins",
+      "warframe_mapping": "Runtime control panel, safety policy visibility, future channel/extension boundary, and installable skill conventions",
+      "remaining_gap": "Gateway, extensions, channel routing, voice, canvas, and plugin ecosystem are not yet Warframe Agent product layers"
+    },
+    {
+      "name": "Suna / Kortix",
+      "url": "https://github.com/kortix-ai/suna",
+      "path": "githubProduct/suna",
+      "commit": "5f725f7",
+      "status": "downloaded",
+      "learning_status": "runtime_deferred",
+      "primary_learning_focus": "Full-stack generalist Agent runtime with sandbox computer, persistent workspace, skills, triggers, and 24/7 product surface",
+      "warframe_mapping": "Runtime status, scheduler visibility, background task boundaries, and future long-running operations model",
+      "remaining_gap": "Persistent sandbox computer, triggers, service recovery, and full deployment operations are not yet implemented"
+    }
+  ],
+  "route_repair": {
+    "reason": "Context compaction audit found download_summary was older than the personal Agent checklist and did not represent the later route.",
+    "ledger": "githubProduct/personal_agent_learning_route_ledger_zh.md",
+    "rebuilt_sync": "md/rebuilt/10-learning-route-audit.md",
+    "next_recommended_task": "multi-agent role architecture decision based on LangManus, OpenManus, and Suna",
+    "phase_review": {
+      "updated_at": "2026-05-29",
+      "document": "githubProduct/personal_agent_warframe_migration_step40_learning_phase_review_zh.md",
+      "summary": "Step 34-39 covered the main personal Agent learning queue; future work should be selected as next-phase branches rather than continuing the old queue mechanically.",
+      "validation_debt": "Step 39 Web API target test still needs a writable runtime rerun; the 2026-05-29 escalation attempt was interrupted by the user."
+    }
   }
-]
+}

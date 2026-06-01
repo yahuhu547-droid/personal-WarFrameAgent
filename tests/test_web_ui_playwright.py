@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import time
@@ -66,6 +67,8 @@ def _configure_page(page: Page):
         "trading_memory_error_endpoint": "",
         "runtime_status": "ok",
         "runtime_error": False,
+        "chat_error_status": None,
+        "chat_error_payload": {},
     }
 
     page.add_init_script("""
@@ -89,6 +92,10 @@ def _configure_page(page: Page):
         window.WebSocket = class MockWebSocket {
             constructor() {
                 this.readyState = 0;
+                if (window.__forceChatWsPending) {
+                    window.__mockWs = this;
+                    return;
+                }
                 setTimeout(() => {
                     this.readyState = 1;
                     window.__mockWs = this;
@@ -99,6 +106,10 @@ def _configure_page(page: Page):
                 window.__lastWsPayload = payload;
                 const message = JSON.parse(payload).message;
                 setTimeout(() => {
+                    if (message.includes('ws error regression')) {
+                        this.onmessage && this.onmessage({ data: JSON.stringify({ status: 'error', message: 'WS backend exploded' }) });
+                        return;
+                    }
                     const reply = message.includes('xss regression')
                         ? `**安全回复** ${window.__xssPayload}\\n\\n${window.__whisperPayload}`
                         : `模拟查价回复: ${message}`;
@@ -180,11 +191,295 @@ def _configure_page(page: Page):
                             {"task_id": "goal-1", "status": "error", "age_seconds": 20, "goal_id": "goal-a", "error_summary": "[REDACTED]"},
                         ],
                     },
+                    "ops_health": {
+                        "status": "degraded",
+                        "reason_count": 3,
+                        "reasons": ["scheduler_job_failed", "background_task_error", "feishu_not_running"],
+                        "components": {
+                            "scheduler": {
+                                "status": "degraded",
+                                "running": True,
+                                "job_count": 2,
+                                "failed_job_count": 1,
+                                "running_job_count": 0,
+                            },
+                            "background_tasks": {"status": "degraded", "running": 1, "error": 1, "total": 2},
+                            "feishu": {"status": "ok", "enabled": True, "configured": True, "running": True},
+                            "wxpusher": {"status": "ok", "enabled": True, "configured": True, "available": True},
+                            "daily_report": {"status": "ok", "enabled": True, "should_send_now": False},
+                        },
+                    },
+                    "learning_completion": {
+                        "policy_version": "2026-05-31.learning-completion-v1",
+                        "status": "complete",
+                        "acceptance_status": "accepted",
+                        "legacy_non_voice_learning_complete": True,
+                        "improvement_closure_complete": True,
+                        "runtime_enablement_changed": False,
+                        "completed_step_count": 17,
+                        "completed_steps": [
+                            "step44_plugin_policy",
+                            "step45_runtime_policy_visibility",
+                            "step46_non_voice_learning_closure",
+                            "step47_final_playwright_closure",
+                            "step48_future_capability_admission",
+                            "step49_future_capability_runtime_visibility",
+                            "step50_learning_completion_runtime_snapshot",
+                        ],
+                        "improvement_steps": [
+                            "step48_future_capability_admission",
+                            "step49_future_capability_runtime_visibility",
+                        ],
+                        "frozen_surfaces": ["real_voice_runtime", "tts", "stt", "microphone", "recording", "live2d", "background_listening"],
+                        "next_stage_required": ["browser_gui_executor", "service_recovery", "arbitrary_trigger_platform", "plugin_install", "connector_enable"],
+                        "acceptance_snapshot": {
+                            "latest_closure_step": "step50_learning_completion_runtime_snapshot",
+                            "acceptance_record_step": "step51_learning_completion_acceptance_snapshot",
+                            "all_items_passed": True,
+                            "checklist_count": 8,
+                            "checklist": [
+                                {
+                                    "id": "legacy_non_voice_learning_route_complete",
+                                    "status": "passed",
+                                    "evidence": "step47_final_playwright_closure",
+                                    "runtime_enabled": True,
+                                },
+                                {
+                                    "id": "runtime_high_privilege_not_enabled",
+                                    "status": "passed",
+                                    "evidence": "future_capability_admission.enabled_false",
+                                    "runtime_enabled": False,
+                                },
+                                {
+                                    "id": "real_voice_runtime_frozen",
+                                    "status": "passed",
+                                    "evidence": "current_user_instruction_freeze",
+                                    "runtime_enabled": False,
+                                },
+                                {
+                                    "id": "step50_closure_snapshot_present",
+                                    "status": "passed",
+                                    "evidence": "step50_learning_completion_runtime_snapshot",
+                                    "runtime_enabled": True,
+                                },
+                            ],
+                        },
+                    },
+                    "safety_policy": {
+                        "policy_version": "test-policy",
+                        "default_mode": "read_only",
+                        "capabilities": {
+                            "multi_channel_gateway": {
+                                "available": True,
+                                "default": "restricted",
+                                "requires_explicit_enable": False,
+                                "enabled": True,
+                                "scope": "web_chat_ws_cli_and_configured_push_only",
+                            },
+                            "skills_plugin_ecosystem": {
+                                "available": True,
+                                "default": "guidance_only",
+                                "requires_explicit_enable": False,
+                                "enabled": True,
+                                "scope": "local_skills_guidance_and_reviewed_plugins_only",
+                            },
+                            "future_capability_admission": {
+                                "available": True,
+                                "default": "design_required",
+                                "requires_explicit_enable": True,
+                                "enabled": False,
+                                "scope": "future_high_risk_features_policy_only",
+                            },
+                        },
+                        "gateway_policy": {
+                            "default_mode": "explicit_gateway_only",
+                            "automatic_inbound_execution_enabled": False,
+                            "anonymous_inbound_enabled": False,
+                            "outbound_push_requires_configuration": True,
+                            "decision_counts": {
+                                "allow_interactive_chat": 1,
+                                "requires_existing_confirmation_flow": 1,
+                                "blocked_public_or_anonymous_inbound": 2,
+                            },
+                            "gateway_matrix": [
+                                {
+                                    "channel": "web_chat",
+                                    "action": "message",
+                                    "decision": "allow_interactive_chat",
+                                    "trust_boundary": "local_user_interactive",
+                                    "reason": "interactive_user_channel",
+                                },
+                                {
+                                    "channel": "anonymous_webhook",
+                                    "action": "message",
+                                    "decision": "blocked_public_or_anonymous_inbound",
+                                    "trust_boundary": "public_or_anonymous_inbound",
+                                    "reason": "public_or_anonymous_inbound_not_trusted",
+                                    "raw_payload": "GatewayLeak token=secret-token /w PlayerSecret",
+                                },
+                            ],
+                        },
+                        "plugin_policy": {
+                            "default_mode": "guidance_only",
+                            "plugin_runtime_enabled": False,
+                            "connector_runtime_enabled": False,
+                            "automatic_tool_install_enabled": False,
+                            "decision_counts": {
+                                "allow_guidance_only": 1,
+                                "requires_review": 1,
+                                "blocked_high_risk_capability": 1,
+                            },
+                            "capability_matrix": [
+                                {
+                                    "source": "local_skill",
+                                    "capability": "prompt_guidance",
+                                    "decision": "allow_guidance_only",
+                                    "trust_boundary": "local_guidance",
+                                    "reason": "skill_guidance_only_no_runtime_tool",
+                                },
+                                {
+                                    "source": "personal_plugin",
+                                    "capability": "shell",
+                                    "decision": "blocked_high_risk_capability",
+                                    "trust_boundary": "installed_local_extension",
+                                    "reason": "high_risk_capability_not_exposed",
+                                    "raw_manifest": "handler=run api_key=secret-token account_id=account-123",
+                                },
+                            ],
+                        },
+                        "future_capability_policy": {
+                            "default_mode": "design_required_before_runtime",
+                            "runtime_enablement_allowed": False,
+                            "automatic_enable_enabled": False,
+                            "design_review_required": True,
+                            "human_confirmation_required_before_runtime": True,
+                            "decision_counts": {
+                                "requires_new_stage_design": 1,
+                                "blocked_uncontrolled_runtime": 1,
+                            },
+                            "capability_matrix": [
+                                {
+                                    "capability": "browser_gui_executor",
+                                    "decision": "requires_new_stage_design",
+                                    "trust_boundary": "future_high_privilege_surface",
+                                    "runtime_enabled": False,
+                                    "requires_explicit_user_approval": True,
+                                    "reason": "future_capability_requires_permissions_confirmation_interrupts_and_audit_design",
+                                    "raw_plan": "token=secret-token /w PlayerSecret",
+                                    "private_network_url": "http://127.0.0.1/admin",
+                                },
+                                {
+                                    "capability": "shell",
+                                    "decision": "blocked_uncontrolled_runtime",
+                                    "trust_boundary": "uncontrolled_runtime_surface",
+                                    "runtime_enabled": False,
+                                    "requires_explicit_user_approval": True,
+                                    "reason": "uncontrolled_runtime_capability_not_exposed",
+                                    "params": "api_key=secret-token account_id=user-123",
+                                },
+                            ],
+                        },
+                        "tool_registry": {
+                            "tool_count": 3,
+                            "exposed_schema_count": 2,
+                            "private_schema_count": 1,
+                            "side_effect_count": 1,
+                            "safety_levels": {"read_only": 2, "external_side_effect": 1},
+                            "skills": {"market_price": 2, "monitoring": 1},
+                            "context_policies": {"default": 2, "safe_aggregate_only": 1},
+                        },
+                    },
                     "recent_tool_calls": {
                         "count": 1,
                         "items": [
                             {"tool_name": "query_price", "ok": True, "duration_ms": 8.5, "args_summary": {"item_name": "arcane_energize"}, "error_summary": "", "tool_timestamp": "tool-time"},
                         ],
+                    },
+                    "agent_trace": {
+                        "present": True,
+                        "status": "finished",
+                        "started_at": 100.0,
+                        "ended_at": 102.5,
+                        "max_iterations": 3,
+                        "duration_ms": 2500.0,
+                        "termination_reason": "final_answer",
+                        "iterations": 2,
+                        "step_count": 1,
+                        "steps": [
+                            {
+                                "iteration": 1,
+                                "tool_name": "query_price",
+                                "ok": True,
+                                "duration_ms": 8.5,
+                                "args_summary": {"item_name": "arcane_energize"},
+                                "has_result": True,
+                                "result_chars": 20,
+                                "error_present": True,
+                                "error_summary": "secret-token ErrorSeller /w leak",
+                                "raw_arguments": {"token": "secret-token"},
+                                "result_summary": "secret-token PlayerSecret /w leak",
+                            },
+                        ],
+                        "plan": {
+                            "present": True,
+                            "status": "completed",
+                            "iteration": 1,
+                            "goal_present": True,
+                            "goal": "比较两个物品 [REDACTED]",
+                            "step_count": 2,
+                            "verification_note": "plan_review=blocked; issues=1; unknown=0; side_effect=0; sensitive_args=1; verification=0",
+                            "blocked_reason": "sensitive_arguments",
+                            "review": {
+                                "present": True,
+                                "status": "blocked",
+                                "verification_note": "plan_review=blocked; issues=1; unknown=0; side_effect=0; sensitive_args=1; verification=0",
+                                "blocked_reason": "sensitive_arguments",
+                                "issue_count": 1,
+                                "unknown_tool_count": 0,
+                                "non_exposed_tool_count": 0,
+                                "side_effect_tool_count": 0,
+                                "sensitive_argument_count": 1,
+                                "verification_gap_count": 0,
+                            },
+                            "raw_arguments": {"token": "secret-token"},
+                            "result_summary": "secret-token PlayerSecret /w leak",
+                            "steps": [
+                                {
+                                    "index": 1,
+                                    "tool_name": "query_price",
+                                    "purpose": "查价",
+                                    "args_summary": {
+                                        "item_name": "arcane_energize",
+                                        "token": "secret-token",
+                                        "whisper": "/w PlayerSecret hi",
+                                    },
+                                    "status": "completed",
+                                    "ok": True,
+                                    "error_present": False,
+                                    "duration_ms": 6.5,
+                                    "result_present": True,
+                                    "verification_note": "plan_step_review=blocked; reason=sensitive_arguments",
+                                    "blocked_reason": "sensitive_arguments",
+                                    "raw_arguments": {"token": "secret-token"},
+                                    "result_summary": "secret-token PlayerSecret /w leak",
+                                },
+                                {
+                                    "index": 2,
+                                    "tool_name": "price_trend",
+                                    "purpose": "看趋势",
+                                    "args_summary": {"item_name": "arcane_energize"},
+                                    "status": "failed",
+                                    "ok": False,
+                                    "error_present": True,
+                                    "duration_ms": 3.2,
+                                    "result_present": False,
+                                    "verification_note": "plan_step_review=ok",
+                                    "blocked_reason": "",
+                                },
+                            ],
+                        },
+                        "final_answer_present": True,
+                        "final_answer": "secret final answer",
                     },
                 })
         elif "/api/tool-calls/history" in url and method == "GET":
@@ -239,6 +534,13 @@ def _configure_page(page: Page):
         elif url.endswith("/api/chat") and method == "POST":
             message = json.loads(request.post_data or "{}").get("message", "")
             state["chat_messages"].append(message)
+            if state["chat_error_status"]:
+                route.fulfill(
+                    status=state["chat_error_status"],
+                    headers={"Content-Type": "application/json; charset=utf-8"},
+                    body=json.dumps(state["chat_error_payload"]),
+                )
+                return
             reply = f"**安全回复** {XSS_TEXT}\n\n{WHISPER_TEXT}" if "xss regression" in message else "模拟查价回复"
             json_response(route, {"reply": reply})
         elif "/api/relic/drops/Lith/B1" in url and method == "GET":
@@ -450,6 +752,101 @@ def _configure_page(page: Page):
                     headers={"Content-Type": "application/json; charset=utf-8"},
                     body=json.dumps({"detail": "mock trading memory failure"}),
                 )
+            elif "push-quality" in url:
+                json_response(route, {
+                    "push_quality": [] if state["trading_memory_empty"] else [
+                        {
+                            "item_name": "arcane_pending",
+                            "source": "spread",
+                            "strategy": "quality_flip",
+                            "category": "arcane",
+                            "sent_count": 3,
+                            "reviewed_count": 0,
+                            "completed_count": 0,
+                            "accepted_count": 0,
+                            "rejected_count": 0,
+                            "pending_count": 3,
+                            "good_count": 0,
+                            "bad_count": 0,
+                            "avg_expected_profit": 0.0,
+                            "avg_actual_profit": 0.0,
+                            "avg_profit_delta": 0.0,
+                            "good_rate": 0.0,
+                            "completion_rate": 0.0,
+                            "rejection_rate": 0.0,
+                            "false_positive_rate": 0.0,
+                            "profile_url": "https://warframe.market/profile/QualityLeak",
+                            "market_url": "https://warframe.market/items/quality_leak",
+                            "whisper": "/w QualityLeak secret",
+                            "player_name": "QualityLeak",
+                            "metadata": {"raw": "/w QualityLeak secret"},
+                        },
+                        {
+                            "item_name": "arcane_good",
+                            "source": "spread",
+                            "strategy": "good_flip",
+                            "category": "arcane",
+                            "sent_count": 8,
+                            "reviewed_count": 5,
+                            "completed_count": 4,
+                            "accepted_count": 0,
+                            "rejected_count": 1,
+                            "pending_count": 0,
+                            "good_count": 4,
+                            "bad_count": 1,
+                            "avg_expected_profit": 50.0,
+                            "avg_actual_profit": 61.0,
+                            "avg_profit_delta": 11.0,
+                            "good_rate": 0.8,
+                            "completion_rate": 0.8,
+                            "rejection_rate": 0.2,
+                            "false_positive_rate": 0.2,
+                        },
+                        {
+                            "item_name": "arcane_risky",
+                            "source": "auction",
+                            "strategy": "risky_flip",
+                            "category": "arcane",
+                            "sent_count": 6,
+                            "reviewed_count": 4,
+                            "completed_count": 1,
+                            "accepted_count": 0,
+                            "rejected_count": 3,
+                            "pending_count": 0,
+                            "good_count": 1,
+                            "bad_count": 3,
+                            "avg_expected_profit": 40.0,
+                            "avg_actual_profit": 20.0,
+                            "avg_profit_delta": -20.0,
+                            "good_rate": 0.1,
+                            "completion_rate": 0.25,
+                            "rejection_rate": 0.75,
+                            "false_positive_rate": 0.75,
+                        },
+                        {
+                            "item_name": "arcane_observe",
+                            "source": "watchlist",
+                            "strategy": "steady_watch",
+                            "category": "arcane",
+                            "sent_count": 5,
+                            "reviewed_count": 5,
+                            "completed_count": 2,
+                            "accepted_count": 0,
+                            "rejected_count": 1,
+                            "pending_count": 0,
+                            "good_count": 2,
+                            "bad_count": 2,
+                            "avg_expected_profit": 30.0,
+                            "avg_actual_profit": 30.0,
+                            "avg_profit_delta": 0.0,
+                            "good_rate": 0.4,
+                            "completion_rate": 0.4,
+                            "rejection_rate": 0.2,
+                            "false_positive_rate": 0.3,
+                        },
+                    ],
+                    "count": 0 if state["trading_memory_empty"] else 4,
+                })
             elif "market-snapshots" in url:
                 json_response(route, {
                     "market_snapshots": [] if state["trading_memory_empty"] else [
@@ -625,6 +1022,78 @@ def test_chat_and_more_menu_panels_still_work(page_with_api):
     assert state["page_errors"] == []
 
 
+def test_send_chat_normalizes_non_ok_response_with_backend_detail(page_with_api):
+    page, state = page_with_api
+    state["chat_error_status"] = 503
+    state["chat_error_payload"] = {
+        "detail": "model unavailable",
+        "message": "chat model is warming up",
+        "error": "upstream timeout",
+    }
+    open_app(page)
+
+    data = page.evaluate("sendChat('rest normalization regression')")
+
+    assert data["ok"] is False
+    assert data["status"] == 503
+    assert data["detail"] == "model unavailable"
+    assert data["message"] == "chat model is warming up"
+    assert data["error"] == "upstream timeout"
+    assert "model unavailable" in data["display_error"]
+    assert "chat model is warming up" in data["display_error"]
+    assert "upstream timeout" in data["display_error"]
+
+
+def test_chat_rest_error_is_rendered_without_undefined_reply(page_with_api):
+    page, state = page_with_api
+    state["chat_error_status"] = 502
+    state["chat_error_payload"] = {"message": "REST backend refused chat"}
+    open_app(page)
+    page.evaluate("""
+        () => {
+            window.__forceChatWsPending = true;
+            if (window.__mockWs) {
+                window.__mockWs.readyState = 3;
+            }
+        }
+    """)
+
+    page.locator("#chat-input").fill("rest error regression")
+    page.locator("#send-btn").click()
+
+    agent_message = page.locator(".message.agent[data-query]").last
+    expect(agent_message).to_contain_text("REST backend refused chat")
+    expect(agent_message).not_to_contain_text("undefined")
+    expect(agent_message.locator(".loading")).to_have_count(0)
+    state["chat_error_status"] = None
+    state["chat_error_payload"] = {}
+    page.locator("#chat-input").fill("second message after rest error")
+    page.locator("#send-btn").click()
+    expect(page.locator(".message.user")).to_have_count(2)
+    expect(page.locator(".message.agent[data-query]").last).to_contain_text("模拟查价回复")
+    assert state["console_errors"] == []
+    assert state["page_errors"] == []
+
+
+def test_chat_websocket_error_stops_loading_and_renders_message(page_with_api):
+    page, state = page_with_api
+    open_app(page)
+
+    page.locator("#chat-input").fill("ws error regression")
+    page.locator("#send-btn").click()
+
+    agent_message = page.locator(".message.agent[data-query]").last
+    expect(agent_message).to_contain_text("WS backend exploded")
+    expect(agent_message).not_to_contain_text("undefined")
+    expect(agent_message.locator(".loading")).to_have_count(0)
+    page.locator("#chat-input").fill("second message after websocket error")
+    page.locator("#send-btn").click()
+    expect(page.locator(".message.user")).to_have_count(2)
+    expect(page.locator(".message.agent[data-query]").last).to_contain_text("模拟查价回复")
+    assert state["console_errors"] == []
+    assert state["page_errors"] == []
+
+
 def test_trading_memory_panel_renders_tabs_safely_and_read_only(page_with_api):
     page, state = page_with_api
     open_app(page)
@@ -650,6 +1119,44 @@ def test_trading_memory_panel_renders_tabs_safely_and_read_only(page_with_api):
     expect(content).to_contain_text("opportunity")
     expect(content).to_contain_text("优先级 4")
     expect(content).to_contain_text("arcane_energize")
+
+    page.locator("#trading-memory-tab-push-quality").click()
+    expect(content).to_contain_text("推送质量")
+    expect(content).to_contain_text("表现好")
+    expect(content).to_contain_text("待复盘")
+    expect(content).to_contain_text("好评率 80%")
+    expect(content).to_contain_text("误报率 20%")
+    expect(content).to_contain_text("利润偏差 +11p")
+    expect(content).to_contain_text("复盘提醒")
+    expect(content).to_contain_text("填入复盘模板")
+    expect(content).to_contain_text("样本不足")
+    expect(content).to_contain_text("稳定盈利")
+    expect(content).to_contain_text("高误报")
+    expect(content).to_contain_text("待补复盘")
+    expect(content).to_contain_text("观察中")
+    cards = content.locator("#trading-memory-results .trading-memory-record")
+    expect(page.locator("#push-quality-sort-filter")).to_have_value("review")
+    expect(cards.first).to_contain_text("arcane_pending")
+    page.locator("#push-quality-sort-filter").select_option("quality")
+    expect(cards.first).to_contain_text("arcane_good")
+    page.locator("#push-quality-sort-filter").select_option("risk")
+    expect(cards.first).to_contain_text("arcane_risky")
+    assert "sort=" not in state["trading_memory_requests"][-1]["url"]
+    page.locator("#push-quality-sort-filter").select_option("review")
+    expect(cards.first).to_contain_text("arcane_pending")
+    content.locator(".push-quality-review-btn").first.click()
+    draft = page.locator("#chat-input")
+    expect(draft).to_have_value(re.compile(r"OP______ 实际赚__p"))
+    expect(draft).to_have_value(re.compile(r"来源：spread"))
+    expect(draft).to_have_value(re.compile(r"策略：quality_flip"))
+    draft_value = draft.input_value()
+    assert "QualityLeak" not in draft_value
+    assert "/w QualityLeak" not in draft_value
+    assert "<img" not in draft_value
+    results_text = content.locator("#trading-memory-results").inner_text()
+    assert "QualityLeak" not in results_text
+    assert "/w QualityLeak" not in results_text
+    assert state["chat_messages"] == []
 
     expect(page.locator("#detail-content img[data-xss='payload']")).to_have_count(0)
     assert page.evaluate("window.__xssHits") == []
@@ -714,6 +1221,16 @@ def test_websocket_proactive_push_renders_actionable_trade_plan(page_with_api):
             priority: 2,
             message: '利润 45p',
             action_suggestion: 'watch',
+            data: {
+                push_quality_score: 1,
+                push_quality_reason: 'good_quality_history',
+                push_quality_reviewed_count: 5,
+                push_quality_good_rate: 0.8,
+                push_quality_false_positive_rate: 0.2,
+                profile_url: 'https://warframe.market/profile/QualityLeak',
+                market_url: 'https://warframe.market/items/quality_leak',
+                whisper: '/w QualityLeak secret'
+            },
             trade_plan: {
                 display_strategy: '买 21 个 R0 -> 合成 R5 -> 卖出',
                 item_id: 'arcane_energize',
@@ -743,6 +1260,13 @@ def test_websocket_proactive_push_renders_actionable_trade_plan(page_with_api):
     expect(chat).to_contain_text("SellerWS_UI")
     expect(chat).to_contain_text("5p × 21 = 105p")
     expect(chat).to_contain_text("BuyerWS_UI")
+    expect(chat).to_contain_text("表现好")
+    expect(chat).to_contain_text("复盘 5")
+    expect(chat).to_contain_text("好评率 80%")
+    expect(chat).to_contain_text("误报率 20%")
+    chat_text = chat.evaluate("node => node.textContent")
+    assert "QualityLeak" not in chat_text
+    assert "/w QualityLeak" not in chat_text
     chat.locator(".copy-whisper-btn").first.click()
     assert page.evaluate("window.__lastCopiedText") == "/w SellerWS_UI Hi! I want to buy."
     links = chat.locator(".trade-plan-card a").evaluate_all("nodes => nodes.map(a => a.href)")
@@ -751,6 +1275,56 @@ def test_websocket_proactive_push_renders_actionable_trade_plan(page_with_api):
     assert page.evaluate("window.__xssHits") == []
     assert state["console_errors"] == []
     assert state["page_errors"] == []
+
+
+def test_app_static_contracts_include_proactive_push_quality_badge():
+    app_script = Path("warframe_agent/web/static/js/app.js").read_text(encoding="utf-8")
+
+    assert "function getProactivePushQualityBadge" in app_script
+    assert "function renderProactivePushQualityBadge" in app_script
+    assert "push_quality_score" in app_script
+    assert "push_quality_reviewed_count" in app_script
+    assert "push_quality_good_rate" in app_script
+    assert "push_quality_false_positive_rate" in app_script
+    assert "window.renderProactivePushQualityBadge" in app_script
+
+
+def test_runtime_panel_static_contracts_include_gateway_and_plugin_policy_sections():
+    app_script = Path("warframe_agent/web/static/js/app.js").read_text(encoding="utf-8")
+
+    assert "function renderRuntimeGatewayPolicy" in app_script
+    assert "function renderRuntimePluginPolicy" in app_script
+    assert "function renderRuntimeFutureCapabilityPolicy" in app_script
+    assert "function renderRuntimeLearningCompletion" in app_script
+    assert "function renderRuntimeGatewayPolicyItem" in app_script
+    assert "function renderRuntimePluginPolicyItem" in app_script
+    assert "function renderRuntimeFutureCapabilityPolicyItem" in app_script
+    assert "function renderRuntimeLearningCompletionItem" in app_script
+    assert "function policyDecisionCount" in app_script
+    assert "Gateway Policy" in app_script
+    assert "Plugin Policy" in app_script
+    assert "Future Capability Policy" in app_script
+    assert "Learning Completion" in app_script
+    assert "gateway_policy" in app_script
+    assert "plugin_policy" in app_script
+    assert "future_capability_policy" in app_script
+    assert "learning_completion" in app_script
+    assert "acceptance_status" in app_script
+    assert "acceptance_snapshot" in app_script
+    assert "latest_closure_step" in app_script
+    assert "acceptance_record_step" in app_script
+    assert "legacy_non_voice_learning_complete" in app_script
+    assert "improvement_closure_complete" in app_script
+    assert "future_capability_admission" in app_script
+    assert "runtime_enablement_allowed" in app_script
+    assert "design_required_before_runtime" in app_script
+    assert "account[_-]?id" in app_script
+    assert "api[_-]?key" in app_script
+    assert "handler|params|manifest|payload" in app_script
+    assert "credential" in app_script
+    assert "private[_-]?network" in app_script
+    assert "local[_-]?path" in app_script
+    assert "user[_-]?id" in app_script
 
 
 def test_runtime_panel_renders_jobs_tasks_and_safe_state(page_with_api):
@@ -767,12 +1341,62 @@ def test_runtime_panel_renders_jobs_tasks_and_safe_state(page_with_api):
     expect(content).to_contain_text("goal-1")
     expect(content).to_contain_text("WxPusher")
     expect(content).to_contain_text("Feishu")
+    expect(content).to_contain_text("Ops Health")
+    expect(content).to_contain_text("ops_status=degraded")
+    expect(content).to_contain_text("reason_count=3")
+    expect(content).to_contain_text("scheduler_job_failed")
+    expect(content).to_contain_text("background_task_error")
+    expect(content).to_contain_text("Gateway Policy")
+    expect(content).to_contain_text("multi_channel_gateway")
+    expect(content).to_contain_text("blocked_public_or_anonymous_inbound")
+    expect(content).to_contain_text("Plugin Policy")
+    expect(content).to_contain_text("skills_plugin_ecosystem")
+    expect(content).to_contain_text("blocked_high_risk_capability")
+    expect(content).to_contain_text("Future Capability Policy")
+    expect(content).to_contain_text("future_capability_admission")
+    expect(content).to_contain_text("design_required")
+    expect(content).to_contain_text("runtime_enablement_allowed=false")
+    expect(content).to_contain_text("requires_new_stage_design")
+    expect(content).to_contain_text("blocked_uncontrolled_runtime")
+    expect(content).to_contain_text("Learning Completion")
+    expect(content).to_contain_text("status=complete")
+    expect(content).to_contain_text("legacy_complete=true")
+    expect(content).to_contain_text("improvement_complete=true")
+    expect(content).to_contain_text("acceptance=accepted")
+    expect(content).to_contain_text("runtime_changed=false")
+    expect(content).to_contain_text("step50_learning_completion_runtime_snapshot")
+    expect(content).to_contain_text("step49_future_capability_runtime_visibility")
     expect(content).to_contain_text("最近工具调用")
     expect(content).to_contain_text("query_price")
     expect(content).to_contain_text("arcane_energize")
+    expect(content).to_contain_text("Agent Trace")
+    expect(content).to_contain_text("status=finished")
+    expect(content).to_contain_text("reason=answered")
+    expect(content).to_contain_text("answer_present=true")
+    expect(content).to_contain_text("iterations=2")
+    expect(content).to_contain_text("max=3")
+    expect(content).to_contain_text("duration=2500")
+    expect(content).to_contain_text("result_chars=20")
+    expect(content).to_contain_text("has_result=true")
+    expect(content).to_contain_text("error_present=true")
+    expect(content).to_contain_text("Agent Plan")
+    expect(content).to_contain_text("plan_status=completed")
+    expect(content).to_contain_text("review_status=blocked")
+    expect(content).to_contain_text("verification=plan_review=blocked")
+    expect(content).to_contain_text("blocked=sensitive_arguments")
+    expect(content).to_contain_text("issues=1")
+    expect(content).to_contain_text("sensitive_args=1")
+    expect(content).to_contain_text("goal_present=true")
+    expect(content).to_contain_text("plan_steps=2")
+    expect(content).to_contain_text("查价")
+    expect(content).to_contain_text("看趋势")
+    expect(content).to_contain_text("price_trend")
+    expect(content).to_contain_text("result_present=false")
+    expect(content).to_contain_text("plan_step_review=blocked")
+    expect(content).to_contain_text("plan_step_review=ok")
 
     rendered = content.text_content()
-    for forbidden in ["secret-token", "Bearer abc", "app_secret", "chat_id", "UID_SECRET", "AT_SECRET"]:
+    for forbidden in ["secret-token", "Bearer abc", "app_secret", "chat_id", "UID_SECRET", "AT_SECRET", "secret final answer", "final_answer", "raw_arguments", "result_summary", "PlayerSecret", "ErrorSeller", "/w ", "GatewayLeak", "raw_payload", "raw_manifest", "account-123", "api_key", "raw_plan", "private_network_url", "127.0.0.1", "user-123", "account_id"]:
         assert forbidden not in rendered
     assert page.evaluate("window.__xssHits") == []
     assert state["console_errors"] == []
@@ -889,6 +1513,38 @@ def test_sidebar_static_contracts_match_warframe_player_context():
     assert "满级买家" in sidebar_script
     assert "整套市场" in sidebar_script
     assert "part_details.map" in sidebar_script
+    assert "'push-quality'" in sidebar_script
+    assert "endpoint: '/api/trading-memory/push-quality'" in sidebar_script
+    assert "responseKey: 'push_quality'" in sidebar_script
+    assert "renderPushQuality(records)" in sidebar_script
+    assert "表现好" in sidebar_script
+    assert "待复盘" in sidebar_script
+    assert "id=\"push-quality-sort-filter\"" in sidebar_script
+    assert "function getPushQualitySortMode" in sidebar_script
+    assert "function sortPushQualityRecords" in sidebar_script
+    assert "待复盘优先" in sidebar_script
+    assert "表现最好" in sidebar_script
+    assert "风险最高" in sidebar_script
+    assert "function renderPushQualityInsightTags" in sidebar_script
+    assert "function getPushQualityInsightTags" in sidebar_script
+    assert "样本不足" in sidebar_script
+    assert "稳定盈利" in sidebar_script
+    assert "高误报" in sidebar_script
+    assert "待补复盘" in sidebar_script
+    insight_fn = sidebar_script[
+        sidebar_script.index("function getPushQualityInsightTags") : sidebar_script.index("function renderPushQualityInsightTags")
+    ]
+    for sensitive in ["metadata", "profile_url", "market_url", "whisper", "player_name", "/w"]:
+        assert sensitive not in insight_fn
+    assert "function renderPushQualityReviewReminder" in sidebar_script
+    assert "function fillPushQualityReviewTemplateFromButton" in sidebar_script
+    assert "function buildPushQualityReviewTemplate" in sidebar_script
+    assert "push-quality-review-btn" in sidebar_script
+    assert "OP______ 实际赚__p" in sidebar_script
+    review_template_fn = sidebar_script[
+        sidebar_script.index("function buildPushQualityReviewTemplate") : sidebar_script.index("function renderPushQualityBadge")
+    ]
+    assert "/review done" not in review_template_fn
 
 
 
@@ -971,6 +1627,18 @@ def test_chat_response_whisper_compare_and_chart_are_xss_safe(page_with_api):
     page.locator("#trading-memory-refresh-btn").click()
     assert "push_type=opportunity" in state["trading_memory_requests"][-1]["url"]
 
+    page.locator("#trading-memory-tab-push-quality").click()
+    page.locator("#trading-memory-type-filter").fill("spread")
+    page.locator("#trading-memory-refresh-btn").click()
+    assert "source=spread" in state["trading_memory_requests"][-1]["url"]
+
+    state["trading_memory_empty"] = False
+    state["trading_memory_error_endpoint"] = "push-quality"
+    page.locator("#trading-memory-refresh-btn").click()
+    expect(page.locator("#detail-content")).to_contain_text("加载推送质量失败")
+    state["trading_memory_error_endpoint"] = ""
+
+    page.locator("#trading-memory-tab-push-history").click()
     state["trading_memory_empty"] = False
     state["trading_memory_error_endpoint"] = "push-history"
     page.locator("#trading-memory-refresh-btn").click()

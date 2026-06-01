@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 logger = logging.getLogger(__name__)
@@ -61,10 +61,12 @@ class SetProfitResult:
     opportunity_score: float = 0.0
     supply_count: int = 0
     demand_count: int = 0
+    personal_score: float = 0.0
+    personal_reasons: list[str] | None = None
 
 
 def _count_orders(orders: list[dict], order_type: str) -> int:
-    return sum(1 for order in orders if order.get("order_type") == order_type)
+    return sum(1 for order in orders if (order.get("order_type") or order.get("type")) == order_type)
 
 
 def _score_liquidity(volume_48h: int | None, supply_count: int, demand_count: int) -> float:
@@ -360,6 +362,8 @@ def format_set_profit_results_for_model(
                     f"opportunity_score={result.opportunity_score}",
                     f"supply_count={result.supply_count}",
                     f"demand_count={result.demand_count}",
+                    f"personal_score={result.personal_score}",
+                    f"personal_reasons={','.join(result.personal_reasons or [])}",
                 ]
             )
         )
@@ -384,10 +388,11 @@ def scan_all_set_profits(
     min_profit: int = 5,
     limit: int = 20,
     scout_fn: Callable[[list], list[str]] | None = None,
+    personal_profile=None,
 ) -> list[SetProfitResult]:
     """扫描所有 Prime 套装，找出利润机会。"""
     groups = build_prime_groups(items)
-    all_candidates = list(groups.values())[:15]
+    all_candidates = list(groups.values())
 
     # 智能预筛选
     if scout_fn is not None:
@@ -407,7 +412,22 @@ def scan_all_set_profits(
 
     def _analyze(group: PrimeGroup) -> SetProfitResult | None:
         try:
-            return analyze_set_profit(group, order_fetcher)
+            result = analyze_set_profit(group, order_fetcher)
+            if result and personal_profile is not None:
+                from .personal_scoring import score_personal_fit
+
+                fit = score_personal_fit(
+                    item_id=result.set_item_id or result.base_id,
+                    source="set_profit",
+                    strategy=(result.trade_plan or {}).get("strategy", result.best_strategy),
+                    total_cost=result.best_cost,
+                    profit=result.best_profit,
+                    roi_pct=result.roi_pct,
+                    risk_level=result.risk_level,
+                    profile=personal_profile,
+                )
+                result = replace(result, personal_score=fit.personal_score, personal_reasons=fit.reasons)
+            return result
         except Exception:
             return None
 
@@ -420,4 +440,6 @@ def scan_all_set_profits(
                 results.append(result)
 
     results.sort(key=lambda r: (r.opportunity_score, r.best_profit, r.roi_pct), reverse=True)
+    if personal_profile is not None:
+        results.sort(key=lambda r: (r.personal_score, r.opportunity_score, r.best_profit, r.roi_pct), reverse=True)
     return results[:limit]

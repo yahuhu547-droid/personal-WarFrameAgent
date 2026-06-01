@@ -4,6 +4,8 @@
    ============================================ */
 
 const API_BASE = '';
+const FUTURE_CAPABILITY_ADMISSION = 'future_capability_admission';
+const FUTURE_CAPABILITY_DEFAULT_MODE = 'design_required_before_runtime';
 
 // HTML/JS 转义工具函数
 function escapeJsString(str) {
@@ -29,8 +31,30 @@ async function sendChat(message) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message })
     });
-    if (!res.ok) return { error: `HTTP ${res.status}` };
-    return await res.json();
+    let data = {};
+    try {
+        data = await res.json();
+    } catch (e) {
+        data = {};
+    }
+    if (!res.ok) {
+        const detail = data.detail;
+        const backendMessage = data.message;
+        const backendError = data.error;
+        const parts = [detail, backendMessage, backendError]
+            .filter(value => value !== undefined && value !== null && String(value).trim() !== '')
+            .map(value => String(value));
+        const displayError = parts.length ? `HTTP ${res.status}: ${parts.join(' | ')}` : `HTTP ${res.status}`;
+        return {
+            ok: false,
+            status: res.status,
+            detail,
+            message: backendMessage,
+            error: backendError,
+            display_error: displayError
+        };
+    }
+    return { ok: true, ...data };
 }
 
 async function addFavorite(itemId) {
@@ -244,10 +268,19 @@ function renderRuntimeStatusPanel(data) {
     const tasks = Array.isArray(background.tasks) ? background.tasks : [];
     const recentToolCalls = data && data.recent_tool_calls ? data.recent_tool_calls : {};
     const toolCalls = Array.isArray(recentToolCalls.items) ? recentToolCalls.items : [];
+    const agentTrace = data && data.agent_trace ? data.agent_trace : {};
+    const agentPlan = agentTrace && agentTrace.plan ? agentTrace.plan : {};
     const feishu = data && data.feishu ? data.feishu : {};
     const wxpusher = data && data.wxpusher ? data.wxpusher : {};
     const daily = data && data.daily_report ? data.daily_report : {};
     const web = data && data.web ? data.web : {};
+    const learningCompletion = data && data.learning_completion ? data.learning_completion : {};
+    const safetyPolicy = data && data.safety_policy ? data.safety_policy : {};
+    const toolRegistry = safetyPolicy && safetyPolicy.tool_registry ? safetyPolicy.tool_registry : {};
+    const gatewayPolicy = safetyPolicy && safetyPolicy.gateway_policy ? safetyPolicy.gateway_policy : {};
+    const pluginPolicy = safetyPolicy && safetyPolicy.plugin_policy ? safetyPolicy.plugin_policy : {};
+    const futureCapabilityPolicy = safetyPolicy && safetyPolicy.future_capability_policy ? safetyPolicy.future_capability_policy : {};
+    const opsHealth = data && data.ops_health ? data.ops_health : {};
     return `
         <div class="runtime-panel">
             <div class="panel-title-row">
@@ -264,13 +297,40 @@ function renderRuntimeStatusPanel(data) {
                 ${renderRuntimeSummaryCard('Feishu', [`enabled=${Boolean(feishu.enabled)}`, `running=${Boolean(feishu.managed_running)}`])}
                 ${renderRuntimeSummaryCard('WxPusher', [`enabled=${Boolean(wxpusher.enabled)}`, `configured=${Boolean(wxpusher.configured)}`, `uids=${wxpusher.uid_count ?? 0}`])}
                 ${renderRuntimeSummaryCard('Daily Report', [`enabled=${Boolean(daily.enabled)}`, `time=${daily.report_time || '-'}`])}
+                ${renderRuntimeSummaryCard('Learning Completion', [`status=${learningCompletion.status || '-'}`, `acceptance=${learningCompletion.acceptance_status || '-'}`, `steps=${learningCompletion.completed_step_count ?? 0}`, `improvements=${Array.isArray(learningCompletion.improvement_steps) ? learningCompletion.improvement_steps.length : 0}`])}
+                ${renderRuntimeSummaryCard('Safety Policy', [`mode=${safetyPolicy.default_mode || '-'}`, `version=${safetyPolicy.policy_version || '-'}`])}
+                ${renderRuntimeSummaryCard('Tool Registry', [`tools=${toolRegistry.tool_count ?? 0}`, `schemas=${toolRegistry.exposed_schema_count ?? 0}`, `side_effect=${toolRegistry.side_effect_count ?? 0}`])}
+                ${renderRuntimeSummaryCard('Gateway Policy', [`mode=${gatewayPolicy.default_mode || '-'}`, `blocked=${policyDecisionCount(gatewayPolicy, 'blocked_public_or_anonymous_inbound') + policyDecisionCount(gatewayPolicy, 'blocked_sensitive_action')}`])}
+                ${renderRuntimeSummaryCard('Plugin Policy', [`mode=${pluginPolicy.default_mode || '-'}`, `blocked=${policyDecisionCount(pluginPolicy, 'blocked_high_risk_capability') + policyDecisionCount(pluginPolicy, 'blocked_unknown_capability')}`])}
+                ${renderRuntimeSummaryCard('Future Capability Policy', [`mode=${futureCapabilityPolicy.default_mode || FUTURE_CAPABILITY_DEFAULT_MODE}`, `runtime=${Boolean(futureCapabilityPolicy.runtime_enablement_allowed)}`, `admission=${FUTURE_CAPABILITY_ADMISSION}`, `blocked=${policyDecisionCount(futureCapabilityPolicy, 'blocked_uncontrolled_runtime')}`])}
+                ${renderRuntimeSummaryCard('Ops Health', [`ops_status=${opsHealth.status || '-'}`, `reason_count=${opsHealth.reason_count ?? 0}`])}
                 ${renderRuntimeSummaryCard('Background Tasks', [`running=${background.running ?? 0}`, `error=${background.error ?? 0}`, `total=${background.total ?? tasks.length}`])}
+                ${renderRuntimeSummaryCard('Agent Trace', [`present=${Boolean(agentTrace.present)}`, `status=${agentTrace.status || '-'}`, `iter=${agentTrace.iterations ?? 0}/${agentTrace.max_iterations ?? '-'}`, `duration=${agentTrace.duration_ms ?? '-'}ms`])}
+                ${renderRuntimeSummaryCard('Agent Plan', [`present=${Boolean(agentPlan.present)}`, `plan_status=${agentPlan.status || '-'}`, `goal_present=${Boolean(agentPlan.goal_present)}`, `plan_steps=${agentPlan.step_count ?? 0}`])}
                 ${renderRuntimeSummaryCard('最近工具调用', [`count=${recentToolCalls.count ?? toolCalls.length}`])}
             </div>
+            <h3 class="runtime-section-title">Ops Health</h3>
+            ${renderRuntimeOpsHealth(opsHealth)}
+            <h3 class="runtime-section-title">Learning Completion</h3>
+            ${renderRuntimeLearningCompletion(learningCompletion)}
+            <h3 class="runtime-section-title">安全策略</h3>
+            ${renderRuntimeSafetyPolicy(safetyPolicy)}
+            <h3 class="runtime-section-title">Gateway Policy</h3>
+            ${renderRuntimeGatewayPolicy(gatewayPolicy)}
+            <h3 class="runtime-section-title">Plugin Policy</h3>
+            ${renderRuntimePluginPolicy(pluginPolicy)}
+            <h3 class="runtime-section-title">Future Capability Policy</h3>
+            ${renderRuntimeFutureCapabilityPolicy(futureCapabilityPolicy)}
+            <h3 class="runtime-section-title">工具安全分布</h3>
+            ${renderRuntimeToolRegistrySummary(toolRegistry)}
             <h3 class="runtime-section-title">Scheduler Jobs</h3>
             <div class="trading-memory-list">${jobs.length ? jobs.map(renderRuntimeJob).join('') : renderRuntimeEmpty('暂无任务状态')}</div>
             <h3 class="runtime-section-title">后台任务</h3>
             <div class="trading-memory-list">${tasks.length ? tasks.map(renderRuntimeTask).join('') : renderRuntimeEmpty('暂无任务状态')}</div>
+            <h3 class="runtime-section-title">Agent Trace</h3>
+            ${renderRuntimeAgentTrace(agentTrace)}
+            <h3 class="runtime-section-title">Agent Plan</h3>
+            ${renderRuntimeAgentPlan(agentPlan)}
             <h3 class="runtime-section-title">最近工具调用</h3>
             <div class="trading-memory-list">${toolCalls.length ? toolCalls.map(renderRuntimeToolCall).join('') : renderRuntimeEmpty('暂无工具调用')}</div>
         </div>
@@ -282,6 +342,253 @@ function renderRuntimeSummaryCard(title, lines) {
         <div class="trading-memory-name">${escapeHtml(title)}</div>
         <div class="trading-memory-meta">${(lines || []).map(line => escapeHtml(line)).join('<br>')}</div>
     </div></div>`;
+}
+
+function renderRuntimeOpsHealth(opsHealth) {
+    if (!opsHealth || !opsHealth.status) {
+        return `<div class="trading-memory-list">${renderRuntimeEmpty('No ops health snapshot')}</div>`;
+    }
+    const reasons = Array.isArray(opsHealth.reasons) ? opsHealth.reasons : [];
+    const components = opsHealth.components || {};
+    const reasonText = reasons.length ? reasons.map(formatRuntimeSafeText).join(', ') : 'none';
+    const statusClass = opsHealth.status === 'degraded' ? 'badge-gold' : opsHealth.status === 'ok' ? 'badge-green' : 'badge-muted';
+    return `<div class="trading-memory-list">
+        <div class="card trading-memory-record"><div class="card-body">
+            <div class="trading-memory-record-header">
+                <div>
+                    <div class="trading-memory-name">Ops Health</div>
+                    <div class="trading-memory-meta">ops_status=${escapeHtml(opsHealth.status || '-')} | reason_count=${escapeHtml(opsHealth.reason_count ?? reasons.length)}</div>
+                </div>
+                <span class="badge ${statusClass}">${escapeHtml(opsHealth.status || '-')}</span>
+            </div>
+            <div class="trading-memory-message">${escapeHtml(reasonText)}</div>
+        </div></div>
+        ${Object.entries(components).map(([name, component]) => renderRuntimeOpsComponent(name, component || {})).join('')}
+    </div>`;
+}
+
+function renderRuntimeOpsComponent(name, component) {
+    const status = component.status || '-';
+    const statusClass = status === 'degraded' ? 'badge-gold' : status === 'ok' ? 'badge-green' : 'badge-muted';
+    const details = Object.entries(component || {})
+        .filter(([key]) => key !== 'status' && !isRuntimeSensitiveKey(key))
+        .map(([key, value]) => {
+            const safeValue = formatRuntimeObjectValue(value);
+            if (safeValue === null || safeValue === undefined || safeValue === '') return null;
+            return `${key}=${safeValue}`;
+        })
+        .filter(Boolean)
+        .join(' | ');
+    return `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-record-header">
+            <div>
+                <div class="trading-memory-name">${escapeHtml(name)}</div>
+                <div class="trading-memory-meta">${escapeHtml(details || '-')}</div>
+            </div>
+            <span class="badge ${statusClass}">${escapeHtml(status)}</span>
+        </div>
+    </div></div>`;
+}
+
+function renderRuntimeLearningCompletion(snapshot) {
+    if (!snapshot || !snapshot.status) {
+        return `<div class="trading-memory-list">${renderRuntimeEmpty('No learning completion snapshot')}</div>`;
+    }
+    const acceptance = snapshot.acceptance_snapshot || {};
+    const details = [
+        `status=${formatRuntimeSafeText(snapshot.status || '-')}`,
+        `acceptance=${formatRuntimeSafeText(snapshot.acceptance_status || '-')}`,
+        `legacy_complete=${Boolean(snapshot.legacy_non_voice_learning_complete)}`,
+        `improvement_complete=${Boolean(snapshot.improvement_closure_complete)}`,
+        `runtime_changed=${Boolean(snapshot.runtime_enablement_changed)}`,
+        `completed_steps=${snapshot.completed_step_count ?? 0}`,
+        `closure_step=${formatRuntimeSafeText(acceptance.latest_closure_step || '-')}`,
+        `acceptance_record=${formatRuntimeSafeText(acceptance.acceptance_record_step || '-')}`,
+    ];
+    const steps = Array.isArray(snapshot.completed_steps) ? snapshot.completed_steps.slice(-6) : [];
+    const checklist = Array.isArray(acceptance.checklist) ? acceptance.checklist.slice(0, 8) : [];
+    const nextStage = Array.isArray(snapshot.next_stage_required) ? snapshot.next_stage_required.slice(0, 8) : [];
+    return `<div class="trading-memory-list">
+        ${renderRuntimePolicySummary('Learning Completion', details)}
+        ${steps.length ? steps.map(step => renderRuntimeLearningCompletionItem(step, 'completed')).join('') : renderRuntimeEmpty('No completed steps')}
+        ${checklist.length ? checklist.map(item => renderRuntimeLearningCompletionItem(`${item.id || '-'}:${item.status || '-'}`, 'acceptance')).join('') : ''}
+        ${nextStage.length ? nextStage.map(step => renderRuntimeLearningCompletionItem(step, 'next-stage')).join('') : ''}
+    </div>`;
+}
+
+function renderRuntimeLearningCompletionItem(name, label) {
+    const badgeClass = label === 'completed' || label === 'acceptance' ? 'badge-green' : 'badge-gold';
+    return `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-record-header">
+            <div>
+                <div class="trading-memory-name">${escapeHtml(formatRuntimeSafeText(name || '-'))}</div>
+                <div class="trading-memory-meta">learning_completion=${escapeHtml(label)}</div>
+            </div>
+            <span class="badge ${badgeClass}">${escapeHtml(label)}</span>
+        </div>
+    </div></div>`;
+}
+
+function renderRuntimeSafetyPolicy(policy) {
+    const capabilities = policy && policy.capabilities ? policy.capabilities : {};
+    const entries = Object.entries(capabilities);
+    if (!entries.length) return renderRuntimeEmpty('暂无安全策略快照');
+    return `<div class="trading-memory-list">${entries.map(([name, cap]) => renderRuntimeSafetyCapability(name, cap || {})).join('')}</div>`;
+}
+
+function renderRuntimeSafetyCapability(name, cap) {
+    const available = Boolean(cap.available);
+    const enabledText = Object.prototype.hasOwnProperty.call(cap, 'enabled') ? ` · enabled=${Boolean(cap.enabled)}` : '';
+    const scopeText = cap.scope ? ` · ${escapeHtml(cap.scope)}` : '';
+    return `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-record-header">
+            <div>
+                <div class="trading-memory-name">${escapeHtml(name)}</div>
+                <div class="trading-memory-meta">default=${escapeHtml(cap.default || '-')} · requires_explicit_enable=${escapeHtml(Boolean(cap.requires_explicit_enable))}${enabledText}${scopeText}</div>
+            </div>
+            <span class="badge ${available ? 'badge-green' : 'badge-muted'}">${available ? 'available' : 'disabled'}</span>
+        </div>
+    </div></div>`;
+}
+
+function renderRuntimeGatewayPolicy(policy) {
+    if (!policy || !policy.default_mode) return renderRuntimeEmpty('No gateway policy snapshot');
+    const details = [
+        `default=${formatRuntimeSafeText(policy.default_mode || '-')}`,
+        `auto_inbound=${Boolean(policy.automatic_inbound_execution_enabled)}`,
+        `anonymous_inbound=${Boolean(policy.anonymous_inbound_enabled)}`,
+        `outbound_config=${Boolean(policy.outbound_push_requires_configuration)}`,
+        `decisions=${formatRuntimeDistribution(policy.decision_counts || {})}`,
+    ];
+    const matrix = Array.isArray(policy.gateway_matrix) ? policy.gateway_matrix.slice(0, 8) : [];
+    return `<div class="trading-memory-list">
+        ${renderRuntimePolicySummary('Gateway Policy', details)}
+        ${matrix.length ? matrix.map(item => renderRuntimeGatewayPolicyItem(item || {})).join('') : renderRuntimeEmpty('No gateway matrix')}
+    </div>`;
+}
+
+function renderRuntimePluginPolicy(policy) {
+    if (!policy || !policy.default_mode) return renderRuntimeEmpty('No plugin policy snapshot');
+    const details = [
+        `default=${formatRuntimeSafeText(policy.default_mode || '-')}`,
+        `plugin_runtime=${Boolean(policy.plugin_runtime_enabled)}`,
+        `connector_runtime=${Boolean(policy.connector_runtime_enabled)}`,
+        `auto_install=${Boolean(policy.automatic_tool_install_enabled)}`,
+        `decisions=${formatRuntimeDistribution(policy.decision_counts || {})}`,
+    ];
+    const matrix = Array.isArray(policy.capability_matrix) ? policy.capability_matrix.slice(0, 8) : [];
+    return `<div class="trading-memory-list">
+        ${renderRuntimePolicySummary('Plugin Policy', details)}
+        ${matrix.length ? matrix.map(item => renderRuntimePluginPolicyItem(item || {})).join('') : renderRuntimeEmpty('No plugin matrix')}
+    </div>`;
+}
+
+function renderRuntimeFutureCapabilityPolicy(policy) {
+    if (!policy || !policy.default_mode) return renderRuntimeEmpty('No future capability policy snapshot');
+    const details = [
+        `default=${formatRuntimeSafeText(policy.default_mode || '-')}`,
+        `runtime_enablement_allowed=${Boolean(policy.runtime_enablement_allowed)}`,
+        `automatic_enable=${Boolean(policy.automatic_enable_enabled)}`,
+        `design_review=${Boolean(policy.design_review_required)}`,
+        `human_confirmation=${Boolean(policy.human_confirmation_required_before_runtime)}`,
+        `decisions=${formatRuntimeDistribution(policy.decision_counts || {})}`,
+    ];
+    const matrix = Array.isArray(policy.capability_matrix) ? policy.capability_matrix.slice(0, 8) : [];
+    return `<div class="trading-memory-list">
+        ${renderRuntimePolicySummary('Future Capability Policy', details)}
+        ${matrix.length ? matrix.map(item => renderRuntimeFutureCapabilityPolicyItem(item || {})).join('') : renderRuntimeEmpty('No future capability matrix')}
+    </div>`;
+}
+
+function renderRuntimePolicySummary(title, details) {
+    return `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-record-header">
+            <div>
+                <div class="trading-memory-name">${escapeHtml(title)}</div>
+                <div class="trading-memory-meta">${escapeHtml((details || []).join(' | '))}</div>
+            </div>
+            <span class="badge badge-green">read-only</span>
+        </div>
+    </div></div>`;
+}
+
+function renderRuntimeGatewayPolicyItem(item) {
+    const decision = formatRuntimeSafeText(item.decision || '-');
+    const badgeClass = String(decision).startsWith('blocked') ? 'badge-red' : decision === 'requires_existing_confirmation_flow' ? 'badge-gold' : 'badge-green';
+    return `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-record-header">
+            <div>
+                <div class="trading-memory-name">${escapeHtml(formatRuntimeSafeText(item.channel || '-'))}</div>
+                <div class="trading-memory-meta">action=${escapeHtml(formatRuntimeSafeText(item.action || '-'))} | trust=${escapeHtml(formatRuntimeSafeText(item.trust_boundary || '-'))} | reason=${escapeHtml(formatRuntimeSafeText(item.reason || '-'))}</div>
+            </div>
+            <span class="badge ${badgeClass}">${escapeHtml(decision)}</span>
+        </div>
+    </div></div>`;
+}
+
+function renderRuntimeFutureCapabilityPolicyItem(item) {
+    const decision = formatRuntimeSafeText(item.decision || '-');
+    const badgeClass = String(decision).startsWith('blocked')
+        ? 'badge-red'
+        : decision === 'requires_new_stage_design' || decision === 'frozen_by_current_user_instruction'
+            ? 'badge-gold'
+            : 'badge-green';
+    return `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-record-header">
+            <div>
+                <div class="trading-memory-name">${escapeHtml(formatRuntimeSafeText(item.capability || '-'))}</div>
+                <div class="trading-memory-meta">trust=${escapeHtml(formatRuntimeSafeText(item.trust_boundary || '-'))} | runtime_enabled=${escapeHtml(Boolean(item.runtime_enabled))} | approval=${escapeHtml(Boolean(item.requires_explicit_user_approval))} | reason=${escapeHtml(formatRuntimeSafeText(item.reason || '-'))}</div>
+            </div>
+            <span class="badge ${badgeClass}">${escapeHtml(decision)}</span>
+        </div>
+    </div></div>`;
+}
+
+function renderRuntimePluginPolicyItem(item) {
+    const decision = formatRuntimeSafeText(item.decision || '-');
+    const badgeClass = String(decision).startsWith('blocked') ? 'badge-red' : decision === 'requires_review' || decision === 'requires_explicit_enable' ? 'badge-gold' : 'badge-green';
+    return `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-record-header">
+            <div>
+                <div class="trading-memory-name">${escapeHtml(formatRuntimeSafeText(item.source || '-'))}</div>
+                <div class="trading-memory-meta">capability=${escapeHtml(formatRuntimeSafeText(item.capability || '-'))} | trust=${escapeHtml(formatRuntimeSafeText(item.trust_boundary || '-'))} | reason=${escapeHtml(formatRuntimeSafeText(item.reason || '-'))}</div>
+            </div>
+            <span class="badge ${badgeClass}">${escapeHtml(decision)}</span>
+        </div>
+    </div></div>`;
+}
+
+function policyDecisionCount(policy, name) {
+    const counts = policy && policy.decision_counts ? policy.decision_counts : {};
+    const value = counts && Object.prototype.hasOwnProperty.call(counts, name) ? counts[name] : 0;
+    return Number.isFinite(Number(value)) ? Number(value) : 0;
+}
+
+function renderRuntimeToolRegistrySummary(summary) {
+    if (!summary || !summary.tool_count) return renderRuntimeEmpty('暂无工具安全统计');
+    const safetyLevels = summary.safety_levels || {};
+    const skills = summary.skills || {};
+    const contextPolicies = summary.context_policies || {};
+    return `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-record-header">
+            <div>
+                <div class="trading-memory-name">ToolRegistry</div>
+                <div class="trading-memory-meta">tools=${escapeHtml(summary.tool_count ?? 0)} · exposed_schema=${escapeHtml(summary.exposed_schema_count ?? 0)} · private_schema=${escapeHtml(summary.private_schema_count ?? 0)} · side_effect=${escapeHtml(summary.side_effect_count ?? 0)}</div>
+            </div>
+            <span class="badge badge-green">aggregate</span>
+        </div>
+        <div class="trading-memory-prices">
+            <span>safety=${escapeHtml(formatRuntimeDistribution(safetyLevels))}</span>
+            <span>skills=${escapeHtml(formatRuntimeDistribution(skills))}</span>
+            <span>context=${escapeHtml(formatRuntimeDistribution(contextPolicies))}</span>
+        </div>
+    </div></div>`;
+}
+
+function formatRuntimeDistribution(value) {
+    const entries = Object.entries(value || {});
+    if (!entries.length) return '-';
+    return entries.map(([name, count]) => `${name}:${count}`).join(', ');
 }
 
 function renderRuntimeJob(job) {
@@ -336,9 +643,160 @@ function renderRuntimeToolCall(call) {
     </div></div>`;
 }
 
+function renderRuntimeAgentTrace(trace) {
+    if (!trace || !trace.present) {
+        return `<div class="trading-memory-list">${renderRuntimeEmpty('No agent trace yet')}</div>`;
+    }
+    const steps = Array.isArray(trace.steps) ? trace.steps : [];
+    const answerPresent = Boolean(trace.final_answer_present);
+    return `<div class="trading-memory-list">
+        <div class="card trading-memory-record"><div class="card-body">
+            <div class="trading-memory-record-header">
+                <div>
+                    <div class="trading-memory-name">Agent Trace</div>
+                    <div class="trading-memory-meta">status=${escapeHtml(trace.status || '-')} | reason=${escapeHtml(formatRuntimeTraceReason(trace.termination_reason))} | iterations=${escapeHtml(trace.iterations ?? 0)} | max=${escapeHtml(trace.max_iterations ?? '-')} | steps=${escapeHtml(trace.step_count ?? steps.length)}</div>
+                </div>
+                <span class="badge ${answerPresent ? 'badge-green' : 'badge-muted'}">answer_present=${escapeHtml(answerPresent)}</span>
+            </div>
+            <div class="trading-memory-prices">
+                <span>duration=${escapeHtml(trace.duration_ms ?? '-')}ms</span>
+                <span>started=${escapeHtml(trace.started_at ?? '-')}</span>
+                <span>ended=${escapeHtml(trace.ended_at ?? '-')}</span>
+            </div>
+        </div></div>
+        ${steps.length ? steps.map(renderRuntimeAgentTraceStep).join('') : renderRuntimeEmpty('No tool steps')}
+    </div>`;
+}
+
+function renderRuntimeAgentTraceStep(step) {
+    const args = renderRuntimeObject(step.args_summary || {});
+    return `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-record-header">
+            <div>
+                <div class="trading-memory-name">${escapeHtml(step.tool_name || '-')}</div>
+                <div class="trading-memory-meta">iteration=${escapeHtml(step.iteration ?? '-')} | result_chars=${escapeHtml(step.result_chars ?? 0)}</div>
+            </div>
+            <span class="badge ${step.ok === false ? 'badge-red' : step.ok === true ? 'badge-green' : 'badge-muted'}">${step.ok === false ? 'failed' : step.ok === true ? 'ok' : 'unknown'}</span>
+        </div>
+        <div class="trading-memory-prices">
+            <span>duration=${escapeHtml(step.duration_ms ?? '-')}ms</span>
+            <span>has_result=${escapeHtml(Boolean(step.has_result))}</span>
+            <span>error_present=${escapeHtml(Boolean(step.error_present))}</span>
+        </div>
+        ${args ? `<div class="trading-memory-message">args: ${args}</div>` : ''}
+    </div></div>`;
+}
+
+function formatRuntimeTraceReason(reason) {
+    if (!reason) return '-';
+    const value = String(reason);
+    if (value === 'final_answer') return 'answered';
+    if (isRuntimeSensitiveText(value)) return '[REDACTED]';
+    return value;
+}
+
+function formatRuntimeSafeText(value) {
+    if (value === null || value === undefined || value === '') return '-';
+    const text = String(value);
+    return isRuntimeSensitiveText(text) ? '[REDACTED]' : text;
+}
+
+function renderRuntimeAgentPlan(plan) {
+    if (!plan || !plan.present) {
+        return `<div class="trading-memory-list">${renderRuntimeEmpty('No agent plan yet')}</div>`;
+    }
+    const steps = Array.isArray(plan.steps) ? plan.steps : [];
+    const review = plan.review || {};
+    const reviewLine = review.present
+        ? `review_status=${formatRuntimeSafeText(review.status)} | verification=${formatRuntimeSafeText(review.verification_note)} | blocked=${formatRuntimeSafeText(review.blocked_reason)} | issues=${review.issue_count ?? 0} | sensitive_args=${review.sensitive_argument_count ?? 0}`
+        : '';
+    const statusClass = plan.status === 'failed'
+        ? 'badge-red'
+        : plan.status === 'completed'
+            ? 'badge-green'
+            : plan.status === 'running'
+                ? 'badge-gold'
+                : 'badge-muted';
+    return `<div class="trading-memory-list">
+        <div class="card trading-memory-record"><div class="card-body">
+            <div class="trading-memory-record-header">
+                <div>
+                    <div class="trading-memory-name">Agent Plan</div>
+                    <div class="trading-memory-meta">plan_status=${escapeHtml(plan.status || '-')} | iteration=${escapeHtml(plan.iteration ?? '-')} | goal_present=${escapeHtml(Boolean(plan.goal_present))} | plan_steps=${escapeHtml(plan.step_count ?? steps.length)}</div>
+                </div>
+                <span class="badge ${statusClass}">${escapeHtml(plan.status || '-')}</span>
+            </div>
+            ${plan.goal ? `<div class="trading-memory-message">goal: ${escapeHtml(plan.goal)}</div>` : ''}
+            ${reviewLine ? `<div class="trading-memory-meta">${escapeHtml(reviewLine)}</div>` : ''}
+        </div></div>
+        ${steps.length ? steps.map(renderRuntimeAgentPlanStep).join('') : renderRuntimeEmpty('No plan steps')}
+    </div>`;
+}
+
+function renderRuntimeAgentPlanStep(step) {
+    const args = renderRuntimeObject(step.args_summary || {});
+    const okLabel = step.ok === false ? 'failed' : step.ok === true ? 'ok' : (step.status || 'unknown');
+    const verificationNote = formatRuntimeSafeText(step.verification_note);
+    const blockedReason = formatRuntimeSafeText(step.blocked_reason);
+    const reviewLine = step.verification_note || step.blocked_reason
+        ? `verification=${verificationNote} | blocked=${blockedReason}`
+        : '';
+    return `<div class="card trading-memory-record"><div class="card-body">
+        <div class="trading-memory-record-header">
+            <div>
+                <div class="trading-memory-name">${escapeHtml(step.index ?? '-')}. ${escapeHtml(step.tool_name || '-')}</div>
+                <div class="trading-memory-meta">status=${escapeHtml(step.status || '-')} | purpose=${escapeHtml(step.purpose || '-')}</div>
+            </div>
+            <span class="badge ${step.ok === false ? 'badge-red' : step.ok === true ? 'badge-green' : 'badge-muted'}">${escapeHtml(okLabel)}</span>
+        </div>
+        <div class="trading-memory-prices">
+            <span>duration=${escapeHtml(step.duration_ms ?? '-')}ms</span>
+            <span>result_present=${escapeHtml(Boolean(step.result_present))}</span>
+            <span>error_present=${escapeHtml(Boolean(step.error_present))}</span>
+        </div>
+        ${args ? `<div class="trading-memory-message">args: ${args}</div>` : ''}
+        ${reviewLine ? `<div class="trading-memory-meta">${escapeHtml(reviewLine)}</div>` : ''}
+    </div></div>`;
+}
+
 function renderRuntimeObject(value) {
     if (!value || typeof value !== 'object') return '';
-    return Object.entries(value).map(([key, item]) => `${escapeHtml(key)}=${escapeHtml(Array.isArray(item) ? item.join(',') : item)}`).join(' · ');
+    return Object.entries(value)
+        .map(([key, item]) => {
+            if (isRuntimeSensitiveKey(key)) return null;
+            const safeValue = formatRuntimeObjectValue(item);
+            if (safeValue === null || safeValue === undefined || safeValue === '') return null;
+            return `${escapeHtml(key)}=${escapeHtml(safeValue)}`;
+        })
+        .filter(Boolean)
+        .join(' · ');
+}
+
+function formatRuntimeObjectValue(item) {
+    if (Array.isArray(item)) {
+        const values = item.map(formatRuntimeObjectValue).filter(value => value !== null && value !== undefined && value !== '');
+        return values.length ? values.join(',') : null;
+    }
+    if (item && typeof item === 'object') {
+        const values = Object.entries(item)
+            .map(([key, value]) => {
+                if (isRuntimeSensitiveKey(key)) return null;
+                const safeValue = formatRuntimeObjectValue(value);
+                return safeValue ? `${key}:${safeValue}` : null;
+            })
+            .filter(Boolean);
+        return values.length ? `{${values.join(',')}}` : null;
+    }
+    const text = String(item);
+    return isRuntimeSensitiveText(text) ? '[REDACTED]' : text;
+}
+
+function isRuntimeSensitiveKey(key) {
+    return /(token|secret|password|authorization|cookie|chat_id|app_secret|uid|profile|whisper|raw|result_summary|final_answer|account[_-]?id|api[_-]?key|handler|params|manifest|payload|credential|user[_-]?id|private[_-]?network|local[_-]?path)/i.test(String(key || ''));
+}
+
+function isRuntimeSensitiveText(text) {
+    return /(bearer\s+[a-z0-9._-]+|\/w\s+|secret-token|app_secret|chat_id|uid_secret|at_secret|playersecret|errorseller|gatewayleak|account-123|api_key|raw_payload|raw_manifest|raw_plan|raw_config|credential|webhook_secret|connector_token|private_network_url|local_path|user_id|final answer)/i.test(String(text || ''));
 }
 
 function renderRuntimeEmpty(text) {
@@ -355,6 +813,68 @@ function appendTradePlanToMessage(messageEl, plan) {
     const content = messageEl.querySelector('.message-content');
     if (!content) return;
     content.insertAdjacentHTML('beforeend', window.renderTradePlanCard(plan));
+}
+
+function getProactivePushQualitySource(data) {
+    const nested = data && typeof data.data === 'object' ? data.data : null;
+    return nested || data || {};
+}
+
+function hasProactivePushQualityData(data) {
+    const source = getProactivePushQualitySource(data);
+    return [
+        'push_quality_score',
+        'push_quality_reviewed_count',
+        'push_quality_good_rate',
+        'push_quality_false_positive_rate'
+    ].some(key => Object.prototype.hasOwnProperty.call(source, key));
+}
+
+function formatPushQualityRate(value) {
+    const rate = Number(value);
+    if (!Number.isFinite(rate)) return '-';
+    return `${Math.round(rate * 100)}%`;
+}
+
+function getProactivePushQualityBadge(data) {
+    if (!hasProactivePushQualityData(data)) return null;
+    const source = getProactivePushQualitySource(data);
+    const reviewed = Number(source.push_quality_reviewed_count || 0);
+    const score = Number(source.push_quality_score || 0);
+    if (reviewed <= 0) {
+        return { label: '待复盘', className: 'badge-muted' };
+    }
+    if (score > 0) {
+        return { label: '表现好', className: 'badge-green' };
+    }
+    if (score < 0) {
+        return { label: '需谨慎', className: 'badge-red' };
+    }
+    return { label: '观察中', className: 'badge-gold' };
+}
+
+function renderProactivePushQualityBadge(data) {
+    const badge = getProactivePushQualityBadge(data);
+    if (!badge) return '';
+    const source = getProactivePushQualitySource(data);
+    const reviewed = Number(source.push_quality_reviewed_count || 0);
+    const goodRate = formatPushQualityRate(source.push_quality_good_rate);
+    const falsePositiveRate = formatPushQualityRate(source.push_quality_false_positive_rate);
+    const chips = [
+        `<span class="badge ${badge.className}">${escapeHtml(badge.label)}</span>`,
+        `<span class="badge badge-muted">复盘 ${escapeHtml(reviewed)}</span>`,
+        goodRate !== '-' ? `<span class="badge badge-muted">好评率 ${escapeHtml(goodRate)}</span>` : '',
+        falsePositiveRate !== '-' ? `<span class="badge badge-muted">误报率 ${escapeHtml(falsePositiveRate)}</span>` : ''
+    ].filter(Boolean).join('');
+    return `<div class="trading-memory-chips proactive-push-quality">${chips}</div>`;
+}
+
+function appendProactivePushQualityToMessage(messageEl, data) {
+    if (!messageEl) return;
+    const content = messageEl.querySelector('.message-content');
+    if (!content) return;
+    const html = renderProactivePushQualityBadge(data);
+    if (html) content.insertAdjacentHTML('beforeend', html);
 }
 
 function handleNotificationMessage(data) {
@@ -391,10 +911,12 @@ function handleNotificationMessage(data) {
         const msg = `${priorityIcon} [${label}] ${data.item_display}\n${data.message}\n建议: ${action}`;
         showNotification(msg, data.priority === 1 ? 'warning' : 'info');
         const messageEl = addChatMessage('agent', msg);
+        appendProactivePushQualityToMessage(messageEl, data);
         appendTradePlanToMessage(messageEl, data.trade_plan || data.data?.trade_plan);
     }
 }
 
+window.renderProactivePushQualityBadge = renderProactivePushQualityBadge;
 window.handleNotificationMessage = handleNotificationMessage;
 
 function setupWebSocket() {

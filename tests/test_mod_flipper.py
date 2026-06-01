@@ -9,6 +9,8 @@ from warframe_agent.mod_flipper import (
     get_tradeable_mods,
     scan_all_mod_flips,
 )
+from warframe_agent.memory import AgentMemory
+from warframe_agent.personal_profile import build_personal_profile
 
 
 def test_endo_cost_table_r10():
@@ -237,6 +239,54 @@ def test_scan_all_mod_flips_filters_arcane_only():
     assert analyzed == ["arcane_energize"]
 
 
+def test_scan_all_mod_flips_applies_personal_profile_sorting(monkeypatch):
+    items = [
+        {"url_name": "arcane_energize", "item_name": "Arcane Energize", "tags": ["arcane_enhancement"], "tradable": True},
+        {"url_name": "primed_flow", "item_name": "Primed Flow", "tags": ["mod"], "tradable": True, "modMaxRank": 10, "rarity": "LEGENDARY"},
+    ]
+
+    def fake_analyze(item_id, max_rank, rarity, order_fetcher, is_prime=False):
+        strategy = "arcane_rank0_to_max" if item_id == "arcane_energize" else "mod_rank0_to_max"
+        return ModFlipResult(
+            item_id=item_id,
+            display_name=item_id,
+            r0_buy_price=60,
+            r10_sell_price=90,
+            flip_profit=30,
+            roi_pct=50.0,
+            endo_cost=1280,
+            plat_per_1k_endo=23.4,
+            value_score=50.0,
+            volume_48h=20,
+            max_rank=max_rank,
+            rarity=rarity,
+            is_prime=is_prime,
+            trade_plan={"strategy": strategy, "total_cost": 60, "risk_level": "low"},
+        )
+
+    monkeypatch.setattr("warframe_agent.mod_flipper.analyze_mod_flip", fake_analyze)
+    memory = AgentMemory.default().with_updated_preferences(
+        risk_appetite="low",
+        budget_min=1,
+        budget_max=100,
+        preferred_categories=["arcane"],
+        min_roi_pct=20,
+    )
+    profile = build_personal_profile(memory)
+
+    results = scan_all_mod_flips(
+        items,
+        lambda item_id: [],
+        min_profit=1,
+        limit=2,
+        scout_fn=None,
+        personal_profile=profile,
+    )
+
+    assert [result.item_id for result in results] == ["arcane_energize", "primed_flow"]
+    assert results[0].personal_score > results[1].personal_score
+
+
 def test_value_score_formula():
     import math
     result = ModFlipResult(
@@ -303,3 +353,73 @@ def test_format_mod_flip_results_for_model_omits_tail_rows_and_count():
     assert "item_id=mod_2" in text
     assert "item_id=mod_3" not in text
     assert "omitted_count=7" in text
+
+
+def test_mod_flip_result_can_carry_personal_score():
+    result = ModFlipResult(
+        item_id="arcane_energize",
+        display_name="Arcane Energize",
+        r0_buy_price=120,
+        r10_sell_price=180,
+        flip_profit=60,
+        roi_pct=50.0,
+        endo_cost=0,
+        plat_per_1k_endo=0.0,
+        value_score=50.0,
+        volume_48h=20,
+        max_rank=5,
+        rarity="LEGENDARY",
+        is_prime=False,
+        required_quantity=21,
+        personal_score=91.0,
+        personal_reasons=["预算匹配"],
+    )
+
+    assert result.personal_score == 91.0
+    assert result.personal_reasons == ["预算匹配"]
+
+def test_scan_all_mod_flips_considers_mods_after_priority_slices(monkeypatch):
+    items = [
+        {
+            "url_name": f"filler_mod_{index}",
+            "item_name": f"Filler Mod {index}",
+            "tags": ["mod"],
+            "tradable": True,
+            "modMaxRank": 10,
+            "rarity": "RARE",
+        }
+        for index in range(20)
+    ]
+    items.append({
+        "url_name": "late_mod",
+        "item_name": "Late Mod",
+        "tags": ["mod"],
+        "tradable": True,
+        "modMaxRank": 10,
+        "rarity": "RARE",
+    })
+
+    def fake_analyze(item_id, max_rank, rarity, order_fetcher, is_prime=False):
+        if item_id != "late_mod":
+            return None
+        return ModFlipResult(
+            item_id="late_mod",
+            display_name="Late Mod",
+            r0_buy_price=10,
+            r10_sell_price=80,
+            flip_profit=70,
+            roi_pct=700.0,
+            endo_cost=20470,
+            plat_per_1k_endo=3.42,
+            value_score=70.0,
+            volume_48h=20,
+            max_rank=max_rank,
+            rarity=rarity,
+            is_prime=is_prime,
+        )
+
+    monkeypatch.setattr("warframe_agent.mod_flipper.analyze_mod_flip", fake_analyze)
+
+    results = scan_all_mod_flips(items, lambda item_id: [], min_profit=5, limit=5, scout_fn=None)
+
+    assert [result.item_id for result in results] == ["late_mod"]

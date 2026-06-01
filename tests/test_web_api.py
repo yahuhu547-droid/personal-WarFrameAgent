@@ -7,14 +7,22 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock
 from fastapi.testclient import TestClient
 
 from warframe_agent.push import PushConfig
 from warframe_agent.relics import RelicDrop, RelicInfo
 from warframe_agent.rules import ProactivePush
-from warframe_agent.trading_memory import MarketSnapshotMemory, PushHistoryMemory, RecommendationMemory, TradingMemoryDB
+from warframe_agent.trading_memory import MarketSnapshotMemory, PushHistoryMemory, PushQualitySignal, RecommendationMemory, TradingMemoryDB
 from warframe_agent.web.app import app
+
+
+try:
+    from unittest.mock import AsyncMock
+except ImportError:
+    class AsyncMock(Mock):
+        async def __call__(self, *args, **kwargs):
+            return super().__call__(*args, **kwargs)
 
 
 class TestWebAPI(unittest.TestCase):
@@ -94,6 +102,65 @@ class TestWebAPI(unittest.TestCase):
     def test_set_preference_invalid_max_results(self):
         response = self.client.post("/api/pref", json={"key": "max_results", "value": "0"})
         self.assertEqual(response.status_code, 422)
+
+    @patch("warframe_agent.web.app.AgentMemory")
+    def test_profile_api_returns_safe_summary_only(self, mock_memory_class):
+        from warframe_agent.memory import AgentMemory
+
+        memory = AgentMemory.default().with_updated_preferences(
+            risk_appetite="high",
+            budget_min=50,
+            budget_max=300,
+            preferred_categories=["arcane", "prime_set"],
+            max_turnaround_days=5,
+            min_roi_pct=20,
+        )
+        memory.common_questions.extend([
+            "profile_url=https://warframe.market/profile/SecretSeller",
+            "/w SecretSeller hi token=SHOULD_NOT_LEAK",
+        ])
+        mock_memory_class.load.return_value = memory
+
+        response = self.client.get("/api/profile")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["profile"]["risk_appetite"], "high")
+        self.assertEqual(data["profile"]["budget_min"], 50)
+        self.assertEqual(data["profile"]["budget_max"], 300)
+        self.assertEqual(data["profile"]["preferred_categories"], ["arcane", "prime_set"])
+        serialized = json.dumps(data, ensure_ascii=False)
+        for forbidden in ["profile_url", "/w", "token", "SecretSeller", "SHOULD_NOT_LEAK"]:
+            self.assertNotIn(forbidden, serialized)
+
+    @patch("warframe_agent.web.app._save_memory_async", new_callable=AsyncMock)
+    @patch("warframe_agent.web.app._load_memory_async", new_callable=AsyncMock)
+    def test_profile_api_updates_preferences_and_returns_safe_summary(self, mock_load, mock_save):
+        from warframe_agent.memory import AgentMemory
+
+        mock_load.return_value = AgentMemory.default()
+
+        response = self.client.post("/api/profile/preferences", json={
+            "risk_appetite": "low",
+            "budget_min": 25,
+            "budget_max": 125,
+            "preferred_categories": ["mod", "arcane"],
+            "max_turnaround_days": 3,
+            "min_roi_pct": 15,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["profile"]["risk_appetite"], "low")
+        self.assertEqual(data["profile"]["budget_min"], 25)
+        self.assertEqual(data["profile"]["budget_max"], 125)
+        self.assertEqual(data["profile"]["preferred_categories"], ["mod", "arcane"])
+        self.assertEqual(data["profile"]["max_turnaround_days"], 3)
+        self.assertEqual(data["profile"]["min_roi_pct"], 15)
+        saved_memory = mock_save.call_args.args[0]
+        self.assertEqual(saved_memory.preferences.risk_appetite, "low")
+        self.assertEqual(saved_memory.preferences.budget_max, 125)
 
     @patch("warframe_agent.web.app.price_db")
     def test_get_history(self, mock_db):
@@ -326,6 +393,91 @@ class TestWebAPI(unittest.TestCase):
         self.assertNotIn("SetSeller_INV_API", str(plan))
         self.assertIn("safe_summary", plan)
 
+    @patch("warframe_agent.investment.scan_prime_investments", return_value=[])
+    @patch("warframe_agent.web.app._load_items_full", return_value=[{"item_id": "rhino_prime_set"}])
+    @patch("warframe_agent.web.app._load_memory_async", new_callable=AsyncMock)
+    def test_investment_api_uses_preference_defaults_when_query_omits_budget_and_roi(self, mock_load_memory, mock_load_items, mock_scan):
+        from warframe_agent.memory import AgentMemory
+        from warframe_agent.web import app as web_app
+
+        mock_load_memory.return_value = AgentMemory.default().with_updated_preferences(
+            budget_min=50,
+            budget_max=220,
+            min_roi_pct=30,
+        )
+
+        async def run_request():
+            web_app._scan_cache.clear()
+            web_app._bg_tasks.clear()
+            try:
+                response = await web_app.investment_endpoint(budget=None, min_roi_pct=None, limit=5)
+                start_data = json.loads(response.body.decode("utf-8"))
+                for _ in range(20):
+                    await asyncio.sleep(0.05)
+                    task = web_app._bg_tasks[start_data["task_id"]]
+                    if task["status"] != "running":
+                        return task
+                return web_app._bg_tasks[start_data["task_id"]]
+            finally:
+                web_app._scan_cache.clear()
+                web_app._bg_tasks.clear()
+
+        task = asyncio.run(run_request())
+
+        self.assertEqual(task["status"], "done")
+        self.assertEqual(mock_scan.call_args.kwargs["budget"], 220)
+        self.assertEqual(mock_scan.call_args.kwargs["min_roi_pct"], 30.0)
+        self.assertEqual(mock_scan.call_args.kwargs["limit"], 5)
+
+    @patch("warframe_agent.web.app._get_scan_cache", return_value=[])
+    @patch("warframe_agent.web.app._load_memory_async", new_callable=AsyncMock)
+    def test_investment_api_http_query_omitted_and_empty_use_preference_defaults(self, mock_load_memory, mock_get_cache):
+        from warframe_agent.memory import AgentMemory
+        from warframe_agent.web import app as web_app
+
+        mock_load_memory.return_value = AgentMemory.default().with_updated_preferences(
+            budget_min=50,
+            budget_max=220,
+            min_roi_pct=30,
+        )
+
+        web_app._scan_cache.clear()
+        try:
+            omitted_response = self.client.get("/api/investment?limit=5")
+            empty_response = self.client.get("/api/investment?budget=&min_roi_pct=&limit=5")
+        finally:
+            web_app._scan_cache.clear()
+
+        self.assertEqual(omitted_response.status_code, 200)
+        self.assertEqual(empty_response.status_code, 200)
+        self.assertEqual(omitted_response.json()["status"], "done")
+        self.assertEqual(empty_response.json()["status"], "done")
+        self.assertEqual(mock_get_cache.call_count, 2)
+        for call in mock_get_cache.call_args_list:
+            self.assertTrue(call.args[0].startswith("investment_220_30.0_5_"))
+
+    @patch("warframe_agent.web.app._get_scan_cache", return_value=[])
+    @patch("warframe_agent.web.app._load_memory_async", new_callable=AsyncMock)
+    def test_investment_api_http_query_preserves_explicit_zero(self, mock_load_memory, mock_get_cache):
+        from warframe_agent.memory import AgentMemory
+        from warframe_agent.web import app as web_app
+
+        mock_load_memory.return_value = AgentMemory.default().with_updated_preferences(
+            budget_min=50,
+            budget_max=220,
+            min_roi_pct=30,
+        )
+
+        web_app._scan_cache.clear()
+        try:
+            response = self.client.get("/api/investment?budget=0&min_roi_pct=0&limit=5")
+        finally:
+            web_app._scan_cache.clear()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "done")
+        self.assertTrue(mock_get_cache.call_args.args[0].startswith("investment_0_0.0_5_"))
+
     @patch("warframe_agent.web.app.feishu_bot")
     @patch("warframe_agent.web.app.monitor")
     def test_runtime_status_endpoint(self, mock_monitor, mock_feishu):
@@ -340,11 +492,252 @@ class TestWebAPI(unittest.TestCase):
         self.assertEqual(data["status"], "ok")
         self.assertIn("web", data)
         self.assertIn("uptime_seconds", data["web"])
+        completion = data["learning_completion"]
+        self.assertEqual(completion["status"], "complete")
+        self.assertTrue(completion["legacy_non_voice_learning_complete"])
+        self.assertTrue(completion["improvement_closure_complete"])
+        self.assertFalse(completion["runtime_enablement_changed"])
+        self.assertIn("step49_future_capability_runtime_visibility", completion["completed_steps"])
+        self.assertIn("step50_learning_completion_runtime_snapshot", completion["completed_steps"])
+        self.assertIn("browser_gui_executor", completion["next_stage_required"])
+        self.assertEqual(completion["acceptance_status"], "accepted")
+        acceptance = completion["acceptance_snapshot"]
+        self.assertEqual(acceptance["latest_closure_step"], "step50_learning_completion_runtime_snapshot")
+        self.assertEqual(acceptance["acceptance_record_step"], "step51_learning_completion_acceptance_snapshot")
+        self.assertTrue(acceptance["all_items_passed"])
+        checklist = {item["id"]: item for item in acceptance["checklist"]}
+        self.assertFalse(checklist["runtime_high_privilege_not_enabled"]["runtime_enabled"])
+        self.assertFalse(checklist["real_voice_runtime_frozen"]["runtime_enabled"])
         self.assertEqual(data["feishu"]["managed_running"], True)
         self.assertEqual(data["scheduler"]["total"], 6)
         self.assertEqual(data["daily_report"]["report_time"], "12:30")
         self.assertIn("wxpusher", data)
         self.assertIn("background_tasks", data)
+
+    @patch("warframe_agent.web.app.query_tool_call_history", return_value=[])
+    @patch("warframe_agent.web.app.push_client")
+    @patch("warframe_agent.web.app.feishu_bot")
+    @patch("warframe_agent.web.app.monitor")
+    def test_runtime_status_includes_safe_ops_health_summary(self, mock_monitor, mock_feishu, mock_push_client, _mock_history):
+        from warframe_agent.web import app as web_app
+
+        mock_feishu.status_snapshot.return_value = {
+            "enabled": True,
+            "configured": True,
+            "available": True,
+            "managed_running": False,
+            "app_secret": "LEAK",
+        }
+        mock_monitor.scheduler_status_snapshot.return_value = {
+            "running": False,
+            "has_scheduler": True,
+            "total": 2,
+            "jobs": [
+                {
+                    "job_id": "scan",
+                    "running": False,
+                    "last_success": True,
+                    "error_count": 0,
+                    "last_error_summary": None,
+                },
+                {
+                    "job_id": "daily_report",
+                    "running": False,
+                    "last_success": False,
+                    "error_count": 2,
+                    "last_error_summary": "token=secret Bearer abc",
+                },
+            ],
+        }
+        mock_monitor.daily_report_status_snapshot.return_value = {
+            "enabled": True,
+            "report_time": "12:30",
+            "should_send_now": False,
+            "last_report_date": None,
+        }
+        mock_push_client.available = True
+        mock_push_client.config.enabled = True
+        mock_push_client.config.app_token = "AT_SECRET"
+        mock_push_client.config.uids = ["UID_SECRET"]
+        mock_push_client.config.push_alerts = False
+        mock_push_client.config.push_watches = False
+        mock_push_client.config.push_proactive = False
+        mock_push_client.config.push_daily_report = True
+        old_tasks = dict(web_app._bg_tasks)
+        web_app._bg_tasks.clear()
+        web_app._bg_tasks["ops-task"] = {
+            "status": "error",
+            "error": "token=secret Bearer abc app_secret=x",
+            "created_at": time.time(),
+            "result": {"secret": "LEAK_RESULT", "total": 3},
+        }
+        try:
+            response = self.client.get("/api/runtime/status")
+        finally:
+            web_app._bg_tasks.clear()
+            web_app._bg_tasks.update(old_tasks)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        ops = data["ops_health"]
+        self.assertEqual(ops["status"], "degraded")
+        self.assertEqual(ops["reason_count"], 4)
+        self.assertEqual(
+            ops["reasons"],
+            ["scheduler_stopped", "scheduler_job_failed", "background_task_error", "feishu_not_running"],
+        )
+        self.assertEqual(
+            set(ops["components"].keys()),
+            {"scheduler", "background_tasks", "feishu", "wxpusher", "daily_report"},
+        )
+        self.assertEqual(ops["components"]["scheduler"]["failed_job_count"], 1)
+        self.assertEqual(ops["components"]["background_tasks"]["error"], 1)
+        self.assertFalse(ops["components"]["feishu"]["running"])
+        self.assertTrue(ops["components"]["wxpusher"]["configured"])
+        self.assertTrue(ops["components"]["daily_report"]["enabled"])
+        ops_serialized = json.dumps(ops, ensure_ascii=False)
+        for forbidden in [
+            "scan",
+            "secret",
+            "Bearer",
+            "app_secret",
+            "token=",
+            "raw_arguments",
+            "result_summary",
+        ]:
+            self.assertNotIn(forbidden, ops_serialized)
+        serialized = json.dumps(data, ensure_ascii=False)
+        for forbidden in ["LEAK", "LEAK_RESULT", "AT_SECRET", "UID_SECRET", "raw_arguments", "result_summary"]:
+            self.assertNotIn(forbidden, serialized)
+
+    @patch("warframe_agent.web.app.feishu_bot")
+    @patch("warframe_agent.web.app.monitor")
+    def test_runtime_status_includes_safe_agent_trace_snapshot(self, mock_monitor, mock_feishu):
+        from warframe_agent.tool_router import AgentPlanSnapshot, AgentPlanStep, AgentStep, AgentTrace, PlanReviewIssue, PlanReviewSummary
+        from warframe_agent.web import app as web_app
+
+        mock_feishu.status_snapshot.return_value = {"enabled": False, "configured": False, "available": True, "managed_running": False}
+        mock_monitor.scheduler_status_snapshot.return_value = {"running": True, "has_scheduler": True, "total": 0, "jobs": []}
+        mock_monitor.daily_report_status_snapshot.return_value = {"enabled": False, "report_time": None, "should_send_now": False, "last_report_date": None}
+
+        trace = AgentTrace(
+            termination_reason="final_answer",
+            iterations=2,
+            final_answer="secret final answer should not leak",
+            status="finished",
+            started_at=100.0,
+            ended_at=102.5,
+            max_iterations=3,
+            duration_ms=2500.0,
+        )
+        trace.plan = AgentPlanSnapshot(
+            goal="compare token=SECRET /w SecretSeller hi",
+            status="completed",
+            iteration=1,
+            verification_note="plan_review=blocked; issues=1; unknown=0; side_effect=0; sensitive_args=1; verification=0",
+            blocked_reason="sensitive_arguments",
+            review=PlanReviewSummary(
+                status="blocked",
+                verification_note="plan_review=blocked; issues=1; unknown=0; side_effect=0; sensitive_args=1; verification=0",
+                blocked_reason="sensitive_arguments",
+                issue_count=1,
+                sensitive_argument_count=1,
+                issues=(PlanReviewIssue(1, "query_price", "sensitive_arguments"),),
+            ),
+            steps=[
+                AgentPlanStep(
+                    index=1,
+                    tool_name="query_price",
+                    purpose="check https://warframe.market/profile/SecretSeller",
+                    args_summary={"item_name": "arcane_energize", "token": "[REDACTED]"},
+                    status="completed",
+                    ok=True,
+                    error_present=False,
+                    duration_ms=5.0,
+                    result_present=True,
+                    verification_note="plan_step_review=blocked; reason=sensitive_arguments",
+                    blocked_reason="sensitive_arguments",
+                )
+            ],
+        )
+        trace.steps.append(AgentStep(
+            iteration=1,
+            tool_name="query_price",
+            args_summary={
+                "item_name": "arcane_energize",
+                "question": "/w SecretSeller " + ("x" * 160) + " tail_secret token=abc",
+                "profile": "warframe.market/profile/SecretSeller",
+                "profile_www": "www.warframe.market/profile/SecretSeller",
+                "token": "[REDACTED]",
+                "authToken": "SECRET_AUTH_TOKEN",
+                "secretToken": "SECRET_TOKEN_VALUE",
+                "authorizationHeader": "Bearer SECRET_AUTH_HEADER",
+                "cookieValue": "SECRET_COOKIE",
+                "chatId": "SECRET_CHAT_ID",
+            },
+            raw_arguments_safe=False,
+            raw_arguments=None,
+            ok=True,
+            error="/w ErrorSeller " + ("x" * 160) + " error_tail_secret Bearer abc123 failed",
+            duration_ms=12.5,
+            result_summary="token=secret-token /w PlayerSecret hi https://warframe.market/profile/PlayerSecret",
+        ))
+        old_trace = getattr(web_app.chat_agent, "last_agent_trace", None)
+        web_app.chat_agent.last_agent_trace = trace
+        try:
+            response = self.client.get("/api/runtime/status")
+        finally:
+            web_app.chat_agent.last_agent_trace = old_trace
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("agent_trace", data)
+        self.assertTrue(data["agent_trace"]["present"])
+        self.assertTrue(data["agent_trace"]["final_answer_present"])
+        self.assertEqual(data["agent_trace"]["status"], "finished")
+        self.assertEqual(data["agent_trace"]["termination_reason"], "final_answer")
+        self.assertEqual(data["agent_trace"]["iterations"], 2)
+        self.assertEqual(data["agent_trace"]["max_iterations"], 3)
+        self.assertEqual(data["agent_trace"]["duration_ms"], 2500.0)
+        self.assertEqual(data["agent_trace"]["started_at"], 100.0)
+        self.assertEqual(data["agent_trace"]["ended_at"], 102.5)
+        self.assertEqual(data["agent_trace"]["step_count"], 1)
+        plan = data["agent_trace"]["plan"]
+        self.assertTrue(plan["present"])
+        self.assertEqual(plan["status"], "completed")
+        self.assertEqual(plan["iteration"], 1)
+        self.assertTrue(plan["goal_present"])
+        self.assertEqual(plan["step_count"], 1)
+        self.assertEqual(plan["verification_note"], "plan_review=blocked; issues=1; unknown=0; side_effect=0; sensitive_args=1; verification=0")
+        self.assertEqual(plan["blocked_reason"], "sensitive_arguments")
+        self.assertTrue(plan["review"]["present"])
+        self.assertEqual(plan["review"]["status"], "blocked")
+        self.assertEqual(plan["review"]["blocked_reason"], "sensitive_arguments")
+        self.assertEqual(plan["review"]["issue_count"], 1)
+        self.assertEqual(plan["review"]["sensitive_argument_count"], 1)
+        self.assertNotIn("issues", plan["review"])
+        self.assertEqual(plan["steps"][0]["tool_name"], "query_price")
+        self.assertEqual(plan["steps"][0]["status"], "completed")
+        self.assertTrue(plan["steps"][0]["result_present"])
+        self.assertEqual(plan["steps"][0]["verification_note"], "plan_step_review=blocked; reason=sensitive_arguments")
+        self.assertEqual(plan["steps"][0]["blocked_reason"], "sensitive_arguments")
+        self.assertNotIn("token", plan["steps"][0]["args_summary"])
+        step = data["agent_trace"]["steps"][0]
+        self.assertEqual(step["tool_name"], "query_price")
+        self.assertEqual(step["args_summary"]["item_name"], "arcane_energize")
+        self.assertNotIn("token", step["args_summary"])
+        self.assertNotIn("authToken", step["args_summary"])
+        self.assertNotIn("secretToken", step["args_summary"])
+        self.assertNotIn("authorizationHeader", step["args_summary"])
+        self.assertNotIn("cookieValue", step["args_summary"])
+        self.assertNotIn("chatId", step["args_summary"])
+        self.assertTrue(step["error_present"])
+        self.assertNotIn("error_summary", step)
+        self.assertTrue(step["has_result"])
+        self.assertGreater(step["result_chars"], 0)
+        serialized = str(data)
+        for forbidden in ["secret final answer", "result_summary", "raw_arguments", "secret-token", "PlayerSecret", "SecretSeller", "ErrorSeller", "tail_secret", "error_tail_secret", "/w ", "warframe.market/profile", "Bearer", "token=secret", "authToken", "secretToken", "authorizationHeader", "cookieValue", "chatId", "SECRET_AUTH", "SECRET_TOKEN", "SECRET_COOKIE", "SECRET_CHAT"]:
+            self.assertNotIn(forbidden, serialized)
 
     @patch("warframe_agent.web.app.push_client")
     @patch("warframe_agent.web.app.feishu_bot")
@@ -413,6 +806,104 @@ class TestWebAPI(unittest.TestCase):
         self.assertIn("error_summary", task)
         serialized = str(data)
         for forbidden in ["AT_SECRET", "UID_SECRET", "LEAK_SECRET", "oc_leak", "LEAK_RESULT", "secret-token", "SECRET_ARG", "Bearer abc", "hidden", "oc_123", "token=", "app_secret=", "chat_id=", "secret user message", "secret assistant reply", "raw prompt", "message_context"]:
+            self.assertNotIn(forbidden, serialized)
+
+    @patch("warframe_agent.web.app.push_client")
+    @patch("warframe_agent.web.app.feishu_bot")
+    @patch("warframe_agent.web.app.monitor")
+    def test_runtime_status_includes_read_only_safety_policy(self, mock_monitor, mock_feishu, mock_push_client):
+        mock_feishu.status_snapshot.return_value = {
+            "enabled": True,
+            "configured": True,
+            "available": True,
+            "managed_running": True,
+            "app_secret": "LEAK_SECRET",
+            "chat_id": "oc_leak",
+        }
+        mock_monitor.scheduler_status_snapshot.return_value = {
+            "running": True,
+            "has_scheduler": True,
+            "total": 2,
+            "jobs": [{"job_id": "price_monitor.scan", "safety_level": "read_only"}],
+        }
+        mock_monitor.daily_report_status_snapshot.return_value = {
+            "enabled": True,
+            "report_time": "12:30",
+            "should_send_now": False,
+            "last_report_date": None,
+        }
+        mock_push_client.available = True
+        mock_push_client.config.enabled = True
+        mock_push_client.config.app_token = "AT_SECRET"
+        mock_push_client.config.uids = ["UID_SECRET"]
+        mock_push_client.config.push_alerts = True
+        mock_push_client.config.push_watches = True
+        mock_push_client.config.push_proactive = True
+        mock_push_client.config.push_daily_report = True
+
+        response = self.client.get("/api/runtime/status")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        policy = data["safety_policy"]
+        self.assertEqual(policy["default_mode"], "read_only")
+        caps = policy["capabilities"]
+        for name in ["shell", "generic_file_write", "browser_private_network", "arbitrary_scheduler"]:
+            self.assertFalse(caps[name]["available"])
+            self.assertEqual(caps[name]["default"], "disabled")
+            self.assertTrue(caps[name]["requires_explicit_enable"])
+        self.assertIn("browser_gui_automation", caps)
+        self.assertEqual(caps["browser_gui_automation"]["default"], "disabled")
+        self.assertEqual(caps["market_network"]["default"], "read_only")
+        self.assertEqual(caps["project_data_write"]["default"], "restricted")
+        self.assertTrue(caps["scheduler_jobs"]["enabled"])
+        self.assertTrue(caps["external_push"]["enabled"])
+        self.assertIn("browser_gui_policy", policy)
+        self.assertFalse(policy["browser_gui_policy"]["automation_enabled"])
+        self.assertTrue(policy["browser_gui_policy"]["human_takeover_required"])
+        self.assertGreaterEqual(policy["browser_gui_policy"]["decision_counts"]["blocked"], 1)
+        self.assertIn("companion_experience_policy", policy)
+        companion_policy = policy["companion_experience_policy"]
+        self.assertEqual(companion_policy["default_mode"], "text_only")
+        self.assertFalse(companion_policy["voice_enabled"])
+        self.assertFalse(companion_policy["live2d_enabled"])
+        self.assertFalse(companion_policy["microphone_enabled"])
+        self.assertFalse(companion_policy["recording_enabled"])
+        self.assertFalse(companion_policy["background_listening_enabled"])
+        self.assertGreaterEqual(companion_policy["decision_counts"]["blocked_unavailable_runtime"], 1)
+        self.assertIn("voice_companion_experience", caps)
+        self.assertEqual(caps["voice_companion_experience"]["default"], "disabled")
+        self.assertIn("multi_channel_gateway", caps)
+        self.assertEqual(caps["multi_channel_gateway"]["default"], "restricted")
+        self.assertIn("skills_plugin_ecosystem", caps)
+        self.assertEqual(caps["skills_plugin_ecosystem"]["default"], "guidance_only")
+        self.assertIn("future_capability_admission", caps)
+        self.assertEqual(caps["future_capability_admission"]["default"], "design_required")
+        self.assertFalse(caps["future_capability_admission"]["enabled"])
+        gateway_policy = policy["gateway_policy"]
+        self.assertEqual(gateway_policy["default_mode"], "explicit_gateway_only")
+        self.assertFalse(gateway_policy["automatic_inbound_execution_enabled"])
+        self.assertGreaterEqual(gateway_policy["decision_counts"]["blocked_public_or_anonymous_inbound"], 1)
+        plugin_policy = policy["plugin_policy"]
+        self.assertEqual(plugin_policy["default_mode"], "guidance_only")
+        self.assertFalse(plugin_policy["plugin_runtime_enabled"])
+        self.assertFalse(plugin_policy["connector_runtime_enabled"])
+        self.assertGreaterEqual(plugin_policy["decision_counts"]["blocked_high_risk_capability"], 1)
+        future_policy = policy["future_capability_policy"]
+        self.assertEqual(future_policy["default_mode"], "design_required_before_runtime")
+        self.assertFalse(future_policy["runtime_enablement_allowed"])
+        self.assertFalse(future_policy["automatic_enable_enabled"])
+        self.assertGreaterEqual(future_policy["decision_counts"]["requires_new_stage_design"], 1)
+        self.assertGreaterEqual(future_policy["decision_counts"]["blocked_uncontrolled_runtime"], 1)
+        tool_summary = policy["tool_registry"]
+        self.assertGreaterEqual(tool_summary["tool_count"], 1)
+        self.assertIn("safety_levels", tool_summary)
+        self.assertIn("skills", tool_summary)
+        self.assertIn("context_policies", tool_summary)
+        self.assertNotIn("handler", str(tool_summary))
+        self.assertNotIn("parameters", str(tool_summary))
+        serialized = str(data)
+        for forbidden in ["AT_SECRET", "UID_SECRET", "LEAK_SECRET", "oc_leak", "token=", "app_secret=", "chat_id=", "handler", "raw_arguments", "message_context", "display_content", "model_context", "127.0.0.1", "secret-token", "SecretSeller", "/w", "profile/", "raw_message", "audio_url", "microphone_path", "raw_payload", "raw_manifest", "account_id", "user-123"]:
             self.assertNotIn(forbidden, serialized)
 
     def test_tool_call_history_api_returns_safe_filtered_records(self):
@@ -518,6 +1009,52 @@ class TestWebAPI(unittest.TestCase):
         self.assertIn("trace", data["items"][0])
         serialized = str(data)
         for forbidden in ["secret-token", "Seller_RAW", "/w", "token=", "whisper"]:
+            self.assertNotIn(forbidden, serialized)
+
+    @patch("warframe_agent.web.app.load_conversations", create=True)
+    @patch("warframe_agent.web.app.TradingMemoryDB.open_readonly_if_exists")
+    def test_memory_vault_api_returns_safe_preview(self, mock_open, mock_load_conversations):
+        from warframe_agent.conversation_log import ConversationEntry
+
+        db_path = Path(tempfile.gettempdir()) / "web_memory_vault_test.db"
+        try:
+            db_path.unlink()
+        except OSError:
+            pass
+        db = TradingMemoryDB(db_path=db_path)
+        try:
+            db.record_market_snapshot(
+                "arcane_energize",
+                "price_monitor.scan",
+                {"item_id": "arcane_energize", "sell_price": 45, "buy_price": 38, "token": "secret-token", "seller": "Seller_RAW", "whisper": "/w Seller_RAW hi"},
+            )
+            mock_open.return_value = db
+            mock_load_conversations.return_value = [
+                ConversationEntry(
+                    user_message="raw user secret-token",
+                    assistant_reply="raw assistant /w Seller_RAW",
+                    tool_calls=[{"tool_name": "query_price", "args_summary": {"token": "secret-token"}}],
+                    contexts=["arcane_energize"],
+                    timestamp="2026-05-28T10:00:00",
+                )
+            ]
+
+            response = self.client.get("/api/memory/vault?limit=10")
+        finally:
+            db.close()
+            try:
+                db_path.unlink()
+            except OSError:
+                pass
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertGreaterEqual(data["total"], 2)
+        self.assertIn("source_counts", data)
+        self.assertIn("markdown_preview", data)
+        self.assertIn("arcane_energize", data["markdown_preview"])
+        serialized = str(data)
+        for forbidden in ["secret-token", "Seller_RAW", "/w", "token=", "whisper", "raw user", "raw assistant", "args_summary"]:
             self.assertNotIn(forbidden, serialized)
 
     @patch("warframe_agent.web.app.feishu_bot")
@@ -1247,6 +1784,113 @@ class TestTradingMemoryAPI(unittest.TestCase):
             self.assertNotIn(forbidden, serialized)
 
     @patch("warframe_agent.web.app._query_trading_memory")
+    def test_push_quality_endpoint_returns_safe_aggregates(self, mock_query):
+        mock_query.return_value = [
+            PushQualitySignal(
+                item_name="arcane_energize",
+                source="mod_flipper",
+                strategy="arcane_rank0_to_max",
+                category="arcane",
+                sent_count=3,
+                reviewed_count=2,
+                completed_count=1,
+                accepted_count=0,
+                rejected_count=1,
+                pending_count=1,
+                good_count=1,
+                bad_count=1,
+                avg_expected_profit=40.0,
+                avg_actual_profit=25.0,
+                avg_profit_delta=-15.0,
+                good_rate=0.5,
+                completion_rate=0.5,
+                rejection_rate=0.5,
+                false_positive_rate=0.5,
+            )
+        ]
+
+        response = self.client.get(
+            "/api/trading-memory/push-quality"
+            "?push_type=opportunity&item_name=arcane_energize&source=mod_flipper&limit=5"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        mock_query.assert_called_once_with(
+            "summarize_push_quality",
+            push_type="opportunity",
+            item_name="arcane_energize",
+            source="mod_flipper",
+            since=None,
+            limit=5,
+        )
+        data = response.json()
+        self.assertEqual(data["count"], 1)
+        record = data["push_quality"][0]
+        self.assertEqual(record["sent_count"], 3)
+        self.assertEqual(record["reviewed_count"], 2)
+        self.assertEqual(record["pending_count"], 1)
+        self.assertEqual(record["avg_profit_delta"], -15.0)
+        self.assertEqual(record["false_positive_rate"], 0.5)
+        serialized = json.dumps(data, ensure_ascii=False)
+        for forbidden in ["metadata", "profile_url", "warframe.market", "/w", "whisper", "token", "SecretSeller"]:
+            self.assertNotIn(forbidden, serialized)
+
+    @patch("warframe_agent.web.app._query_trading_memory")
+    def test_opportunity_outcomes_api_returns_safe_summaries(self, mock_query):
+        from warframe_agent.trading_memory import OpportunityOutcomeMemory
+
+        mock_query.return_value = [
+            OpportunityOutcomeMemory(
+                id=4,
+                timestamp="2026-05-18T13:00:00",
+                opportunity_id="opp-123",
+                item_name="arcane_energize",
+                source="investment",
+                strategy="buy_low_sell_high",
+                status="completed",
+                expected_profit=40,
+                actual_profit=55,
+                user_feedback="worked well",
+                metadata={
+                    "safe_summary": {
+                        "roi_pct": 27.5,
+                        "turnaround_days": 2,
+                        "profile_url": "https://warframe.market/profile/SecretSeller",
+                        "whisper": "/w SecretSeller buy token=SHOULD_NOT_LEAK",
+                    },
+                    "profile_url": "https://warframe.market/profile/SecretSeller",
+                    "whisper": "/w SecretSeller buy token=SHOULD_NOT_LEAK",
+                    "token": "SHOULD_NOT_LEAK",
+                    "nested": {"profile_url": "hidden"},
+                },
+            )
+        ]
+
+        response = self.client.get(
+            "/api/opportunity-outcomes"
+            "?status=completed&item_name=arcane_energize&source=investment&limit=5"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        mock_query.assert_called_once_with(
+            "get_opportunity_outcomes",
+            status="completed",
+            item_name="arcane_energize",
+            source="investment",
+            limit=5,
+        )
+        data = response.json()
+        self.assertEqual(data["count"], 1)
+        record = data["opportunity_outcomes"][0]
+        self.assertEqual(record["opportunity_id"], "opp-123")
+        self.assertEqual(record["item_name"], "arcane_energize")
+        self.assertEqual(record["actual_profit"], 55)
+        self.assertEqual(record["metadata"], {"roi_pct": 27.5, "turnaround_days": 2})
+        serialized = json.dumps(data, ensure_ascii=False)
+        for forbidden in ["profile_url", "/w", "token", "SecretSeller", "SHOULD_NOT_LEAK", "whisper", "nested"]:
+            self.assertNotIn(forbidden, serialized)
+
+    @patch("warframe_agent.web.app._query_trading_memory")
     def test_trading_memory_endpoints_return_empty_when_db_missing(self, mock_query):
         mock_query.return_value = []
 
@@ -1266,9 +1910,15 @@ class TestTradingMemoryAPI(unittest.TestCase):
         self.client.get("/api/trading-memory/market-snapshots")
         self.client.get("/api/trading-memory/recommendations")
         self.client.get("/api/trading-memory/push-history")
+        self.client.get("/api/trading-memory/push-quality")
 
         method_names = [call.args[0] for call in mock_query.call_args_list]
-        self.assertEqual(method_names, ["get_market_snapshots", "get_recommendations", "get_push_history"])
+        self.assertEqual(method_names, [
+            "get_market_snapshots",
+            "get_recommendations",
+            "get_push_history",
+            "summarize_push_quality",
+        ])
         for method_name in method_names:
             self.assertFalse(method_name.startswith("record_"))
             self.assertNotEqual(method_name, "cleanup_old_data")

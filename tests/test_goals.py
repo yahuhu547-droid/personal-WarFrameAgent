@@ -11,7 +11,9 @@ from warframe_agent.goals import (
     calculate_opportunity_score,
     create_goal,
     execute_plan,
+    format_goal_criteria_summary,
     plan_for_goal,
+    parse_goal_description_criteria,
     record_trade_outcome,
 )
 from warframe_agent.memory import AgentMemory
@@ -36,6 +38,28 @@ def test_create_goal_defaults():
     goal = create_goal("flip_mod", "翻转 Mod")
     assert goal.target == "all"
     assert goal.criteria == {}
+
+
+def test_parse_goal_description_criteria_supports_chinese_numerals_and_defaults():
+    criteria = parse_goal_description_criteria("一个月攒五百白金，预算三百，稳健，ROI二十%")
+
+    assert criteria["target_profit"] == 500
+    assert criteria["target_amount"] == 500
+    assert criteria["timeframe_days"] == 30
+    assert criteria["budget"] == 300
+    assert criteria["risk"] == "low"
+    assert criteria["min_roi"] == 20
+
+
+def test_parse_goal_description_criteria_supports_risk_aliases_and_summary():
+    criteria = parse_goal_description_criteria("三天赚100p，激进，至少30% ROI")
+
+    assert criteria["target_profit"] == 100
+    assert criteria["timeframe_days"] == 3
+    assert criteria["risk"] == "high"
+    assert criteria["min_roi"] == 30
+    assert criteria["budget"] == 500
+    assert format_goal_criteria_summary(criteria) == "目标利润 100p；周期 3 天；预算 500p；高风险；最低 ROI 30%"
 
 
 # ── 计划生成 ──────────────────────────────────────────────

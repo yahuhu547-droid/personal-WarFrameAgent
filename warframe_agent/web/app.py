@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 from contextlib import asynccontextmanager
@@ -22,15 +23,19 @@ from ..chat import ChatAgent, build_item_context_result
 from ..dictionary import normalize_lookup_key, normalize_market_id
 from ..market import fetch_orders, fetch_orders_async, best_sellers, best_buyers, get_max_rank_from_orders
 from ..goals import create_goal, plan_for_goal, execute_plan, record_trade_outcome
-from ..memory import AgentMemory, PriceAlert, MEMORY_PATH
+from ..memory import AgentMemory, PriceAlert, MEMORY_PATH, PROFILE_CATEGORIES
 from ..memory_recall import MemoryRecallService
+from ..memory_vault import build_memory_vault_snapshot, memory_vault_snapshot_to_api
 from ..monitor import PriceMonitor, AlertNotification, WatchNotification, EnrichedNotification, ProactivePush
 from ..opportunity_lookup import OpportunityLookupStore
+from ..learning_completion import build_learning_completion_snapshot
 from ..names import display_item_name
+from ..personal_profile import build_personal_profile, profile_safe_summary
 from ..price_history import PriceHistoryDB
+from ..safety_policy import build_runtime_safety_policy
 from ..trade_history import TradeHistoryDB
 from ..trading_memory import TradingMemoryDB
-from ..conversation_log import query_tool_call_history, query_tool_call_stats
+from ..conversation_log import load_conversations, query_tool_call_history, query_tool_call_stats
 from ..formatter import build_whisper
 from ..game_data import GameDataStore
 from ..push import WxPusher, PushConfig, format_trade_plan_push, should_send_daily_report, WXPUSHER_QR_API
@@ -42,9 +47,11 @@ from ..events import EventTracker
 logger = logging.getLogger(__name__)
 _WEB_STARTED_AT = time.time()
 _RUNTIME_SENSITIVE_KEY_RE = re.compile(
-    r"(?im)\b(password|token|secret|api_key|apikey|authorization|cookie|app_secret|chat_id)\b\s*[:=]\s*([^\s\r\n,;]+)"
+    r"(?im)\b[a-z0-9_.-]*(?:password|token|secret|api[_-]?key|authorization|cookie|app[_-]?secret|chat[_-]?id)[a-z0-9_.-]*\b\s*[:=]\s*([^\s\r\n,;]+)"
 )
 _RUNTIME_BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+_RUNTIME_PROFILE_URL_RE = re.compile(r"(?i)(?:https?://)?(?:www\.)?warframe\.market/profile/[^\s,;]+")
+_RUNTIME_WHISPER_RE = re.compile(r"(?im)(^|\s)/w\s+[^\r\n]+")
 _RUNTIME_ERROR_MAX_CHARS = 300
 
 @asynccontextmanager
@@ -357,9 +364,18 @@ def _masked_secret(value: str) -> str:
 def _runtime_redact_text(value: Any, max_chars: int = _RUNTIME_ERROR_MAX_CHARS) -> str:
     text = _RUNTIME_BEARER_RE.sub("[REDACTED]", str(value or ""))
     text = _RUNTIME_SENSITIVE_KEY_RE.sub("[REDACTED]", text)
+    text = _RUNTIME_PROFILE_URL_RE.sub("[REDACTED]", text)
+    text = _RUNTIME_WHISPER_RE.sub(lambda match: f"{match.group(1)}[REDACTED]", text)
     if len(text) > max_chars:
         return f"{text[:max_chars]}... [len={len(text)}]"
     return text
+
+
+def _runtime_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _safe_feishu_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -408,11 +424,36 @@ def _safe_runtime_value(value: Any) -> Any:
         safe = {}
         for key, item in list(value.items())[:12]:
             key_text = str(key)
-            if _RUNTIME_SENSITIVE_KEY_RE.search(f"{key_text}=x"):
+            if _is_runtime_sensitive_key(key_text):
                 continue
             safe[key_text] = _safe_runtime_value(item)
         return safe
     return _runtime_redact_text(repr(value), max_chars=120)
+
+
+def _is_runtime_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    compact = re.sub(r"[^a-z0-9]+", "", lowered)
+    tokens = (
+        "password",
+        "token",
+        "secret",
+        "apikey",
+        "authorization",
+        "cookie",
+        "appsecret",
+        "chatid",
+        "messagecontext",
+        "prompt",
+        "rawarguments",
+        "resultsummary",
+        "displaycontent",
+        "modelcontext",
+        "finalanswer",
+        "profile",
+        "whisper",
+    )
+    return any(token in compact for token in tokens)
 
 
 def _safe_tool_call_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -438,6 +479,128 @@ def _recent_tool_calls_status_snapshot(limit: int = 10) -> dict[str, Any]:
         return {"count": 0, "items": [], "error_summary": _runtime_redact_text(exc)}
     items = [_safe_tool_call_record(record) for record in records]
     return {"count": len(items), "items": items}
+
+
+def _safe_agent_trace_step(step: Any) -> dict[str, Any]:
+    safe_step = {
+        "iteration": getattr(step, "iteration", None),
+        "tool_name": _runtime_redact_text(getattr(step, "tool_name", ""), max_chars=80),
+        "args_summary": _safe_runtime_value(getattr(step, "args_summary", {})),
+        "ok": getattr(step, "ok", None),
+        "duration_ms": getattr(step, "duration_ms", None),
+    }
+    safe_step["error_present"] = bool(getattr(step, "error", None))
+    result_summary = getattr(step, "result_summary", None)
+    if result_summary:
+        safe_step["has_result"] = True
+        safe_step["result_chars"] = len(str(result_summary))
+    else:
+        safe_step["has_result"] = False
+        safe_step["result_chars"] = 0
+    return safe_step
+
+
+def _safe_agent_plan_review(review: Any) -> dict[str, Any]:
+    if review is None:
+        return {
+            "present": False,
+            "status": "unknown",
+            "verification_note": "",
+            "blocked_reason": "",
+            "issue_count": 0,
+            "unknown_tool_count": 0,
+            "non_exposed_tool_count": 0,
+            "side_effect_tool_count": 0,
+            "sensitive_argument_count": 0,
+            "verification_gap_count": 0,
+        }
+    return {
+        "present": True,
+        "status": _runtime_redact_text(getattr(review, "status", ""), max_chars=40),
+        "verification_note": _runtime_redact_text(getattr(review, "verification_note", ""), max_chars=180),
+        "blocked_reason": _runtime_redact_text(getattr(review, "blocked_reason", ""), max_chars=80),
+        "issue_count": int(getattr(review, "issue_count", 0) or 0),
+        "unknown_tool_count": int(getattr(review, "unknown_tool_count", 0) or 0),
+        "non_exposed_tool_count": int(getattr(review, "non_exposed_tool_count", 0) or 0),
+        "side_effect_tool_count": int(getattr(review, "side_effect_tool_count", 0) or 0),
+        "sensitive_argument_count": int(getattr(review, "sensitive_argument_count", 0) or 0),
+        "verification_gap_count": int(getattr(review, "verification_gap_count", 0) or 0),
+    }
+
+
+def _safe_agent_plan_step(step: Any) -> dict[str, Any]:
+    return {
+        "index": getattr(step, "index", None),
+        "tool_name": _runtime_redact_text(getattr(step, "tool_name", ""), max_chars=80),
+        "purpose": _runtime_redact_text(getattr(step, "purpose", ""), max_chars=160),
+        "args_summary": _safe_runtime_value(getattr(step, "args_summary", {})),
+        "status": _runtime_redact_text(getattr(step, "status", ""), max_chars=40),
+        "ok": getattr(step, "ok", None),
+        "error_present": bool(getattr(step, "error_present", False)),
+        "duration_ms": getattr(step, "duration_ms", None),
+        "result_present": bool(getattr(step, "result_present", False)),
+        "verification_note": _runtime_redact_text(getattr(step, "verification_note", ""), max_chars=180),
+        "blocked_reason": _runtime_redact_text(getattr(step, "blocked_reason", ""), max_chars=80),
+    }
+
+
+def _safe_agent_plan_snapshot(plan: Any) -> dict[str, Any]:
+    if plan is None:
+        return {
+            "present": False,
+            "status": "idle",
+            "goal_present": False,
+            "step_count": 0,
+            "verification_note": "",
+            "blocked_reason": "",
+            "review": _safe_agent_plan_review(None),
+            "steps": [],
+        }
+    raw_steps = list(getattr(plan, "steps", []) or [])
+    return {
+        "present": True,
+        "status": _runtime_redact_text(getattr(plan, "status", "idle") or "idle", max_chars=40),
+        "iteration": getattr(plan, "iteration", 0),
+        "goal_present": bool(getattr(plan, "goal", "")),
+        "goal": _runtime_redact_text(getattr(plan, "goal", ""), max_chars=160),
+        "step_count": len(raw_steps),
+        "verification_note": _runtime_redact_text(getattr(plan, "verification_note", ""), max_chars=180),
+        "blocked_reason": _runtime_redact_text(getattr(plan, "blocked_reason", ""), max_chars=80),
+        "review": _safe_agent_plan_review(getattr(plan, "review", None)),
+        "steps": [_safe_agent_plan_step(step) for step in raw_steps[:10]],
+    }
+
+
+def _agent_trace_status_snapshot(agent: Any) -> dict[str, Any]:
+    trace = getattr(agent, "last_agent_trace", None)
+    if trace is None:
+        return {
+            "present": False,
+            "status": "idle",
+            "iterations": 0,
+            "max_iterations": 0,
+            "duration_ms": None,
+            "started_at": None,
+            "ended_at": None,
+            "step_count": 0,
+            "steps": [],
+            "plan": _safe_agent_plan_snapshot(None),
+        }
+    raw_steps = list(getattr(trace, "steps", []) or [])
+    return {
+        "present": True,
+        "status": _runtime_redact_text(getattr(trace, "status", "idle") or "idle", max_chars=40),
+        "started_at": getattr(trace, "started_at", None),
+        "ended_at": getattr(trace, "ended_at", None),
+        "max_iterations": getattr(trace, "max_iterations", 0),
+        "duration_ms": getattr(trace, "duration_ms", None),
+        "termination_reason": _runtime_redact_text(getattr(trace, "termination_reason", None), max_chars=80),
+        "iterations": getattr(trace, "iterations", 0),
+        "step_count": len(raw_steps),
+        "steps": [_safe_agent_trace_step(step) for step in raw_steps[-5:]],
+        "plan": _safe_agent_plan_snapshot(getattr(trace, "plan", None)),
+        "final_answer_present": bool(getattr(trace, "final_answer", None)),
+    }
 
 
 def _background_tasks_status_snapshot() -> dict[str, Any]:
@@ -467,6 +630,84 @@ def _background_tasks_status_snapshot() -> dict[str, Any]:
         "error": sum(1 for task in tasks if task.get("status") == "error"),
         "done": sum(1 for task in tasks if task.get("status") == "done"),
         "tasks": tasks,
+    }
+
+
+def _ops_health_snapshot(
+    *,
+    scheduler_snapshot: dict[str, Any],
+    background_tasks_snapshot: dict[str, Any],
+    feishu_snapshot: dict[str, Any],
+    wxpusher_snapshot: dict[str, Any],
+    daily_report_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    reasons: list[str] = []
+
+    jobs = list(scheduler_snapshot.get("jobs") or [])
+    scheduler_running = bool(scheduler_snapshot.get("running"))
+    failed_job_count = sum(
+        1
+        for job in jobs
+        if job.get("last_success") is False or _runtime_int(job.get("error_count")) > 0
+    )
+    running_job_count = sum(1 for job in jobs if job.get("running"))
+    if not scheduler_running:
+        reasons.append("scheduler_stopped")
+    if failed_job_count:
+        reasons.append("scheduler_job_failed")
+
+    background_error_count = _runtime_int(background_tasks_snapshot.get("error"))
+    if background_error_count:
+        reasons.append("background_task_error")
+
+    feishu_enabled = bool(feishu_snapshot.get("enabled"))
+    feishu_configured = bool(feishu_snapshot.get("configured"))
+    feishu_running = bool(feishu_snapshot.get("managed_running"))
+    if feishu_enabled and feishu_configured and not feishu_running:
+        reasons.append("feishu_not_running")
+
+    wxpusher_enabled = bool(wxpusher_snapshot.get("enabled"))
+    wxpusher_configured = bool(wxpusher_snapshot.get("configured"))
+    wxpusher_available = bool(wxpusher_snapshot.get("available"))
+    daily_report_enabled = bool(daily_report_snapshot.get("enabled"))
+    status = "degraded" if reasons else "ok"
+
+    return {
+        "status": status,
+        "reason_count": len(reasons),
+        "reasons": reasons,
+        "components": {
+            "scheduler": {
+                "status": "degraded" if (not scheduler_running or failed_job_count) else "ok",
+                "running": scheduler_running,
+                "job_count": _runtime_int(scheduler_snapshot.get("total")) or len(jobs),
+                "failed_job_count": failed_job_count,
+                "running_job_count": running_job_count,
+            },
+            "background_tasks": {
+                "status": "degraded" if background_error_count else "ok",
+                "running": _runtime_int(background_tasks_snapshot.get("running")),
+                "error": background_error_count,
+                "total": _runtime_int(background_tasks_snapshot.get("total")),
+            },
+            "feishu": {
+                "status": "degraded" if (feishu_enabled and feishu_configured and not feishu_running) else "ok",
+                "enabled": feishu_enabled,
+                "configured": feishu_configured,
+                "running": feishu_running,
+            },
+            "wxpusher": {
+                "status": "ok",
+                "enabled": wxpusher_enabled,
+                "configured": wxpusher_configured,
+                "available": wxpusher_available,
+            },
+            "daily_report": {
+                "status": "ok",
+                "enabled": daily_report_enabled,
+                "should_send_now": bool(daily_report_snapshot.get("should_send_now")),
+            },
+        },
     }
 
 
@@ -529,10 +770,74 @@ class PreferenceRequest(ApiRequestModel):
         return cls._strip_text(value, "value")
 
 
+class ProfilePreferencesRequest(ApiRequestModel):
+    risk_appetite: Literal["low", "medium", "high"] | None = None
+    budget_min: int | None = Field(default=None, ge=0, le=1_000_000)
+    budget_max: int | None = Field(default=None, ge=0, le=1_000_000)
+    preferred_categories: list[str] | None = Field(default=None, max_length=10)
+    max_turnaround_days: int | None = Field(default=None, ge=1, le=365)
+    min_roi_pct: int | None = Field(default=None, ge=0, le=10_000)
+
+    @field_validator("preferred_categories")
+    @classmethod
+    def validate_preferred_categories(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        cleaned: list[str] = []
+        for category in value:
+            text = str(category or "").strip().lower()
+            if text not in PROFILE_CATEGORIES:
+                raise ValueError("preferred_categories contains unsupported category")
+            if text not in cleaned:
+                cleaned.append(text)
+        return cleaned
+
+
+def _load_profile_opportunity_outcomes(limit: int = 100) -> list:
+    db = TradingMemoryDB.open_readonly_if_exists()
+    if db is None:
+        return []
+    try:
+        return db.get_opportunity_outcomes(limit=limit)
+    except Exception as exc:
+        logger.debug("读取个人画像机会复盘失败: %s", exc)
+        return []
+    finally:
+        db.close()
+
+
+def _profile_response(memory: AgentMemory, opportunity_outcomes=None) -> dict[str, Any]:
+    return {
+        "profile": profile_safe_summary(
+            build_personal_profile(memory, opportunity_outcomes=opportunity_outcomes)
+        )
+    }
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
     reply = await asyncio.to_thread(chat_agent.answer, request.message)
     return ChatResponse(reply=reply)
+
+
+@app.get("/api/profile")
+async def get_profile() -> JSONResponse:
+    memory = await _load_memory_async()
+    opportunity_outcomes = await asyncio.to_thread(_load_profile_opportunity_outcomes)
+    return JSONResponse(_profile_response(memory, opportunity_outcomes=opportunity_outcomes))
+
+
+@app.post("/api/profile/preferences")
+async def update_profile_preferences(request: ProfilePreferencesRequest) -> JSONResponse:
+    updates = request.model_dump(exclude_none=True)
+    memory = await _load_memory_async()
+    if updates:
+        memory = memory.with_updated_preferences(**updates)
+        await _save_memory_async(memory)
+    opportunity_outcomes = await asyncio.to_thread(_load_profile_opportunity_outcomes)
+    response = _profile_response(memory, opportunity_outcomes=opportunity_outcomes)
+    response["status"] = "ok"
+    return JSONResponse(response)
 
 
 @app.get("/api/memory", response_model=MemoryResponse)
@@ -1513,6 +1818,17 @@ def _query_memory_recall(query: str, item_name: str = "", intent: str = "", tool
         db.close()
 
 
+def _query_memory_vault(limit: int = 50) -> dict[str, Any]:
+    db = TradingMemoryDB.open_readonly_if_exists()
+    try:
+        conversations = load_conversations(limit=limit)
+        snapshot = build_memory_vault_snapshot(db=db, conversations=conversations, limit=limit)
+        return memory_vault_snapshot_to_api(snapshot)
+    finally:
+        if db is not None:
+            db.close()
+
+
 def _serialize_market_snapshot_memory(record) -> dict[str, Any]:
     payload = record.payload or {}
     return {
@@ -1575,6 +1891,109 @@ def _serialize_push_history_memory(record) -> dict[str, Any]:
     }
 
 
+def _serialize_push_quality_signal(record) -> dict[str, Any]:
+    return {
+        "item_name": record.item_name,
+        "source": record.source,
+        "strategy": record.strategy,
+        "category": record.category,
+        "sent_count": record.sent_count,
+        "reviewed_count": record.reviewed_count,
+        "completed_count": record.completed_count,
+        "accepted_count": record.accepted_count,
+        "rejected_count": record.rejected_count,
+        "pending_count": record.pending_count,
+        "good_count": record.good_count,
+        "bad_count": record.bad_count,
+        "avg_expected_profit": record.avg_expected_profit,
+        "avg_actual_profit": record.avg_actual_profit,
+        "avg_profit_delta": record.avg_profit_delta,
+        "good_rate": record.good_rate,
+        "completion_rate": record.completion_rate,
+        "rejection_rate": record.rejection_rate,
+        "false_positive_rate": record.false_positive_rate,
+    }
+
+
+_SAFE_OPPORTUNITY_METADATA_KEYS = {
+    "source",
+    "strategy",
+    "item_id",
+    "required_quantity",
+    "total_cost",
+    "total_revenue",
+    "profit",
+    "roi_pct",
+    "risk_level",
+    "profit_bucket",
+    "plan_signature",
+    "turnaround_days",
+    "budget_spent",
+    "quantity",
+    "confidence",
+    "personal_score",
+    "market_score",
+    "personal_reasons",
+}
+
+
+def _is_safe_profile_api_text(value: str) -> bool:
+    lowered = value.lower()
+    return not (
+        "/w" in lowered
+        or "profile_url" in lowered
+        or "warframe.market/profile" in lowered
+        or "token" in lowered
+        or _RUNTIME_SENSITIVE_KEY_RE.search(value)
+        or _RUNTIME_BEARER_RE.search(value)
+    )
+
+
+def _safe_opportunity_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    candidates: dict[str, Any] = {}
+    safe_summary = metadata.get("safe_summary")
+    if isinstance(safe_summary, dict):
+        candidates.update(safe_summary)
+    candidates.update(metadata)
+    candidates.pop("safe_summary", None)
+    for key in _SAFE_OPPORTUNITY_METADATA_KEYS:
+        value = candidates.get(key)
+        if isinstance(value, (bool, int, float)) or value is None:
+            if value is not None:
+                safe[key] = value
+        elif isinstance(value, str) and _is_safe_profile_api_text(value):
+            safe[key] = value[:120]
+        elif isinstance(value, list):
+            safe_values = [str(item).strip()[:120] for item in value if _is_safe_profile_api_text(str(item))]
+            if safe_values:
+                safe[key] = safe_values[:10]
+    return safe
+
+
+def _safe_opportunity_feedback(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or not _is_safe_profile_api_text(text):
+        return ""
+    return text[:500]
+
+
+def _serialize_opportunity_outcome_memory(record) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "timestamp": record.timestamp,
+        "opportunity_id": record.opportunity_id,
+        "item_name": record.item_name,
+        "source": record.source,
+        "strategy": record.strategy,
+        "status": record.status,
+        "expected_profit": record.expected_profit,
+        "actual_profit": record.actual_profit,
+        "user_feedback": _safe_opportunity_feedback(record.user_feedback),
+        "metadata": _safe_opportunity_metadata(record.metadata or {}),
+    }
+
+
 @app.get("/api/memory/recall")
 async def get_memory_recall(
     query: str = Query("", max_length=500),
@@ -1585,6 +2004,12 @@ async def get_memory_recall(
 ) -> JSONResponse:
     tools = [name.strip() for name in tool_names.split(",") if name.strip()]
     result = await asyncio.to_thread(_query_memory_recall, query, item_name, intent, tools, limit)
+    return JSONResponse(result)
+
+
+@app.get("/api/memory/vault")
+async def get_memory_vault(limit: int = Query(50, ge=1, le=200)) -> JSONResponse:
+    result = await asyncio.to_thread(_query_memory_vault, limit)
     return JSONResponse(result)
 
 
@@ -1643,6 +2068,46 @@ async def get_trading_memory_push_history(
     )
     pushes = [_serialize_push_history_memory(record) for record in records]
     return JSONResponse({"push_history": pushes, "count": len(pushes)})
+
+
+@app.get("/api/trading-memory/push-quality")
+async def get_trading_memory_push_quality(
+    push_type: str = Query("opportunity", max_length=60),
+    item_name: str | None = Query(default=None, max_length=120),
+    source: str | None = Query(default=None, max_length=120),
+    since: str | None = None,
+    limit: int = Query(100, ge=1, le=500),
+) -> JSONResponse:
+    records = await asyncio.to_thread(
+        _query_trading_memory,
+        "summarize_push_quality",
+        push_type=push_type,
+        item_name=item_name,
+        source=source,
+        since=since,
+        limit=limit,
+    )
+    quality = [_serialize_push_quality_signal(record) for record in records]
+    return JSONResponse({"push_quality": quality, "count": len(quality)})
+
+
+@app.get("/api/opportunity-outcomes")
+async def get_opportunity_outcomes(
+    status: str | None = Query(default=None, max_length=60),
+    item_name: str | None = Query(default=None, max_length=120),
+    source: str | None = Query(default=None, max_length=120),
+    limit: int = Query(100, ge=1, le=500),
+) -> JSONResponse:
+    records = await asyncio.to_thread(
+        _query_trading_memory,
+        "get_opportunity_outcomes",
+        status=status,
+        item_name=item_name,
+        source=source,
+        limit=limit,
+    )
+    outcomes = [_serialize_opportunity_outcome_memory(record) for record in records]
+    return JSONResponse({"opportunity_outcomes": outcomes, "count": len(outcomes)})
 
 
 # ===== 套利检测 API =====
@@ -1714,6 +2179,10 @@ def _set_scan_cache(key: str, data: list) -> None:
     _scan_cache[key] = (data, time.time())
 
 
+def _personal_profile_cache_key(profile) -> str:
+    return json.dumps(profile_safe_summary(profile), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 @app.get("/api/mod_flipper")
 async def mod_flipper_endpoint(
     min_profit: int = Query(5, ge=0, le=100000),
@@ -1724,7 +2193,10 @@ async def mod_flipper_endpoint(
     import uuid
     from ..mod_flipper import scan_all_mod_flips
     from ..scout import scout_mod_candidates
-    cache_key = f"mod_flipper_{min_profit}_{min_roi_pct}_{limit}"
+    memory = await _load_memory_async()
+    profile_outcomes = await asyncio.to_thread(_load_profile_opportunity_outcomes)
+    personal_profile = build_personal_profile(memory, opportunity_outcomes=profile_outcomes)
+    cache_key = f"mod_flipper_{min_profit}_{min_roi_pct}_{limit}_{_personal_profile_cache_key(personal_profile)}"
     cached = _get_scan_cache(cache_key)
     if cached is not None:
         return JSONResponse({"status": "done", "results": cached, "total": len(cached)})
@@ -1740,6 +2212,7 @@ async def mod_flipper_endpoint(
                 scan_all_mod_flips, items, fetch_orders,
                 min_profit=min_profit, min_roi_pct=min_roi_pct, limit=limit,
                 scout_fn=scout_mod_candidates,
+                personal_profile=personal_profile,
             )
             formatted = [
                 {
@@ -1753,6 +2226,8 @@ async def mod_flipper_endpoint(
                     "max_rank_buyer": r.max_rank_buyer,
                     "required_quantity": r.required_quantity,
                     "trade_plan": r.trade_plan,
+                    "personal_score": r.personal_score,
+                    "personal_reasons": r.personal_reasons or [],
                 }
                 for r in results
             ]
@@ -1776,7 +2251,10 @@ async def set_profit_endpoint(
     import uuid
     from ..set_profit import scan_all_set_profits
     from ..scout import scout_set_candidates
-    cache_key = f"set_profit_{min_profit}_{limit}"
+    memory = await _load_memory_async()
+    profile_outcomes = await asyncio.to_thread(_load_profile_opportunity_outcomes)
+    personal_profile = build_personal_profile(memory, opportunity_outcomes=profile_outcomes)
+    cache_key = f"set_profit_{min_profit}_{limit}_{_personal_profile_cache_key(personal_profile)}"
     cached = _get_scan_cache(cache_key)
     if cached is not None:
         return JSONResponse({"status": "done", "results": cached, "total": len(cached)})
@@ -1792,6 +2270,7 @@ async def set_profit_endpoint(
                 scan_all_set_profits, items, fetch_orders,
                 min_profit=min_profit, limit=limit,
                 scout_fn=scout_set_candidates,
+                personal_profile=personal_profile,
             )
             formatted = [
                 {
@@ -1811,6 +2290,8 @@ async def set_profit_endpoint(
                     "part_details": r.part_details or [], "set_seller": r.set_seller,
                     "set_buyer": r.set_buyer,
                     "trade_plan": r.trade_plan,
+                    "personal_score": r.personal_score,
+                    "personal_reasons": r.personal_reasons or [],
                 }
                 for r in results
             ]
@@ -1825,17 +2306,73 @@ async def set_profit_endpoint(
     return JSONResponse({"status": "running", "task_id": task_id})
 
 
+def _parse_optional_query_int(
+    value: Any,
+    *,
+    name: str,
+    min_value: int,
+    max_value: int,
+) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "":
+            return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"{name} must be an integer") from exc
+    if parsed < min_value or parsed > max_value:
+        raise HTTPException(status_code=422, detail=f"{name} must be between {min_value} and {max_value}")
+    return parsed
+
+
+def _parse_optional_query_float(
+    value: Any,
+    *,
+    name: str,
+    min_value: float,
+    max_value: float,
+) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "":
+            return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"{name} must be a number") from exc
+    if not math.isfinite(parsed) or parsed < min_value or parsed > max_value:
+        raise HTTPException(status_code=422, detail=f"{name} must be between {min_value:g} and {max_value:g}")
+    return parsed
+
+
 @app.get("/api/investment")
 async def investment_endpoint(
-    budget: int = Query(500, ge=0, le=100000),
-    min_roi_pct: float = Query(10.0, ge=0, le=10000),
+    budget: str | None = Query(None, max_length=20),
+    min_roi_pct: str | None = Query(None, max_length=20),
     limit: int = Query(30, ge=1, le=100),
 ) -> JSONResponse:
     """Prime 套装套利顾问 API（异步）。"""
     import uuid
-    from ..investment import scan_prime_investments
+    from ..investment import resolve_investment_preference_defaults, scan_prime_investments
     from ..scout import scout_investment_candidates
-    cache_key = f"investment_{budget}_{min_roi_pct}_{limit}"
+    memory = await _load_memory_async()
+    profile_outcomes = await asyncio.to_thread(_load_profile_opportunity_outcomes)
+    personal_profile = build_personal_profile(memory, opportunity_outcomes=profile_outcomes)
+    requested_budget = _parse_optional_query_int(budget, name="budget", min_value=0, max_value=100000)
+    requested_min_roi = _parse_optional_query_float(min_roi_pct, name="min_roi_pct", min_value=0.0, max_value=10000.0)
+    budget, min_roi_pct = resolve_investment_preference_defaults(
+        memory,
+        budget=requested_budget,
+        min_roi_pct=requested_min_roi,
+        fallback_budget=500,
+        fallback_min_roi_pct=10.0,
+    )
+    cache_key = f"investment_{budget}_{min_roi_pct}_{limit}_{_personal_profile_cache_key(personal_profile)}"
     cached = _get_scan_cache(cache_key)
     if cached is not None:
         return JSONResponse({"status": "done", "results": cached, "total": len(cached)})
@@ -1851,6 +2388,7 @@ async def investment_endpoint(
                 scan_prime_investments, items, fetch_orders,
                 budget=budget, min_roi_pct=min_roi_pct, limit=limit,
                 scout_fn=lambda groups: scout_investment_candidates(groups, budget=budget),
+                personal_profile=personal_profile,
             )
             formatted = [
                 {
@@ -1862,6 +2400,8 @@ async def investment_endpoint(
                     "risk_level": r.risk_level, "part_details": r.part_details,
                     "set_item_id": r.set_item_id,
                     "trade_plan": r.trade_plan,
+                    "personal_score": r.personal_score,
+                    "personal_reasons": r.personal_reasons or [],
                 }
                 for r in results
             ]
@@ -1932,19 +2472,23 @@ async def runtime_status() -> JSONResponse:
         wxpusher_snapshot = _wxpusher_status_snapshot()
         background_tasks_snapshot = _background_tasks_status_snapshot()
         recent_tool_calls_snapshot = _recent_tool_calls_status_snapshot()
-        status = "ok"
-        if not scheduler_snapshot.get("running"):
-            status = "degraded"
-        if (
-            feishu_snapshot.get("enabled")
-            and feishu_snapshot.get("configured")
-            and not feishu_snapshot.get("managed_running")
-        ):
-            status = "degraded"
-        if background_tasks_snapshot.get("error"):
-            status = "degraded"
+        agent_trace_snapshot = _agent_trace_status_snapshot(chat_agent)
+        learning_completion_snapshot = build_learning_completion_snapshot()
+        safety_policy_snapshot = build_runtime_safety_policy(
+            scheduler_snapshot=scheduler_snapshot,
+            feishu_snapshot=feishu_snapshot,
+            wxpusher_snapshot=wxpusher_snapshot,
+            tool_registry=getattr(chat_agent, "tool_registry", None),
+        )
+        ops_health_snapshot = _ops_health_snapshot(
+            scheduler_snapshot=scheduler_snapshot,
+            background_tasks_snapshot=background_tasks_snapshot,
+            feishu_snapshot=feishu_snapshot,
+            wxpusher_snapshot=wxpusher_snapshot,
+            daily_report_snapshot=daily_report_snapshot,
+        )
         return JSONResponse({
-            "status": status,
+            "status": ops_health_snapshot["status"],
             "web": {
                 "started_at": _WEB_STARTED_AT,
                 "uptime_seconds": max(0, int(time.time() - _WEB_STARTED_AT)),
@@ -1955,6 +2499,10 @@ async def runtime_status() -> JSONResponse:
             "daily_report": daily_report_snapshot,
             "background_tasks": background_tasks_snapshot,
             "recent_tool_calls": recent_tool_calls_snapshot,
+            "agent_trace": agent_trace_snapshot,
+            "learning_completion": learning_completion_snapshot,
+            "safety_policy": safety_policy_snapshot,
+            "ops_health": ops_health_snapshot,
         })
     except Exception as exc:
         logger.warning("运行态状态查询失败: %s", exc)

@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 from . import config
 from .market import fetch_orders
@@ -20,6 +20,10 @@ from .scout import scout_mod_candidates, scout_set_candidates, scout_investment_
 logger = logging.getLogger(__name__)
 
 GOALS_PATH = config.DATA_DIR / "goals.json"
+_GOAL_NUMBER_PATTERN = r"(?:\d+|[一二两三四五六七八九十百千万]+)"
+_GOAL_PLATINUM_UNIT_PATTERN = r"(?:p|pt|白金|铂金|platinum)?"
+_GOAL_DEFAULT_CRITERIA = {"budget": 500, "min_roi": 10}
+_GOAL_RISK_LABELS = {"low": "低风险", "medium": "中风险", "high": "高风险"}
 
 
 # ── 数据结构 ──────────────────────────────────────────────
@@ -84,6 +88,132 @@ def create_goal(
         status="active",
         created_at=datetime.now(timezone.utc).isoformat(),
     )
+
+
+def _parse_chinese_positive_int(text: str) -> int | None:
+    digits = {
+        "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+        "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+    }
+    units = {"十": 10, "百": 100, "千": 1000, "万": 10000}
+    total = 0
+    current = 0
+    matched = False
+    for char in text:
+        if char in digits:
+            current = digits[char]
+            matched = True
+        elif char in units:
+            unit = units[char]
+            matched = True
+            if current == 0 and unit == 10:
+                current = 1
+            total += current * unit
+            current = 0
+        else:
+            return None
+    if not matched:
+        return None
+    return total + current
+
+
+def _parse_goal_number(text: str | None) -> int | None:
+    if not text:
+        return None
+    normalized = re.sub(r"[,，_\s]", "", text).lower()
+    if normalized.isdigit():
+        return int(normalized)
+    return _parse_chinese_positive_int(normalized)
+
+
+def _extract_goal_amount(description: str, patterns: Iterable[str]) -> int | None:
+    for pattern in patterns:
+        match = re.search(pattern, description, flags=re.IGNORECASE)
+        if match:
+            amount = _parse_goal_number(match.group(1))
+            if amount is not None:
+                return amount
+    return None
+
+
+def _extract_goal_timeframe_days(description: str) -> int | None:
+    if re.search(r"(今天|今日|当天)", description):
+        return 1
+    for match in re.finditer(rf"({_GOAL_NUMBER_PATTERN})\s*(?:个)?(天|日|周|星期|月)", description):
+        amount = _parse_goal_number(match.group(1))
+        if amount is None:
+            continue
+        unit = match.group(2)
+        if unit in ("周", "星期"):
+            return amount * 7
+        if unit == "月":
+            return amount * 30
+        return amount
+    return None
+
+
+def _extract_goal_risk(description: str) -> str | None:
+    if re.search(r"(低风险|风险低|稳健|保守)", description):
+        return "low"
+    if re.search(r"(高风险|风险高|激进|冲刺)", description):
+        return "high"
+    if re.search(r"(中风险|风险适中|均衡|平衡)", description):
+        return "medium"
+    return None
+
+
+def parse_goal_description_criteria(description: str) -> dict:
+    """Parse common Chinese goal wording into deterministic goal criteria."""
+    criteria = dict(_GOAL_DEFAULT_CRITERIA)
+    text = (description or "").strip()
+    if not text:
+        return criteria
+
+    target_profit = _extract_goal_amount(text, [
+        rf"(?:赚到|赚取|赚|盈利|利润|收益|攒|存)\s*({_GOAL_NUMBER_PATTERN})\s*{_GOAL_PLATINUM_UNIT_PATTERN}",
+        rf"({_GOAL_NUMBER_PATTERN})\s*(?:p|pt|白金|铂金|platinum)\s*(?:利润|收益|盈利|目标)",
+    ])
+    if target_profit is not None:
+        criteria["target_profit"] = target_profit
+        criteria["target_amount"] = target_profit
+
+    timeframe_days = _extract_goal_timeframe_days(text)
+    if timeframe_days is not None:
+        criteria["timeframe_days"] = timeframe_days
+
+    budget = _extract_goal_amount(text, [
+        rf"(?:预算|本金|投入|本钱|资金)\s*(?:控制在|不超过|上限|为|是|:|：)?\s*({_GOAL_NUMBER_PATTERN})\s*{_GOAL_PLATINUM_UNIT_PATTERN}",
+    ])
+    if budget is not None:
+        criteria["budget"] = budget
+
+    min_roi = _extract_goal_amount(text, [
+        rf"(?:最低\s*)?(?:roi|回报率|收益率)\s*(?:不低于|至少|>=|大于|超过|为|是|:|：)?\s*({_GOAL_NUMBER_PATTERN})\s*%?",
+        rf"(?:最低|至少|不低于|超过|大于)\s*({_GOAL_NUMBER_PATTERN})\s*%?\s*(?:roi|回报率|收益率)",
+    ])
+    if min_roi is not None:
+        criteria["min_roi"] = min_roi
+
+    risk = _extract_goal_risk(text)
+    if risk:
+        criteria["risk"] = risk
+
+    return criteria
+
+
+def format_goal_criteria_summary(criteria: dict) -> str:
+    parts = []
+    if criteria.get("target_profit") is not None:
+        parts.append(f"目标利润 {criteria['target_profit']}p")
+    if criteria.get("timeframe_days") is not None:
+        parts.append(f"周期 {criteria['timeframe_days']} 天")
+    if criteria.get("budget") is not None:
+        parts.append(f"预算 {criteria['budget']}p")
+    if criteria.get("risk") is not None:
+        parts.append(_GOAL_RISK_LABELS.get(criteria["risk"], str(criteria["risk"])))
+    if criteria.get("min_roi") is not None:
+        parts.append(f"最低 ROI {criteria['min_roi']}%")
+    return "；".join(parts)
 
 
 # ── 计划生成 ──────────────────────────────────────────────

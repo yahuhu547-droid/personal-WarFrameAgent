@@ -5,7 +5,7 @@ import json
 import logging
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -70,6 +70,8 @@ class ModFlipResult:
     max_rank_buyer: dict | None = None
     required_quantity: int = 1
     trade_plan: dict | None = None
+    personal_score: float = 0.0
+    personal_reasons: list[str] | None = None
 
 
 def get_endo_cost(max_rank: int, rarity: str) -> int:
@@ -330,6 +332,8 @@ def format_mod_flip_results_for_model(
                 f"plat_per_1k_endo={result.plat_per_1k_endo:.2f}",
                 f"volume_48h={volume_48h}",
                 f"is_prime={is_prime}",
+                f"personal_score={result.personal_score}",
+                f"personal_reasons={','.join(result.personal_reasons or [])}",
             ])
         )
 
@@ -348,6 +352,7 @@ def scan_all_mod_flips(
     limit: int = 20,
     scout_fn: Callable[[list[dict]], list[str]] | None = None,
     opportunity_filter: str = "all",
+    personal_profile=None,
 ) -> list[ModFlipResult]:
     """扫描所有可交易 Mod，找出翻转机会，按利润排序。"""
     mods = get_tradeable_mods(items)
@@ -356,11 +361,7 @@ def scan_all_mod_flips(
         mods = [m for m in mods if not m.get("is_arcane")]
     elif opportunity_filter == "arcane":
         mods = [m for m in mods if m.get("is_arcane")]
-    high_liquidity = [m for m in mods if m["url_name"] in HIGH_LIQUIDITY_ARCANES]
-    priority_mods = [m for m in mods if m.get("is_prime") or m["url_name"].startswith("galvanized_")]
-    other_arcanes = [m for m in mods if m.get("is_arcane") and m["url_name"] not in HIGH_LIQUIDITY_ARCANES]
-    other_mods = [m for m in mods if not m.get("is_arcane") and not m.get("is_prime") and not m["url_name"].startswith("galvanized_")]
-    all_candidates = [*high_liquidity[:12], *priority_mods[:16], *other_arcanes[:6], *other_mods[:20]]
+    all_candidates = mods
 
     # 智能预筛选：用云端 LLM 选出最可能盈利的候选
     if scout_fn is not None:
@@ -380,10 +381,26 @@ def scan_all_mod_flips(
 
     def _analyze(mod: dict) -> ModFlipResult | None:
         try:
-            return analyze_mod_flip(
+            result = analyze_mod_flip(
                 mod["url_name"], mod["max_rank"], mod["rarity"], order_fetcher,
                 is_prime=mod.get("is_prime", False),
             )
+            if result and personal_profile is not None:
+                from .personal_scoring import score_personal_fit
+
+                plan = result.trade_plan or {}
+                fit = score_personal_fit(
+                    item_id=result.item_id,
+                    source="mod_flipper",
+                    strategy=plan.get("strategy", "mod_rank0_to_max"),
+                    total_cost=plan.get("total_cost", result.r0_buy_price),
+                    profit=result.flip_profit,
+                    roi_pct=result.roi_pct,
+                    risk_level=plan.get("risk_level", "medium"),
+                    profile=personal_profile,
+                )
+                result = replace(result, personal_score=fit.personal_score, personal_reasons=fit.reasons)
+            return result
         except Exception as exc:
             logger.debug("Mod 翻转分析失败 %s: %s", mod.get("url_name", ""), exc)
             return None
@@ -400,4 +417,6 @@ def scan_all_mod_flips(
         0 if r.item_id in HIGH_LIQUIDITY_ARCANES else 1 if r.is_prime or r.item_id.startswith("galvanized_") else 2,
         -r.flip_profit,
     ))
+    if personal_profile is not None:
+        results.sort(key=lambda r: (r.personal_score, r.flip_profit, r.roi_pct), reverse=True)
     return results[:limit]

@@ -3318,6 +3318,14 @@ const TRADING_MEMORY_TABS = {
         typeLabel: '推送类型',
         placeholder: 'opportunity'
     },
+    'push-quality': {
+        label: '推送质量',
+        endpoint: '/api/trading-memory/push-quality',
+        responseKey: 'push_quality',
+        typeParam: 'source',
+        typeLabel: '来源',
+        placeholder: 'spread'
+    },
     'recall-trace': {
         label: '召回 Trace',
         endpoint: '/api/memory/recall',
@@ -3377,6 +3385,11 @@ function renderTradingMemoryShell(content, activeTab) {
                     <option value="50">50</option>
                     <option value="100" selected>100</option>`}
                 </select>
+                ${activeTab === 'push-quality' ? `<select id="push-quality-sort-filter" aria-label="推送质量排序">
+                    <option value="review" selected>待复盘优先</option>
+                    <option value="quality">表现最好</option>
+                    <option value="risk">风险最高</option>
+                </select>` : ''}
                 <button id="trading-memory-refresh-btn" class="detail-action-btn" type="button">刷新</button>
             </div>
             <div id="trading-memory-results" class="trading-memory-list">
@@ -3400,6 +3413,9 @@ function bindTradingMemoryControls(content) {
         });
     });
     content.querySelector('#trading-memory-refresh-btn')?.addEventListener('click', () => {
+        fetchTradingMemoryTab(tradingMemoryActiveTab);
+    });
+    content.querySelector('#push-quality-sort-filter')?.addEventListener('change', () => {
         fetchTradingMemoryTab(tradingMemoryActiveTab);
     });
     content.querySelectorAll('#trading-memory-item-filter, #memory-recall-query-filter, #memory-recall-item-filter, #trading-memory-type-filter').forEach(input => {
@@ -3445,6 +3461,8 @@ async function fetchTradingMemoryTab(tab) {
             results.innerHTML = renderRecommendations(records);
         } else if (tab === 'push-history') {
             results.innerHTML = renderPushHistory(records);
+        } else if (tab === 'push-quality') {
+            results.innerHTML = renderPushQuality(sortPushQualityRecords(records, getPushQualitySortMode()));
         } else {
             results.innerHTML = renderRecallTrace(records, data.query_summary || {}, data.score_breakdown || {});
         }
@@ -3578,6 +3596,214 @@ function renderPushHistory(records) {
             </div>
         `;
     }).join('');
+}
+
+function renderPushQuality(records) {
+    if (!records.length) return renderTradingMemoryEmpty('暂无推送质量', '机会推送被复盘后会显示聚合质量');
+    return records.map(record => {
+        const badge = renderPushQualityBadge(record);
+        return `
+            <div class="card trading-memory-record">
+                <div class="card-body">
+                    <div class="trading-memory-record-header">
+                        <div>
+                            <div class="trading-memory-name">${escapeHtml(record.item_name || '-')}</div>
+                            <div class="trading-memory-meta">${escapeHtml(record.source || '-')} · ${escapeHtml(record.strategy || '-')} · ${escapeHtml(record.category || '-')}</div>
+                        </div>
+                        <span class="badge ${badge.className}">${escapeHtml(badge.label)}</span>
+                    </div>
+                    <div class="trading-memory-prices">
+                        <span>发送 ${escapeHtml(record.sent_count ?? 0)}</span>
+                        <span>复盘 ${escapeHtml(record.reviewed_count ?? 0)}</span>
+                        <span>待复盘 ${escapeHtml(record.pending_count ?? 0)}</span>
+                        <span>好评率 ${escapeHtml(formatQualityRate(record.good_rate))}</span>
+                        <span>误报率 ${escapeHtml(formatQualityRate(record.false_positive_rate))}</span>
+                        <span>利润偏差 ${escapeHtml(formatProfitDelta(record.avg_profit_delta))}</span>
+                    </div>
+                    <div class="trading-memory-chips">
+                        <span class="badge badge-muted">完成 ${escapeHtml(record.completed_count ?? 0)}</span>
+                        <span class="badge badge-muted">拒绝 ${escapeHtml(record.rejected_count ?? 0)}</span>
+                        <span class="badge badge-muted">好结果 ${escapeHtml(record.good_count ?? 0)}</span>
+                        <span class="badge badge-muted">坏结果 ${escapeHtml(record.bad_count ?? 0)}</span>
+                    </div>
+                    ${renderPushQualityInsightTags(record)}
+                    ${renderPushQualityReviewReminder(record)}
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function getPushQualityInsightTags(record) {
+    const reviewed = pushQualityNumber(record?.reviewed_count);
+    const pending = pushQualityNumber(record?.pending_count);
+    const goodRate = pushQualityNumber(record?.good_rate);
+    const falsePositiveRate = pushQualityNumber(record?.false_positive_rate);
+    const profitDelta = pushQualityNumber(record?.avg_profit_delta);
+    const goodCount = pushQualityNumber(record?.good_count);
+    const badCount = pushQualityNumber(record?.bad_count);
+    const tags = [];
+    if (reviewed < PUSH_QUALITY_REVIEW_REMINDER_MIN_REVIEWS) {
+        tags.push({ label: '样本不足', className: 'badge-muted' });
+    }
+    if (pending > 0) {
+        tags.push({ label: '待补复盘', className: 'badge-gold' });
+    }
+    if (reviewed >= PUSH_QUALITY_REVIEW_REMINDER_MIN_REVIEWS && goodRate >= 0.6 && falsePositiveRate <= 0.25 && profitDelta >= 0) {
+        tags.push({ label: '稳定盈利', className: 'badge-green' });
+    }
+    if (reviewed > 0 && (falsePositiveRate >= 0.5 || goodRate <= 0.25 || badCount >= goodCount + 2)) {
+        tags.push({ label: '高误报', className: 'badge-red' });
+    }
+    return tags.length ? tags : [{ label: '观察中', className: 'badge-gold' }];
+}
+
+function renderPushQualityInsightTags(record) {
+    const tags = getPushQualityInsightTags(record);
+    return `<div class="trading-memory-chips push-quality-insight-tags">
+        ${tags.map(tag => `<span class="badge ${tag.className}">${escapeHtml(tag.label)}</span>`).join('')}
+    </div>`;
+}
+
+function getPushQualitySortMode() {
+    const mode = document.getElementById('push-quality-sort-filter')?.value || 'review';
+    return ['review', 'quality', 'risk'].includes(mode) ? mode : 'review';
+}
+
+function pushQualityNumber(value, fallback = 0) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+}
+
+function pushQualityName(record) {
+    return [
+        record?.item_name || '',
+        record?.source || '',
+        record?.strategy || ''
+    ].map(value => String(value).toLowerCase()).join('|');
+}
+
+function sortPushQualityRecords(records, mode) {
+    const list = Array.isArray(records) ? [...records] : [];
+    return list.sort((a, b) => {
+        let result = 0;
+        if (mode === 'quality') {
+            result = pushQualityNumber(b.good_rate) - pushQualityNumber(a.good_rate)
+                || pushQualityNumber(a.false_positive_rate) - pushQualityNumber(b.false_positive_rate)
+                || pushQualityNumber(b.reviewed_count) - pushQualityNumber(a.reviewed_count)
+                || pushQualityNumber(b.avg_profit_delta) - pushQualityNumber(a.avg_profit_delta);
+        } else if (mode === 'risk') {
+            result = pushQualityNumber(b.false_positive_rate) - pushQualityNumber(a.false_positive_rate)
+                || pushQualityNumber(b.bad_count) - pushQualityNumber(a.bad_count)
+                || pushQualityNumber(a.good_rate) - pushQualityNumber(b.good_rate)
+                || pushQualityNumber(b.reviewed_count) - pushQualityNumber(a.reviewed_count);
+        } else {
+            result = pushQualityNumber(b.pending_count) - pushQualityNumber(a.pending_count)
+                || pushQualityNumber(a.reviewed_count) - pushQualityNumber(b.reviewed_count)
+                || pushQualityNumber(b.sent_count) - pushQualityNumber(a.sent_count);
+        }
+        return result || pushQualityName(a).localeCompare(pushQualityName(b));
+    });
+}
+
+const PUSH_QUALITY_REVIEW_REMINDER_MIN_REVIEWS = 5;
+
+function shouldShowPushQualityReviewReminder(record) {
+    const pending = Number(record?.pending_count || 0);
+    const reviewed = Number(record?.reviewed_count || 0);
+    return pending > 0 || reviewed < PUSH_QUALITY_REVIEW_REMINDER_MIN_REVIEWS;
+}
+
+function safePushQualityTemplateField(value) {
+    const text = String(value ?? '').trim();
+    const lowered = text.toLowerCase();
+    if (!text || text.length > 60) return '';
+    if (lowered.includes('/w') || lowered.includes('<') || lowered.includes('>')) return '';
+    if (lowered.includes('profile') || lowered.includes('warframe.market')) return '';
+    if (lowered.includes('token') || lowered.includes('secret') || lowered.includes('whisper') || lowered.includes('raw')) return '';
+    if (!/^[\w\u4e00-\u9fff .:-]+$/u.test(text)) return '';
+    return text;
+}
+
+function buildPushQualityReviewTemplate(record) {
+    const source = safePushQualityTemplateField(record?.source);
+    const strategy = safePushQualityTemplateField(record?.strategy);
+    const itemName = safePushQualityTemplateField(record?.item_name);
+    const parts = [
+        source ? `来源：${source}` : '',
+        strategy ? `策略：${strategy}` : '',
+        itemName ? `物品：${itemName}` : ''
+    ].filter(Boolean);
+    const context = parts.length ? `。${parts.join('，')}` : '';
+    return `OP______ 实际赚__p，结果 good/bad/neutral，帮我复盘${context}`;
+}
+
+function renderPushQualityReviewReminder(record) {
+    if (!shouldShowPushQualityReviewReminder(record)) return '';
+    const pending = Number(record?.pending_count || 0);
+    const reviewed = Number(record?.reviewed_count || 0);
+    const reviewText = pending > 0
+        ? `待复盘 ${pending} 条`
+        : `复盘样本 ${reviewed}/${PUSH_QUALITY_REVIEW_REMINDER_MIN_REVIEWS}`;
+    const template = buildPushQualityReviewTemplate(record);
+    return `
+        <div class="trading-memory-message push-quality-review-reminder">
+            <div class="trading-memory-chips">
+                <span class="badge badge-gold">复盘提醒</span>
+                <span class="badge badge-muted">${escapeHtml(reviewText)}</span>
+                <span class="badge badge-muted">先确认再写入</span>
+            </div>
+            <button type="button" class="detail-action-btn push-quality-review-btn" data-review-template="${escapeHtmlAttr(template)}" onclick="fillPushQualityReviewTemplateFromButton(this)">
+                填入复盘模板
+            </button>
+        </div>
+    `;
+}
+
+function fillPushQualityReviewTemplateFromButton(btn) {
+    const template = btn?.dataset?.reviewTemplate || '';
+    if (!template) return '';
+    const input = document.getElementById('chat-input') || window.chatInput;
+    if (!input) return template;
+    input.value = template;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.focus();
+    if (typeof showToast === 'function') {
+        showToast('已填入复盘模板，请补 OPID 和实际利润后发送', 'info');
+    }
+    return template;
+}
+
+window.fillPushQualityReviewTemplateFromButton = fillPushQualityReviewTemplateFromButton;
+
+function renderPushQualityBadge(record) {
+    const reviewed = Number(record.reviewed_count || 0);
+    const goodRate = Number(record.good_rate || 0);
+    const falsePositiveRate = Number(record.false_positive_rate || 0);
+    if (reviewed <= 0) {
+        return { label: '待复盘', className: 'badge-muted' };
+    }
+    if (falsePositiveRate >= 0.5 || goodRate <= 0.25) {
+        return { label: '需谨慎', className: 'badge-red' };
+    }
+    if (goodRate >= 0.6 && falsePositiveRate <= 0.25) {
+        return { label: '表现好', className: 'badge-green' };
+    }
+    return { label: '观察中', className: 'badge-gold' };
+}
+
+function formatQualityRate(value) {
+    const rate = Number(value);
+    if (!Number.isFinite(rate)) return '-';
+    return `${Math.round(rate * 100)}%`;
+}
+
+function formatProfitDelta(value) {
+    const delta = Number(value);
+    if (!Number.isFinite(delta)) return '-';
+    const rounded = Math.round(delta * 10) / 10;
+    const text = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+    return `${rounded > 0 ? '+' : ''}${text}p`;
 }
 
 function renderRecallTrace(records, querySummary, scoreBreakdown) {
@@ -3958,7 +4184,7 @@ function renderInvestPage(content) {
     // 预算输入
     html += `<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
         <label style="font-size:0.85em;color:var(--text-secondary);">预算:</label>
-        <input id="invest-budget" type="number" value="${_investBudget || 500}" min="10" step="50"
+        <input id="invest-budget" type="number" value="${_investBudget ?? ''}" min="10" step="50" placeholder="偏好"
             style="width:80px;padding:4px 8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:6px;font-size:0.85em;">
         <span style="font-size:0.85em;color:var(--text-secondary);">p</span>
         <button onclick="reloadInvestment()" style="padding:4px 12px;border:1px solid var(--accent-color);background:var(--accent-color);color:#fff;border-radius:6px;cursor:pointer;font-size:0.85em;">扫描</button>
@@ -3971,8 +4197,10 @@ function renderInvestPage(content) {
     } else {
         // 总利润汇总
         const totalProfit = items.reduce((s, i) => s + i.total_profit, 0);
+        const hasExplicitBudget = _investBudget !== null && _investBudget !== undefined && Number.isFinite(Number(_investBudget));
+        const budgetLabel = hasExplicitBudget ? `${_investBudget}p` : '偏好预算';
         html += `<div style="background:var(--bg-tertiary);border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:0.85em;color:var(--text-secondary);">
-            预算 <span style="color:var(--text-primary);font-weight:600;">${_investBudget || 500}p</span> ·
+            预算 <span style="color:var(--text-primary);font-weight:600;">${budgetLabel}</span> ·
             全部执行可赚 <span style="color:var(--green-success);font-weight:700;">+${totalProfit}p</span>
         </div>`;
 
@@ -4067,21 +4295,29 @@ function investNextPage() {
     if (_investPage < totalPages - 1) { _investPage++; renderInvestPage(document.getElementById('detail-content')); }
 }
 
-let _investBudget = 500;
+let _investBudget = null;
 
 async function reloadInvestment() {
     const input = document.getElementById('invest-budget');
-    if (input) _investBudget = parseInt(input.value) || 500;
+    if (input) {
+        const rawBudget = String(input.value || '').trim();
+        const parsedBudget = rawBudget ? parseInt(rawBudget, 10) : null;
+        _investBudget = Number.isFinite(parsedBudget) ? parsedBudget : null;
+    }
     await loadInvestmentAdvisor(_investBudget);
 }
 
-async function loadInvestmentAdvisor(budget = 500) {
+async function loadInvestmentAdvisor(budget = null) {
     document.getElementById('more-menu')?.classList.remove('active');
     _investBudget = budget;
     const content = openDetailPanel('扫描 Prime 套装投资机会...<br><small style="color:var(--text-muted)">首次扫描可能需要 2-3 分钟</small>');
     if (!content) return;
 
-    await _pollScan(`/api/investment?budget=${budget}&min_roi_pct=10&limit=30`, content, (data) => {
+    const params = new URLSearchParams({ limit: '30' });
+    if (budget !== null && budget !== undefined && Number.isFinite(Number(budget))) {
+        params.set('budget', String(budget));
+    }
+    await _pollScan(`/api/investment?${params.toString()}`, content, (data) => {
         _investData = data.results || [];
         _investPage = 0;
         renderInvestPage(content);

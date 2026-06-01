@@ -10,17 +10,21 @@ from . import config
 
 _BILIBILI_VIDEO_PREFIX = "https://www.bilibili.com/video/"
 _GUIDE_INTENT_TOKENS = (
-    "攻略", "指南", "打法", "怎么玩", "怎么打", "流程", "配卡", "配装",
+    "攻略", "指南", "配卡", "配装", "怎么配", "怎么配卡",
     "武器怎么配", "钢铁怎么配", "视频", "b站", "bilibili", "教程",
-    "主武器", "主手", "副武器", "副手", "近战",
+    "主武器配卡", "主手配卡", "副武器配卡", "副手配卡", "近战配卡",
+    "战甲攻略", "战甲配卡", "宠物攻略", "同伴攻略", "守护攻略",
     "build", "guide", "mod配置", "mod 配置",
 )
 _CATEGORY_ALIASES = {
     "primary": ("主武器", "主手", "主武器配卡", "主手配卡", "primary"),
     "secondary": ("副武器", "副手", "副武器配卡", "副手配卡", "secondary"),
     "melee": ("近战", "近战配卡", "melee"),
+    "warframe": ("战甲", "甲", "战甲攻略", "战甲配卡", "warframe"),
+    "companion": ("宠物", "同伴", "守护", "库娃", "库狛", "恐鸟", "猎犬", "宠物攻略", "同伴攻略", "守护攻略", "companion"),
 }
-_CATEGORY_LABELS = {"primary": "主武器", "secondary": "副武器", "melee": "近战"}
+_CATEGORY_LABELS = {"primary": "主武器", "secondary": "副武器", "melee": "近战", "warframe": "战甲", "companion": "同伴/宠物"}
+_GENERIC_REQUEST_TOKENS = ("推荐", "几个", "一些", "相关", "参考", "有没有", "给我", "找", "看", "视频")
 
 
 @dataclass(frozen=True)
@@ -33,6 +37,7 @@ class BilibiliVideoRecommendation:
     topics: list[str] = field(default_factory=list)
     weapons: list[str] = field(default_factory=list)
     warframes: list[str] = field(default_factory=list)
+    companions: list[str] = field(default_factory=list)
     activities: list[str] = field(default_factory=list)
     aliases: list[str] = field(default_factory=list)
     category: str = ""
@@ -83,7 +88,7 @@ class BilibiliRecommendationService:
             score, reasons = _score_video(normalized_query, video)
             if score > 0:
                 matches.append(BilibiliRecommendationMatch(video=video, score=score, reasons=reasons))
-        matches.sort(key=lambda item: (item.score, item.video.priority), reverse=True)
+        matches.sort(key=_match_sort_key, reverse=True)
         return matches[:limit]
 
 
@@ -125,6 +130,7 @@ def _record_from_raw(raw: Any) -> BilibiliVideoRecommendation | None:
         topics=_clean_list(raw.get("topics")),
         weapons=_clean_list(raw.get("weapons")),
         warframes=_clean_list(raw.get("warframes")),
+        companions=_clean_list(raw.get("companions")),
         activities=_clean_list(raw.get("activities")),
         aliases=_clean_list(raw.get("aliases")),
         category=_clean_category(raw.get("category")),
@@ -135,19 +141,26 @@ def _record_from_raw(raw: Any) -> BilibiliVideoRecommendation | None:
     )
 
 
+def _match_sort_key(item: BilibiliRecommendationMatch) -> tuple[int, int, str]:
+    return (item.score, item.video.priority, item.video.updated_at)
+
+
 def _score_video(query: str, video: BilibiliVideoRecommendation) -> tuple[int, list[str]]:
     score = 0
     reasons = []
     category_matches = _query_category_matches(query)
+    category_values = list(_CATEGORY_ALIASES.get(video.category, ())) if video.category in category_matches else []
     field_weights = (
         ("别名", video.aliases, 80),
         ("武器", video.weapons, 60),
         ("战甲", video.warframes, 60),
+        ("同伴", video.companions, 60),
         ("活动", video.activities, 50),
-        ("类别", [_CATEGORY_LABELS.get(video.category, video.category)] if video.category in category_matches else [], 45),
+        ("类别", category_values, 45),
         ("主题", video.topics, 25),
     )
     has_specific_match = False
+    has_entity_match = False
     for label, values, weight in field_weights:
         for value in values:
             normalized_value = _normalize(value)
@@ -158,13 +171,19 @@ def _score_video(query: str, video: BilibiliVideoRecommendation) -> tuple[int, l
                 reasons.append(f"{label}:{value}")
                 if label != "主题":
                     has_specific_match = True
+                if label not in {"主题", "类别"} and not _is_generic_category_value(normalized_value):
+                    has_entity_match = True
                 break
             if normalized_value in query or query in normalized_value:
                 score += weight
                 reasons.append(f"{label}:{value}")
                 if label != "主题":
                     has_specific_match = True
+                if label not in {"主题", "类别"} and not _is_generic_category_value(normalized_value):
+                    has_entity_match = True
                 break
+    if _has_specific_item_terms(query) and not has_entity_match:
+        return 0, []
     if not has_specific_match:
         return 0, []
     return score, reasons
@@ -172,7 +191,7 @@ def _score_video(query: str, video: BilibiliVideoRecommendation) -> tuple[int, l
 
 def _display_tags(video: BilibiliVideoRecommendation) -> list[str]:
     tags = []
-    for values in (video.weapons, video.warframes, video.activities, video.topics):
+    for values in (video.weapons, video.warframes, video.companions, video.activities, video.topics):
         for value in values:
             if value not in tags:
                 tags.append(value)
@@ -217,6 +236,24 @@ def _query_category_matches(query: str) -> set[str]:
         if any(_normalize(alias) in query for alias in aliases):
             matches.add(category)
     return matches
+
+
+def _has_specific_item_terms(query: str) -> bool:
+    generic_terms = set()
+    for aliases in _CATEGORY_ALIASES.values():
+        generic_terms.update(_normalize(alias) for alias in aliases)
+    guide_terms = {_normalize(token) for token in _GUIDE_INTENT_TOKENS}
+    remaining = query
+    for token in sorted(generic_terms | guide_terms, key=len, reverse=True):
+        if token:
+            remaining = remaining.replace(token, "")
+    for token in _GENERIC_REQUEST_TOKENS:
+        remaining = remaining.replace(_normalize(token), "")
+    return bool(remaining)
+
+
+def _is_generic_category_value(value: str) -> bool:
+    return any(value == _normalize(alias) for aliases in _CATEGORY_ALIASES.values() for alias in aliases)
 
 
 def _clean_int(value: Any) -> int:

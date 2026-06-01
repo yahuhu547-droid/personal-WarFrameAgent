@@ -52,12 +52,16 @@ class ToolRouterTests(unittest.TestCase):
 
     def test_select_candidate_tools_for_build_and_guide_questions(self):
         build_candidates = select_candidate_tools("Saryn 钢铁怎么配卡")
+        alias_build_candidates = select_candidate_tools("猴子该怎么配卡")
         guide_candidates = select_candidate_tools("虚空洪流攻略和打法")
         activity_candidates = select_candidate_tools("这个活动怎么打收益高")
 
         self.assertIn("riven_search", build_candidates)
         self.assertIn("farming_route", guide_candidates)
         self.assertIn("query_events", activity_candidates)
+        self.assertNotIn("general_chat", build_candidates)
+        self.assertNotIn("general_chat", alias_build_candidates)
+        self.assertNotIn("general_chat", guide_candidates)
         self.assertNotIn("build_expert", build_candidates)
         self.assertNotIn("guide_expert", guide_candidates)
         self.assertNotIn("activity_expert", activity_candidates)
@@ -85,12 +89,26 @@ class ToolRouterTests(unittest.TestCase):
             self.assertIn("query_events", candidates)
             self.assertNotIn("riven_search", candidates)
 
+    def test_relic_value_and_farming_queries_have_specific_candidates_before_events(self):
+        value_candidates = select_candidate_tools("这个遗物收益怎么样")
+        route_candidates = select_candidate_tools("哪个裂缝适合开这个核桃")
+
+        self.assertIn("relic_value", value_candidates)
+        self.assertIn("farming_route", route_candidates)
+
     def test_candidate_tools_for_investment_query_include_investment_tools(self):
         candidates = select_candidate_tools("我有 1000p 预算，投资什么 ROI 高")
 
         self.assertIn("investment_advisor", candidates)
         self.assertIn("mod_flipper", candidates)
         self.assertIn("set_profit", candidates)
+        self.assertLessEqual(len(candidates), 6)
+
+    def test_candidate_tools_for_natural_language_planning_include_plan(self):
+        candidates = select_candidate_tools("帮我制定一周赚500p的计划")
+
+        self.assertIn("plan", candidates)
+        self.assertIn("investment_advisor", candidates)
         self.assertLessEqual(len(candidates), 6)
 
     def test_router_prompt_can_use_candidate_tools(self):
@@ -134,6 +152,189 @@ class ToolRouterTests(unittest.TestCase):
         self.assertIn("riven_search", tool_names)
         self.assertIn("riven_expert", tool_names)
         self.assertNotIn("query_price", tool_names)
+
+    def test_react_loop_records_lifecycle_status_for_final_answer(self):
+        from warframe_agent import tool_router
+
+        trace = tool_router.AgentTrace()
+
+        result = tool_router.react_loop(
+            "price check",
+            tool_executor=lambda tc: "unused",
+            model_call=lambda messages: "direct answer",
+            max_iterations=3,
+            trace=trace,
+            candidate_tools={"query_price"},
+        )
+
+        self.assertEqual(result, "direct answer")
+        self.assertEqual(trace.status, "finished")
+        self.assertEqual(trace.termination_reason, "final_answer")
+        self.assertEqual(trace.iterations, 1)
+        self.assertEqual(trace.max_iterations, 3)
+        self.assertIsNotNone(trace.started_at)
+        self.assertIsNotNone(trace.ended_at)
+        self.assertGreaterEqual(trace.ended_at, trace.started_at)
+        self.assertIsNotNone(trace.duration_ms)
+        self.assertGreaterEqual(trace.duration_ms, 0)
+
+    def test_react_loop_marks_lifecycle_error_when_tool_executor_raises(self):
+        from warframe_agent import tool_router
+
+        trace = tool_router.AgentTrace()
+
+        def raise_tool_error(tc):
+            raise RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            tool_router.react_loop(
+                "price check",
+                tool_executor=raise_tool_error,
+                model_call=lambda messages: '{"tool": "query_price", "args": {"item_name": "arcane_energize"}}',
+                max_iterations=3,
+                trace=trace,
+                candidate_tools={"query_price"},
+            )
+
+        self.assertEqual(trace.status, "error")
+        self.assertEqual(trace.termination_reason, "tool_error")
+        self.assertEqual(trace.iterations, 1)
+        self.assertEqual(trace.max_iterations, 3)
+        self.assertIsNotNone(trace.ended_at)
+        self.assertIsNotNone(trace.duration_ms)
+        self.assertEqual(len(trace.steps), 1)
+        self.assertFalse(trace.steps[0].ok)
+
+    def test_react_loop_records_agent_plan_snapshot(self):
+        from warframe_agent import tool_router
+
+        trace = tool_router.AgentTrace()
+        responses = iter([
+            '{"tool": "plan", "args": {"goal": "compare two items", "steps": ['
+            '{"tool": "query_price", "args": {"item_name": "arcane_energize"}, "purpose": "check price"},'
+            '{"tool": "price_trend", "args": {"item_name": "arcane_energize"}, "purpose": "check trend"}'
+            ']}}',
+            "final answer",
+        ])
+
+        result = tool_router.react_loop(
+            "compare",
+            tool_executor=lambda tc: f"result for {tc.name}",
+            model_call=lambda messages: next(responses),
+            max_iterations=3,
+            trace=trace,
+            candidate_tools={"plan"},
+        )
+
+        self.assertEqual(result, "final answer")
+        self.assertIsNotNone(trace.plan)
+        self.assertEqual(trace.plan.goal, "compare two items")
+        self.assertEqual(trace.plan.status, "completed")
+        self.assertIsNotNone(trace.plan.review)
+        self.assertEqual(trace.plan.review.status, "ok")
+        self.assertEqual(trace.plan.review.blocked_reason, "")
+        self.assertEqual(trace.plan.verification_note, "plan_review=ok; issues=0; unknown=0; side_effect=0; sensitive_args=0; verification=0")
+        self.assertEqual(trace.plan.blocked_reason, "")
+        self.assertEqual([step.status for step in trace.plan.steps], ["completed", "completed"])
+        self.assertEqual([step.tool_name for step in trace.plan.steps], ["query_price", "price_trend"])
+        self.assertNotIn("token", trace.plan.steps[0].args_summary)
+        self.assertEqual(trace.plan.steps[0].verification_note, "plan_step_review=ok")
+        self.assertEqual(trace.plan.steps[0].blocked_reason, "")
+        self.assertEqual(trace.plan.steps[1].verification_note, "plan_step_review=ok")
+        self.assertEqual(trace.plan.steps[1].blocked_reason, "")
+        self.assertEqual(len(trace.steps), 2)
+
+    def test_react_loop_blocks_invalid_agent_plan_before_execution(self):
+        from warframe_agent import tool_router
+
+        trace = tool_router.AgentTrace()
+        tool_calls_seen = []
+
+        result = tool_router.react_loop(
+            "compare",
+            tool_executor=lambda tc: tool_calls_seen.append(tc.name),
+            model_call=lambda messages: (
+                '{"tool": "plan", "args": {"goal": "compare two items", "steps": ['
+                '{"tool": "query_price", "args": {"item_name": "arcane_energize", "token": "SECRET"}, "purpose": "check price"},'
+                '{"tool": "price_trend", "args": {"item_name": "arcane_energize"}, "purpose": "check trend"}'
+                ']}}'
+            ),
+            max_iterations=3,
+            trace=trace,
+            candidate_tools={"plan"},
+        )
+
+        self.assertIn("计划审查未通过", result)
+        self.assertIn("sensitive_arguments", result)
+        self.assertEqual(tool_calls_seen, [])
+        self.assertEqual(len(trace.steps), 0)
+        self.assertEqual(trace.status, "finished")
+        self.assertEqual(trace.termination_reason, "plan_blocked")
+        self.assertIsNotNone(trace.plan)
+        self.assertEqual(trace.plan.status, "blocked")
+        self.assertEqual(trace.plan.review.status, "blocked")
+        self.assertEqual(trace.plan.review.blocked_reason, "sensitive_arguments")
+        self.assertEqual(trace.plan.steps[0].status, "blocked")
+        self.assertEqual(trace.plan.steps[0].args_summary["token"], "[REDACTED]")
+        self.assertEqual(trace.plan.steps[1].status, "skipped")
+
+    def test_react_loop_blocks_side_effect_agent_plan_before_execution(self):
+        from warframe_agent import tool_router
+
+        trace = tool_router.AgentTrace()
+        tool_calls_seen = []
+
+        result = tool_router.react_loop(
+            "set alert",
+            tool_executor=lambda tc: tool_calls_seen.append(tc.name),
+            model_call=lambda messages: (
+                '{"tool": "plan", "args": {"goal": "set alert", "steps": ['
+                '{"tool": "set_alert", "args": {"item_name": "arcane_energize", "threshold": 50}, "purpose": "write alert"}'
+                ']}}'
+            ),
+            max_iterations=3,
+            trace=trace,
+            candidate_tools={"plan"},
+        )
+
+        self.assertIn("side_effect_tool", result)
+        self.assertEqual(tool_calls_seen, [])
+        self.assertEqual(trace.termination_reason, "plan_blocked")
+        self.assertEqual(trace.plan.status, "blocked")
+        self.assertEqual(trace.plan.review.blocked_reason, "side_effect_tool")
+        self.assertEqual(trace.plan.steps[0].status, "blocked")
+
+    def test_react_loop_marks_agent_plan_failed_when_step_errors(self):
+        from warframe_agent import tool_router
+
+        trace = tool_router.AgentTrace()
+
+        def execute(tc):
+            if tc.name == "price_trend":
+                raise RuntimeError("boom token=SECRET")
+            return "ok"
+
+        with self.assertRaises(RuntimeError):
+            tool_router.react_loop(
+                "compare",
+                tool_executor=execute,
+                model_call=lambda messages: (
+                    '{"tool": "plan", "args": {"goal": "compare", "steps": ['
+                    '{"tool": "query_price", "args": {"item_name": "arcane_energize"}, "purpose": "check price"},'
+                    '{"tool": "price_trend", "args": {"item_name": "arcane_energize"}, "purpose": "check trend"}'
+                    ']}}'
+                ),
+                max_iterations=3,
+                trace=trace,
+                candidate_tools={"plan"},
+            )
+
+        self.assertEqual(trace.status, "error")
+        self.assertEqual(trace.termination_reason, "tool_error")
+        self.assertEqual(trace.plan.status, "failed")
+        self.assertEqual([step.status for step in trace.plan.steps], ["completed", "failed"])
+        self.assertFalse(trace.plan.steps[1].ok)
+        self.assertTrue(trace.plan.steps[1].error_present)
 
     def test_parse_valid_tool_call(self):
         response = '{"tool": "query_price", "args": {"item_name": "充沛"}}'

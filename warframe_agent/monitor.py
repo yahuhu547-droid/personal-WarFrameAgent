@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
@@ -39,6 +39,9 @@ PRICE_MONITOR_SELF_LEARNING_JOB_ID = "price_monitor.self_learning"
 PRICE_MONITOR_SELF_LEARNING_JOB_NAME = "Price monitor self learning"
 MARKET_SNAPSHOT_MEMORY_SOURCE = "price_monitor.scan"
 MARKET_SNAPSHOT_MEMORY_MIN_SECONDS = 3600
+PUSH_QUALITY_HISTORY_LIMIT = 200
+PUSH_QUALITY_MIN_SENT_COUNT = 5
+PUSH_QUALITY_MIN_REVIEWED_COUNT = 5
 
 
 @dataclass(frozen=True)
@@ -201,6 +204,13 @@ _PROACTIVE_SAFE_DATA_KEYS = {
     "spread_pct",
     "threshold_pct",
     "rationale",
+    "personal_score",
+    "personal_reasons",
+    "push_quality_score",
+    "push_quality_reason",
+    "push_quality_reviewed_count",
+    "push_quality_good_rate",
+    "push_quality_false_positive_rate",
 }
 
 
@@ -212,8 +222,13 @@ def _trade_plan_safe_summary_from_data(data: dict | None) -> dict[str, Any]:
         return {}
     summary = plan.get("safe_summary")
     if isinstance(summary, dict):
-        return dict(summary)
-    return {
+        safe_summary = dict(summary)
+        if "personal_score" in data:
+            safe_summary["personal_score"] = data.get("personal_score")
+        if "personal_reasons" in data:
+            safe_summary["personal_reasons"] = list(data.get("personal_reasons") or [])[:6]
+        return safe_summary
+    safe_summary = {
         "schema_version": plan.get("schema_version", 1),
         "source": plan.get("source", ""),
         "strategy": plan.get("strategy", ""),
@@ -231,6 +246,11 @@ def _trade_plan_safe_summary_from_data(data: dict | None) -> dict[str, Any]:
         "profit_bucket": plan.get("profit_bucket", ""),
         "plan_signature": plan.get("plan_signature", ""),
     }
+    if "personal_score" in data:
+        safe_summary["personal_score"] = data.get("personal_score")
+    if "personal_reasons" in data:
+        safe_summary["personal_reasons"] = list(data.get("personal_reasons") or [])[:6]
+    return safe_summary
 
 
 def _safe_proactive_metadata_from_data(data: dict | None) -> dict[str, Any]:
@@ -293,6 +313,130 @@ def _opportunity_dedupe_key_from_data(
     if plan_signature:
         parts.append(f"sig={plan_signature}")
     return ":".join(parts)
+
+
+def _push_quality_lookup_from_signals(signals: list[Any]) -> tuple[dict[tuple[str, str, str], Any], dict[tuple[str, str], list[Any]]]:
+    exact: dict[tuple[str, str, str], Any] = {}
+    by_item_source: dict[tuple[str, str], list[Any]] = {}
+    for signal in signals:
+        item_name = str(getattr(signal, "item_name", "") or "")
+        source = str(getattr(signal, "source", "") or "")
+        strategy = str(getattr(signal, "strategy", "") or "")
+        if not item_name or not source:
+            continue
+        exact.setdefault((item_name, source, strategy), signal)
+        by_item_source.setdefault((item_name, source), []).append(signal)
+    for grouped in by_item_source.values():
+        grouped.sort(
+            key=lambda signal: (
+                int(getattr(signal, "reviewed_count", 0) or 0),
+                int(getattr(signal, "sent_count", 0) or 0),
+            ),
+            reverse=True,
+        )
+    return exact, by_item_source
+
+
+def _push_quality_strategy_candidates(suggestion: ProactiveSuggestion) -> list[str]:
+    data = _opportunity_dedupe_data(suggestion.data)
+    candidates: list[str] = []
+    for value in (
+        data.get("strategy"),
+        suggestion.suggestion_type,
+        _opportunity_source_from_data(data),
+        "unknown",
+    ):
+        candidate = str(value or "")
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _push_quality_signal_for_suggestion(
+    suggestion: ProactiveSuggestion,
+    exact: dict[tuple[str, str, str], Any],
+    by_item_source: dict[tuple[str, str], list[Any]],
+) -> Any | None:
+    data = _opportunity_dedupe_data(suggestion.data)
+    item_name = str(data.get("item_id") or suggestion.item_id or "")
+    source = _opportunity_source_from_data(data)
+    if not item_name or not source:
+        return None
+    for strategy in _push_quality_strategy_candidates(suggestion):
+        signal = exact.get((item_name, source, strategy))
+        if signal is not None:
+            return signal
+    fallback = by_item_source.get((item_name, source))
+    return fallback[0] if fallback else None
+
+
+def _push_quality_hint_from_signal(signal: Any | None) -> dict[str, Any]:
+    if signal is None:
+        return {}
+    sent_count = int(getattr(signal, "sent_count", 0) or 0)
+    reviewed_count = int(getattr(signal, "reviewed_count", 0) or 0)
+    if sent_count < PUSH_QUALITY_MIN_SENT_COUNT or reviewed_count < PUSH_QUALITY_MIN_REVIEWED_COUNT:
+        return {}
+
+    good_rate = float(getattr(signal, "good_rate", 0.0) or 0.0)
+    false_positive_rate = float(getattr(signal, "false_positive_rate", 0.0) or 0.0)
+    rejection_rate = float(getattr(signal, "rejection_rate", 0.0) or 0.0)
+    avg_profit_delta = float(getattr(signal, "avg_profit_delta", 0.0) or 0.0)
+    score = 0
+    reason = "neutral_quality_history"
+    if (
+        false_positive_rate >= 0.6
+        or rejection_rate >= 0.6
+        or good_rate <= 0.2
+        or avg_profit_delta <= -15
+    ):
+        score = -1
+        reason = "low_quality_history"
+    elif good_rate >= 0.6 and false_positive_rate <= 0.25 and avg_profit_delta >= -5:
+        score = 1
+        reason = "good_quality_history"
+
+    return {
+        "push_quality_score": score,
+        "push_quality_reason": reason,
+        "push_quality_reviewed_count": reviewed_count,
+        "push_quality_good_rate": round(good_rate, 4),
+        "push_quality_false_positive_rate": round(false_positive_rate, 4),
+    }
+
+
+def _with_push_quality_hints(suggestions: list[ProactiveSuggestion], signals: list[Any]) -> list[ProactiveSuggestion]:
+    if not suggestions or not signals:
+        return suggestions
+    exact, by_item_source = _push_quality_lookup_from_signals(signals)
+    indexed: list[tuple[int, ProactiveSuggestion]] = []
+    for index, suggestion in enumerate(suggestions):
+        enriched = suggestion
+        if suggestion.suggestion_type in {"opportunity", "goal_opportunity"}:
+            signal = _push_quality_signal_for_suggestion(suggestion, exact, by_item_source)
+            hint = _push_quality_hint_from_signal(signal)
+            if hint:
+                enriched = replace(suggestion, data={**(suggestion.data or {}), **hint})
+        indexed.append((index, enriched))
+
+    by_priority: dict[int, list[tuple[int, ProactiveSuggestion]]] = {}
+    for index, suggestion in indexed:
+        by_priority.setdefault(suggestion.priority, []).append((index, suggestion))
+    for group in by_priority.values():
+        group.sort(
+            key=lambda entry: (
+                -int((entry[1].data or {}).get("push_quality_score", 0) or 0),
+                entry[0],
+            )
+        )
+
+    cursors = {priority: 0 for priority in by_priority}
+    ranked: list[ProactiveSuggestion] = []
+    for _, suggestion in indexed:
+        priority = suggestion.priority
+        ranked.append(by_priority[priority][cursors[priority]][1])
+        cursors[priority] += 1
+    return ranked
 
 
 def _safe_proactive_record_message(push: ProactivePush) -> str:
@@ -821,10 +965,30 @@ class PriceMonitor:
         key = self._opportunity_dedupe_key(push, suggestion)
         self._opportunity_push_notified[key] = (now, _opportunity_dedupe_data(push.data or suggestion.data or {}))
 
+    def _apply_push_quality_to_suggestions(self, suggestions: list[ProactiveSuggestion]) -> list[ProactiveSuggestion]:
+        db = self.trading_memory_db
+        if db is None:
+            return suggestions
+        try:
+            signals = db.summarize_push_quality(
+                push_type="opportunity",
+                limit=PUSH_QUALITY_HISTORY_LIMIT,
+            )
+        except Exception as exc:
+            logger.debug("long-term push quality read failed: %s", exc)
+            return suggestions
+        return _with_push_quality_hints(suggestions, signals)
+
     def _run_proactive_push(self, scan_result: ScanResult, market_state=None) -> None:
         """规则驱动主动推送：模板化消息生成，无需 LLM。"""
         if not self.on_proactive_push:
             return
+
+        # 先筛选建议，避免低优先级扫描无意义地初始化市场数据库。
+        high_priority = _unique_suggestions([s for s in scan_result.suggestions if s.priority <= 2])
+        if not high_priority:
+            return
+        high_priority = self._apply_push_quality_to_suggestions(high_priority)
 
         from .price_history import PriceHistoryDB
         from .trade_history import TradeHistoryDB
@@ -835,11 +999,6 @@ class PriceMonitor:
             price_db = self.price_db or PriceHistoryDB()
             trade_db = TradeHistoryDB()
             market_state = evaluate_market_state(price_db, trade_db, memory, self.knowledge)
-
-        # 筛选 priority ≤ 2 的高价值建议
-        high_priority = _unique_suggestions([s for s in scan_result.suggestions if s.priority <= 2])
-        if not high_priority:
-            return
 
         sent_count = 0
         for suggestion in high_priority:

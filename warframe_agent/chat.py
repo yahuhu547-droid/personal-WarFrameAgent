@@ -5,6 +5,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import AsyncIterator, Callable, Iterable
 
 import requests
@@ -237,12 +238,595 @@ class ItemContext:
     model_context: str | None = None
 
 
+@dataclass(frozen=True)
+class ChatModeDecision:
+    mode: str
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class PendingGoalConfirmation:
+    description: str
+    goal_type: str
+    criteria: dict
+    summary: str
+
+
+@dataclass(frozen=True)
+class GoalStatusIntent:
+    action: str
+    selector_type: str
+    selector: str
+
+
+@dataclass(frozen=True)
+class PendingGoalStatusConfirmation:
+    action: str
+    goal_id: str
+    description: str
+    target_status: str
+
+
+@dataclass(frozen=True)
+class PriceAlertIntent:
+    action: str
+    item_name: str
+    direction: str
+    price: int
+
+
+@dataclass(frozen=True)
+class FavoriteIntent:
+    action: str
+    item_name: str
+
+
+@dataclass(frozen=True)
+class PreferenceIntent:
+    updates: dict[str, object]
+    summary_parts: list[str]
+
+
+@dataclass(frozen=True)
+class ReviewDoneIntent:
+    lookup_id: str
+    actual_profit: int
+    feedback: str
+
+
+@dataclass(frozen=True)
+class PendingReviewDoneConfirmation:
+    lookup_id: str
+    actual_profit: int
+    feedback: str
+    item_id: str
+    expected_profit: int
+
+
+@dataclass(frozen=True)
+class FissureAlertIntent:
+    action: str
+    tokens: list[str]
+    index: int | None = None
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class PendingFissureAlertConfirmation:
+    action: str
+    tokens: list[str]
+    index: int | None = None
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class PendingAgentPlanConfirmation:
+    original_message: str
+    confirmation_token: str
+    blocked_reason: str
+    candidate_tools: tuple[str, ...] | None = None
+
+
 def is_chat_exit(message: str) -> bool:
     return message.strip().lower() in EXIT_COMMANDS
 
 
 def is_watchlist_command(message: str) -> bool:
     return message.strip().lower() in WATCHLIST_COMMANDS
+
+
+_PRICE_ALERT_REMINDER_TERMS = (
+    "提醒我", "通知我", "提醒", "通知", "盯一下", "盯着", "盯",
+    "价格提醒", "alert me", "notify me",
+)
+_PRICE_ALERT_CANCEL_TERMS = (
+    "取消", "删除", "移除", "关闭", "不要", "不用",
+    "cancel", "remove", "delete", "off",
+)
+_PRICE_ALERT_BELOW_TERMS = ("低于", "低过", "小于", "跌到", "跌破", "降到", "below", "<=")
+_PRICE_ALERT_ABOVE_TERMS = ("高于", "超过", "大于", "涨到", "涨破", "above", ">=")
+_PRICE_ALERT_FILLER_TERMS = (
+    "帮我", "请", "当", "如果", "一下", "价格", "的时候", "时", "就",
+    "me", "when", "if",
+)
+
+
+_FAVORITE_REMOVE_TERMS = (
+    "取消关注", "取消收藏", "移除关注", "移除收藏", "删除关注", "删除收藏",
+    "不再关注", "别关注", "不要关注", "不用关注", "取消", "移除", "删除",
+    "remove favorite", "unfavorite",
+)
+_FAVORITE_ADD_TERMS = (
+    "帮我关注", "帮我收藏", "关注一下", "收藏一下", "加入关注", "加入收藏",
+    "添加关注", "添加收藏", "加到关注", "加到收藏", "关注", "收藏",
+    "favorite",
+)
+_FAVORITE_QUESTION_TERMS = (
+    "值得关注", "是否值得", "要不要关注", "能不能关注", "可不可以关注",
+    "该不该关注", "关注什么", "怎么关注", "吗", "么", "？", "?",
+)
+_FAVORITE_BLOCKED_TERMS = (
+    "关注价格", "价格提醒", "价格通知", "低于", "高于", "提醒我", "通知我",
+    "扫描关注", "每日关注", "交易机会", "机会推送", "关注推送",
+    "只看赋能", "只检测mod", "只检测MOD", "只检测卡",
+)
+_FAVORITE_FILLER_TERMS = (
+    "帮我", "请", "一下", "这个", "物品", "道具", "吧", "把", "加入",
+    "添加", "加到", "到", "进", "列表", "收藏夹", "里", "中",
+)
+
+
+_PREFERENCE_ANCHOR_TERMS = (
+    "我的", "我预算", "我偏好", "偏好", "设置", "设为", "调整", "改成",
+    "以后", "今后", "帮我记", "记住", "我希望", "我想", "只看",
+    "平台", "跨平台", "crossplay", "最多", "最大", "返回", "显示",
+)
+_PREFERENCE_QUESTION_TERMS = (
+    "买什么", "够吗", "是什么意思", "有哪些", "推荐", "要不要", "该不该",
+    "怎么", "什么", "多少", "吗", "么", "？", "?",
+)
+_PREFERENCE_BLOCKED_TERMS = (
+    "提醒我", "通知我", "价格提醒", "价格通知", "低于", "高于",
+    "帮我收藏", "帮我关注", "取消收藏", "取消关注", "关注列表",
+    "交易机会", "机会推送", "一周赚", "制定", "计划",
+)
+_PREFERENCE_LOW_RISK_TERMS = ("低风险", "风险低", "保守", "稳健", "偏低风险")
+_PREFERENCE_MEDIUM_RISK_TERMS = ("中风险", "中等风险", "均衡", "平衡")
+_PREFERENCE_HIGH_RISK_TERMS = ("高风险", "风险高", "激进", "高收益高风险")
+_PREFERENCE_CATEGORY_TERMS = (
+    ("mod", ("mod", "卡片", "振幅晶体")),
+    ("arcane", ("赋能", "arcane")),
+    ("prime_set", ("prime套装", "prime套", "p套", "套装")),
+    ("prime_part", ("prime部件", "部件", "蓝图", "机体", "系统", "头部")),
+    ("riven", ("紫卡", "riven")),
+    ("baro", ("虚空商人", "baro")),
+)
+_PREFERENCE_PLATFORM_TERMS = ("pc", "xbox", "ps4", "ps5", "switch")
+
+
+_GOAL_STATUS_CANCEL_CONTEXT_TERMS = (
+    "不要完成", "别完成", "暂不完成", "不要放弃", "别放弃", "暂不放弃",
+    "完成了吗", "怎么完成", "该放弃", "要不要放弃", "完成后", "一笔交易",
+    "reviewdone", "/reviewdone",
+)
+_GOAL_STATUS_COMPLETE_TERMS = ("标记完成", "完成目标", "目标完成", "完成", "达成", "done", "achieved")
+_GOAL_STATUS_DROP_TERMS = ("放弃目标", "目标放弃", "放弃", "不做", "abandon", "drop")
+_GOAL_STATUS_ORDINAL_NUMBERS = {
+    "1": 1, "一": 1, "第一个": 1,
+    "2": 2, "二": 2, "两": 2, "第二个": 2,
+    "3": 3, "三": 3, "第三个": 3,
+    "4": 4, "四": 4, "第四个": 4,
+    "5": 5, "五": 5, "第五个": 5,
+}
+
+
+_REVIEW_DONE_ANCHOR_TERMS = (
+    "复盘", "记录", "记一下", "记为", "实际", "结果", "已完成", "完成了",
+    "反馈", "review", "record",
+)
+_REVIEW_DONE_BLOCKED_TERMS = (
+    "怎么", "如何", "教程", "用法", "预计", "预期", "目标利润", "预算",
+    "等卖掉", "以后", "完成后用/reviewdone", "/reviewdone",
+)
+_REVIEW_DONE_QUESTION_TERMS = ("吗", "么", "？", "?")
+_REVIEW_GOOD_TERMS = ("不错", "很好", "顺利", "成功", "满意", "good", "accepted")
+_REVIEW_BAD_TERMS = ("不好", "不行", "失败", "踩坑", "亏", "bad", "rejected")
+_REVIEW_IGNORED_TERMS = ("没做", "没成交", "跳过", "忽略", "取消", "ignored")
+_REVIEW_NEUTRAL_TERMS = ("一般", "持平", "没赚没亏", "neutral")
+
+
+_FISSURE_ALERT_WORDS = ("裂缝", "裂隙", "虚空裂缝", "虚空裂隙", "fissure")
+_FISSURE_ALERT_SUBSCRIBE_TERMS = (
+    "提醒我", "通知我", "订阅", "关注", "盯一下", "盯着", "叫我", "告诉我",
+    "alert me", "notify me", "subscribe",
+)
+_FISSURE_ALERT_REMOVE_TERMS = (
+    "取消", "删除", "移除", "不再提醒", "不提醒", "关闭", "cancel", "remove", "delete",
+)
+_FISSURE_ALERT_QUERY_TERMS = (
+    "现在", "当前", "有什么", "哪些", "哪里", "在哪", "适合", "怎么", "列表",
+    "有吗", "吗", "？", "?",
+)
+_FISSURE_ALERT_BLOCKED_TERMS = ("热美亚", "thermia", "收益", "怎么刷", "不要直接提醒")
+_FISSURE_ALERT_ORDINAL_NUMBERS = {
+    "1": 1, "一": 1, "第一个": 1,
+    "2": 2, "二": 2, "两": 2, "第二个": 2,
+    "3": 3, "三": 3, "第三个": 3,
+    "4": 4, "四": 4, "第四个": 4,
+    "5": 5, "五": 5, "第五个": 5,
+    "6": 6, "六": 6, "第六个": 6,
+    "7": 7, "七": 7, "第七个": 7,
+    "8": 8, "八": 8, "第八个": 8,
+    "9": 9, "九": 9, "第九个": 9,
+    "10": 10, "十": 10, "第十个": 10,
+}
+_FISSURE_ALERT_TOKEN_ALIASES = (
+    ("钢铁之路", "钢铁"),
+    ("steelpath", "steelpath"),
+    ("steel", "steel"),
+    ("钢铁", "钢铁"),
+    ("普通", "普通"),
+    ("normal", "normal"),
+    ("古纪", "古纪"),
+    ("前纪", "前纪"),
+    ("中纪", "中纪"),
+    ("后纪", "后纪"),
+    ("遗珍", "遗珍"),
+    ("仲裁", "仲裁"),
+    ("lith", "lith"),
+    ("meso", "meso"),
+    ("neo", "neo"),
+    ("axi", "axi"),
+    ("requiem", "requiem"),
+    ("arbitration", "arbitration"),
+    ("移动防御", "移动防御"),
+    ("歼灭", "歼灭"),
+    ("捕获", "捕获"),
+    ("防御", "防御"),
+    ("生存", "生存"),
+    ("救援", "救援"),
+    ("破坏", "破坏"),
+    ("间谍", "间谍"),
+    ("拦截", "拦截"),
+    ("挖掘", "挖掘"),
+    ("炼金", "炼金"),
+    ("中断", "中断"),
+    ("刺杀", "刺杀"),
+    ("虚空", "虚空"),
+    ("地球", "地球"),
+    ("火星", "火星"),
+    ("金星", "金星"),
+    ("水星", "水星"),
+    ("木星", "木星"),
+    ("土星", "土星"),
+    ("天王星", "天王星"),
+    ("海王星", "海王星"),
+    ("冥王星", "冥王星"),
+    ("塞德娜", "塞德娜"),
+    ("火卫一", "火卫一"),
+    ("谷神星", "谷神星"),
+    ("欧罗巴", "欧罗巴"),
+)
+
+
+def _parse_fissure_alert_index(text: str) -> int | None:
+    match = re.search(r"第\s*([0-9一二两三四五六七八九十]+)\s*(?:个|条)?", text)
+    if match:
+        value = match.group(1)
+        if value.isdigit():
+            return int(value)
+        return _FISSURE_ALERT_ORDINAL_NUMBERS.get(value)
+    digit_match = re.search(r"\b([1-9][0-9]*)\b", text)
+    if digit_match:
+        return int(digit_match.group(1))
+    return None
+
+
+def _extract_fissure_alert_tokens(text: str) -> list[str]:
+    compact = re.sub(r"\s+", "", text.lower())
+    matches = []
+    for term, token in _FISSURE_ALERT_TOKEN_ALIASES:
+        position = compact.find(term.lower())
+        if position >= 0:
+            matches.append((position, -len(term), token))
+    matches.sort()
+    tokens = []
+    for _, _, token in matches:
+        if token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
+def _parse_natural_language_fissure_alert(message: str) -> FissureAlertIntent | None:
+    text = (message or "").strip()
+    if not text or text.startswith("/"):
+        return None
+    compact = re.sub(r"\s+", "", text.lower())
+    if not any(term.lower() in compact for term in _FISSURE_ALERT_WORDS):
+        return None
+    if any(term.lower() in compact for term in _FISSURE_ALERT_BLOCKED_TERMS):
+        return None
+
+    has_remove = any(term.lower() in compact for term in _FISSURE_ALERT_REMOVE_TERMS)
+    if has_remove:
+        index = _parse_fissure_alert_index(text)
+        if index is None:
+            return None
+        return FissureAlertIntent(action="remove", tokens=[], index=index, note=f"第{index}条裂缝订阅")
+
+    if not any(term.lower() in compact for term in _FISSURE_ALERT_SUBSCRIBE_TERMS):
+        return None
+    if any(term.lower() in compact for term in _FISSURE_ALERT_QUERY_TERMS):
+        return None
+
+    tokens = _extract_fissure_alert_tokens(text)
+    if not tokens:
+        return None
+    return FissureAlertIntent(action="add", tokens=tokens, note="、".join(tokens))
+
+
+def _parse_review_done_profit(text: str) -> int | None:
+    patterns = (
+        r"(?:实际|最后|净)?\s*(?:赚了?|盈利|利润|净赚)\s*([+-]?\d+)\s*(?:p|pt|白金|铂金)?",
+        r"(?:实际|最后)?\s*(?:亏了?|亏损)\s*([+-]?\d+)\s*(?:p|pt|白金|铂金)?",
+        r"(?:实际利润|实际收益|利润是|收益是)\s*([+-]?\d+)\s*(?:p|pt|白金|铂金)?",
+    )
+    for index, pattern in enumerate(patterns):
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        value = int(match.group(1))
+        if index == 1 and value > 0:
+            value = -value
+        return value
+    return None
+
+
+def _parse_review_done_feedback(text: str, actual_profit: int) -> str:
+    compact = re.sub(r"\s+", "", text.lower())
+    if any(term.lower() in compact for term in _REVIEW_IGNORED_TERMS):
+        return "ignored"
+    if any(term.lower() in compact for term in _REVIEW_BAD_TERMS):
+        return "bad"
+    if any(term.lower() in compact for term in _REVIEW_NEUTRAL_TERMS):
+        return "neutral"
+    if any(term.lower() in compact for term in _REVIEW_GOOD_TERMS):
+        return "good"
+    return ChatAgent._default_feedback_for_profit(actual_profit)
+
+
+def _parse_natural_language_review_done(message: str) -> ReviewDoneIntent | None:
+    text = (message or "").strip()
+    if not text or text.startswith("/"):
+        return None
+    compact = re.sub(r"\s+", "", text.lower())
+    if any(term.lower() in compact for term in _REVIEW_DONE_QUESTION_TERMS):
+        return None
+    if any(term.lower() in compact for term in _REVIEW_DONE_BLOCKED_TERMS):
+        return None
+    if not any(term.lower() in compact for term in _REVIEW_DONE_ANCHOR_TERMS):
+        return None
+
+    lookup_match = re.search(r"\bOP[A-Z0-9]{6}\b", text, flags=re.IGNORECASE)
+    if not lookup_match:
+        return None
+    lookup_id = normalize_opportunity_lookup_id(lookup_match.group(0))
+    if not is_opportunity_lookup_id(lookup_id):
+        return None
+
+    actual_profit = _parse_review_done_profit(text)
+    if actual_profit is None:
+        return None
+    feedback = _parse_review_done_feedback(text, actual_profit)
+    return ReviewDoneIntent(lookup_id=lookup_id, actual_profit=actual_profit, feedback=feedback)
+
+
+def _parse_goal_status_ordinal(value: str) -> int | None:
+    normalized = (value or "").strip()
+    if normalized.isdigit():
+        return int(normalized)
+    return _GOAL_STATUS_ORDINAL_NUMBERS.get(normalized)
+
+
+def _parse_natural_language_goal_status(message: str) -> GoalStatusIntent | None:
+    text = (message or "").strip()
+    if not text or text.startswith("/"):
+        return None
+    compact = re.sub(r"\s+", "", text.lower())
+    if "目标" not in compact and "goal" not in compact:
+        return None
+    if any(term.lower() in compact for term in _GOAL_STATUS_CANCEL_CONTEXT_TERMS):
+        return None
+
+    if any(term.lower() in compact for term in _GOAL_STATUS_DROP_TERMS):
+        action = "drop"
+    elif any(term.lower() in compact for term in _GOAL_STATUS_COMPLETE_TERMS):
+        action = "complete"
+    else:
+        return None
+
+    ordinal_match = re.search(r"第\s*([0-9一二两三四五])\s*个?\s*目标", text, flags=re.IGNORECASE)
+    if ordinal_match:
+        ordinal = _parse_goal_status_ordinal(ordinal_match.group(1))
+        if ordinal:
+            return GoalStatusIntent(action=action, selector_type="index", selector=str(ordinal))
+
+    id_match = re.search(
+        r"(?:目标|goal)\s*([0-9a-f]{4,12})|([0-9a-f]{4,12})\s*(?:这个)?(?:目标|goal)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if id_match:
+        return GoalStatusIntent(action=action, selector_type="id", selector=(id_match.group(1) or id_match.group(2)).lower())
+
+    fragment = text
+    for term in (*_GOAL_STATUS_COMPLETE_TERMS, *_GOAL_STATUS_DROP_TERMS, "目标", "这个", "把", "标记", "为", "了", "第"):
+        fragment = re.sub(re.escape(term), " ", fragment, flags=re.IGNORECASE)
+    fragment = re.sub(r"[\s，。！？?：:；;、,.!]+", " ", fragment).strip()
+    if len(fragment) >= 2:
+        return GoalStatusIntent(action=action, selector_type="description", selector=fragment)
+    return None
+
+
+def _parse_natural_language_price_alert(message: str) -> PriceAlertIntent | None:
+    text = (message or "").strip()
+    if not text:
+        return None
+    compact = re.sub(r"\s+", "", text.lower())
+    if not any(term in compact for term in _PRICE_ALERT_REMINDER_TERMS):
+        return None
+
+    direction = ""
+    direction_terms = ()
+    if any(term in compact for term in _PRICE_ALERT_BELOW_TERMS):
+        direction = "below"
+        direction_terms = _PRICE_ALERT_BELOW_TERMS
+    elif any(term in compact for term in _PRICE_ALERT_ABOVE_TERMS):
+        direction = "above"
+        direction_terms = _PRICE_ALERT_ABOVE_TERMS
+    else:
+        return None
+
+    price_match = re.search(r"(\d+)\s*(?:p|pt|白金|铂金|platinum)?", text, flags=re.IGNORECASE)
+    if not price_match:
+        return None
+    price = int(price_match.group(1))
+
+    action = "remove" if any(term in compact for term in _PRICE_ALERT_CANCEL_TERMS) else "add"
+    item_name = text
+    item_name = item_name.replace(price_match.group(0), " ")
+    for term in sorted(
+        (*_PRICE_ALERT_REMINDER_TERMS, *_PRICE_ALERT_CANCEL_TERMS, *direction_terms, *_PRICE_ALERT_FILLER_TERMS),
+        key=len,
+        reverse=True,
+    ):
+        item_name = re.sub(re.escape(term), " ", item_name, flags=re.IGNORECASE)
+    item_name = re.sub(r"[\s，,。！？!?:：；;]+", " ", item_name).strip()
+    if not item_name:
+        return None
+    return PriceAlertIntent(action=action, item_name=item_name, direction=direction, price=price)
+
+
+def _parse_natural_language_favorite(message: str) -> FavoriteIntent | None:
+    text = (message or "").strip()
+    if not text or is_watchlist_command(text):
+        return None
+    compact = re.sub(r"\s+", "", text.lower())
+    if any(term.lower() in compact for term in _FAVORITE_QUESTION_TERMS):
+        return None
+    if any(term.lower() in compact for term in _FAVORITE_BLOCKED_TERMS):
+        return None
+
+    action = ""
+    action_terms: tuple[str, ...] = ()
+    if any(term.lower() in compact for term in _FAVORITE_REMOVE_TERMS):
+        action = "remove"
+        action_terms = _FAVORITE_REMOVE_TERMS
+    elif any(term.lower() in compact for term in _FAVORITE_ADD_TERMS):
+        action = "add"
+        action_terms = _FAVORITE_ADD_TERMS
+    else:
+        return None
+
+    item_name = text
+    for term in sorted((*action_terms, *_FAVORITE_FILLER_TERMS), key=len, reverse=True):
+        item_name = re.sub(re.escape(term), " ", item_name, flags=re.IGNORECASE)
+    item_name = re.sub(r"[\s，。！？?：:；;、,.!]+", " ", item_name).strip()
+    if not item_name:
+        return None
+    return FavoriteIntent(action=action, item_name=item_name)
+
+
+def _parse_natural_language_preference(message: str) -> PreferenceIntent | None:
+    text = (message or "").strip()
+    if not text:
+        return None
+    compact = re.sub(r"\s+", "", text.lower())
+    if not any(term.lower() in compact for term in _PREFERENCE_ANCHOR_TERMS):
+        return None
+    if any(term.lower() in compact for term in _PREFERENCE_QUESTION_TERMS):
+        return None
+    if any(term.lower() in compact for term in _PREFERENCE_BLOCKED_TERMS):
+        return None
+
+    updates: dict[str, object] = {}
+    summary_parts: list[str] = []
+
+    budget_match = re.search(
+        r"(?:预算|本金|投入|资金)[^\d]{0,8}(\d+)(?:\s*(?:-|到|至|~|－|—)\s*(\d+))?\s*(?:p|pt|白金|铂金)?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if budget_match:
+        first = int(budget_match.group(1))
+        second = int(budget_match.group(2)) if budget_match.group(2) else 0
+        if second:
+            budget_min, budget_max = (first, second) if first <= second else (second, first)
+        else:
+            budget_min, budget_max = 0, first
+        updates["budget_min"] = budget_min
+        updates["budget_max"] = budget_max
+        summary_parts.append(f"预算={budget_min}-{budget_max}p")
+
+    if any(term in compact for term in _PREFERENCE_LOW_RISK_TERMS):
+        updates["risk_appetite"] = "low"
+        summary_parts.append("风险=low")
+    elif any(term in compact for term in _PREFERENCE_MEDIUM_RISK_TERMS):
+        updates["risk_appetite"] = "medium"
+        summary_parts.append("风险=medium")
+    elif any(term in compact for term in _PREFERENCE_HIGH_RISK_TERMS):
+        updates["risk_appetite"] = "high"
+        summary_parts.append("风险=high")
+
+    roi_match = re.search(
+        r"(?:最低\s*(?:roi|利润|收益率)|(?:roi|收益率)\s*(?:至少|最低)|至少)[^\d]{0,8}(\d+)\s*%?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if roi_match:
+        roi = int(roi_match.group(1))
+        updates["min_roi_pct"] = roi
+        summary_parts.append(f"最低ROI={roi}%")
+
+    turnaround_match = re.search(r"(?:最长|最多|可接受|接受)?(?:周转|出货|持有)[^\d]{0,8}(\d+)\s*天", text)
+    if turnaround_match:
+        days = int(turnaround_match.group(1))
+        updates["max_turnaround_days"] = days
+        summary_parts.append(f"最长周转={days}天")
+
+    categories = []
+    for category, terms in _PREFERENCE_CATEGORY_TERMS:
+        if any(term.lower() in compact for term in terms):
+            categories.append(category)
+    if categories:
+        updates["preferred_categories"] = categories
+        summary_parts.append("品类=" + ",".join(categories))
+
+    if "平台" in compact:
+        for platform in _PREFERENCE_PLATFORM_TERMS:
+            if platform in compact:
+                updates["platform"] = platform
+                summary_parts.append(f"平台={platform}")
+                break
+
+    if "跨平台" in compact or "crossplay" in compact:
+        if any(term in compact for term in ("关闭", "关掉", "不开", "禁用", "off", "false", "no")):
+            updates["crossplay"] = False
+            summary_parts.append("跨平台=off")
+        elif any(term in compact for term in ("开启", "打开", "启用", "开", "on", "true", "yes")):
+            updates["crossplay"] = True
+            summary_parts.append("跨平台=on")
+
+    max_match = re.search(r"(?:最多|最大|返回|显示|结果数)[^\d]{0,8}(\d+)\s*(?:个|条|结果)?", text)
+    if max_match:
+        max_results = int(max_match.group(1))
+        if 1 <= max_results <= 50:
+            updates["max_results"] = max_results
+            summary_parts.append(f"结果数={max_results}")
+
+    if not updates:
+        return None
+    return PreferenceIntent(updates=updates, summary_parts=summary_parts)
 
 
 def build_item_context(item_id: str, orders: Iterable[dict]) -> str:
@@ -405,6 +989,11 @@ class ChatAgent:
         self.last_agent_trace = None
         self._last_baro_recommendations = []
         self._baro_item_info_lookup = None
+        self._pending_goal_confirmation: PendingGoalConfirmation | None = None
+        self._pending_goal_status_confirmation: PendingGoalStatusConfirmation | None = None
+        self._pending_review_done_confirmation: PendingReviewDoneConfirmation | None = None
+        self._pending_fissure_alert_confirmation: PendingFissureAlertConfirmation | None = None
+        self._pending_agent_plan_confirmation: PendingAgentPlanConfirmation | None = None
 
     @staticmethod
     def _load_items_full() -> list[dict]:
@@ -487,7 +1076,7 @@ class ChatAgent:
             return None
         item_display = display_item_name(item_id)
         market_url = f"https://warframe.market/items/{item_id}"
-        if wants_link:
+        if wants_link and not (wants_seller or wants_bargain):
             return f"{item_display}\n市场链接: {market_url}"
 
         context = build_item_context_result(item_id, self.order_fetcher(item_id))
@@ -556,6 +1145,38 @@ class ChatAgent:
             return result
         if stripped.startswith("/"):
             return self._handle_agent_command(stripped)
+        agent_plan_confirmation = self._try_agent_plan_confirmation_response(message)
+        if agent_plan_confirmation:
+            self._log_answer(message, agent_plan_confirmation)
+            return agent_plan_confirmation
+        review_confirmation = self._try_review_done_confirmation_response(message)
+        if review_confirmation:
+            self._log_answer(message, review_confirmation)
+            return review_confirmation
+        fissure_confirmation = self._try_fissure_alert_confirmation_response(message)
+        if fissure_confirmation:
+            self._log_answer(message, fissure_confirmation)
+            return fissure_confirmation
+        goal_status_confirmation = self._try_goal_status_confirmation_response(message)
+        if goal_status_confirmation:
+            self._log_answer(message, goal_status_confirmation)
+            return goal_status_confirmation
+        goal_confirmation = self._try_goal_confirmation_response(message)
+        if goal_confirmation:
+            self._log_answer(message, goal_confirmation)
+            return goal_confirmation
+        goal_status_intent = self._try_goal_status_intent(message)
+        if goal_status_intent:
+            self._log_answer(message, goal_status_intent)
+            return goal_status_intent
+        review_intent = self._try_review_done_intent(message)
+        if review_intent:
+            self._log_answer(message, review_intent)
+            return review_intent
+        fissure_intent = self._try_fissure_alert_intent(message)
+        if fissure_intent:
+            self._log_answer(message, fissure_intent)
+            return fissure_intent
         opportunity_control = self._try_opportunity_control(message)
         if opportunity_control:
             self._log_answer(message, opportunity_control)
@@ -567,12 +1188,19 @@ class ChatAgent:
             self.session.add_exchange(message, cycle_result)
             self._log_answer(message, cycle_result)
             return cycle_result
+        price_alert_intent = self._try_price_alert_intent(message)
+        if price_alert_intent:
+            self._log_answer(message, price_alert_intent)
+            return price_alert_intent
+        favorite_intent = self._try_favorite_intent(message)
+        if favorite_intent:
+            self._log_answer(message, favorite_intent)
+            return favorite_intent
+        preference_intent = self._try_preference_intent(message)
+        if preference_intent:
+            self._log_answer(message, preference_intent)
+            return preference_intent
         self._remember_common_question(message)
-        direct_bilibili = self._try_direct_bilibili_recommendations(message)
-        if direct_bilibili:
-            self.session.add_exchange(message, direct_bilibili)
-            self._log_answer(message, direct_bilibili)
-            return direct_bilibili
         baro_followup = self._try_baro_order_followup(message)
         baro_followup_display = self._tool_result_display_text(baro_followup)
         if baro_followup_display:
@@ -610,10 +1238,41 @@ class ChatAgent:
             self.session.add_exchange(message, prime_direct)
             self._log_answer(message, prime_direct)
             return prime_direct
+        planning_answer = self._try_planning_intent(message)
+        if planning_answer:
+            self.session.add_exchange(message, planning_answer)
+            self._log_answer(message, planning_answer)
+            return planning_answer
+        direct_bilibili = self._try_direct_bilibili_recommendations(message)
+        if direct_bilibili:
+            self.session.add_exchange(message, direct_bilibili)
+            self._log_answer(message, direct_bilibili)
+            return direct_bilibili
+        relic_value_intent = _is_relic_value_intent(message)
+        relic_farming_intent = _is_relic_farming_intent(message)
+        if relic_value_intent or relic_farming_intent:
+            relic_tools = set()
+            if relic_value_intent:
+                relic_tools.add("relic_value")
+            if relic_farming_intent:
+                relic_tools.add("farming_route")
+            routed = self._try_router_result(message, candidate_tools=relic_tools)
+            routed_display = self._tool_result_display_text(routed)
+            if routed_display:
+                self.session.add_exchange(message, self._tool_result_history_text(routed))
+                self._log_answer(message, routed_display)
+                return routed_display
+            if relic_value_intent:
+                fallback = "暂时无法计算这个遗物的收益，请提供具体遗物名，例如 Lith B1。"
+            else:
+                fallback = "暂时无法规划这个遗物/部件的刷取路线，请提供具体遗物名或部件名。"
+            self.session.add_exchange(message, fallback)
+            self._log_answer(message, fallback)
+            return fallback
         # 事件类/交易工具类查询直接走路由器，避免物品匹配误触发交易流程
         if _is_event_query(message) or _is_trading_tool_query(message):
             if _is_event_query(message) and not _is_specific_event_list_query(message):
-                result = self._handle_limited_event_query()
+                result = self._handle_limited_event_query(message)
                 self.session.add_exchange(message, result)
                 self._log_answer(message, result)
                 return result
@@ -632,7 +1291,7 @@ class ChatAgent:
                 self._log_answer(message, fallback)
                 return fallback
             if _is_event_query(message):
-                fallback = self._handle_limited_event_query()
+                fallback = self._handle_limited_event_query(message)
                 self._log_answer(message, fallback)
                 return fallback
         warframe_answer = price_warframe_query(message, self.warframe_items, self.order_fetcher)
@@ -670,6 +1329,15 @@ class ChatAgent:
             self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
             self._log_answer(message, deterministic_answer, contexts)
             return deterministic_answer
+        if _classify_chat_mode(message).mode == "market_analysis" and (
+            self.model_call is call_ollama_chat or _message_has_guide_video_intent(message)
+        ):
+            result = fallback_answer(message, contexts)
+            if auto_trade_note:
+                result += "\n\n" + auto_trade_note
+            self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
+            self._log_answer(message, result, contexts)
+            return result
         current_ids = [ctx.item_id for ctx in contexts]
         market_ctx = build_system_context(self.knowledge, self.event_tracker, memory=self.memory, game_data=self.game_data, current_item_ids=current_ids)
         memory_recall_ctx = self._build_memory_recall_context(message, current_ids)
@@ -698,12 +1366,451 @@ class ChatAgent:
         return result
 
     def _try_direct_bilibili_recommendations(self, message: str) -> str | None:
+        if _classify_chat_mode(message).mode != "guide_video":
+            return None
         lowered = message.lower()
         explicit_video = any(token in lowered for token in ("b站", "bilibili", "视频", "教程"))
-        build_or_guide = any(token in lowered for token in ("攻略", "打法", "怎么玩", "怎么打", "配卡", "配装", "build", "mod配置"))
-        if not (explicit_video or build_or_guide):
+        guide_intent = is_bilibili_recommendation_intent(message)
+        if not (explicit_video or guide_intent):
             return None
-        return self._build_bilibili_recommendations(message, empty_message=explicit_video) or None
+        recommendations = self._build_bilibili_recommendations(message, empty_message=explicit_video)
+        if recommendations:
+            return recommendations
+        if guide_intent:
+            label = self._known_guide_item_label(message)
+            if label:
+                return f"暂未收录 {label} 的配卡/攻略 B 站视频。"
+        return None
+
+    def _try_planning_intent(self, message: str) -> str | None:
+        if _classify_chat_mode(message).mode != "planning":
+            return None
+        hint = self._planning_goal_hint(message)
+        pending = self._build_pending_goal_confirmation(hint)
+        self._pending_goal_confirmation = pending
+        lines = [
+            "我把这条识别为计划/目标请求，不会直接下单、不会生成购买私聊。",
+            "",
+            "计划草案:",
+            "1. 先确认预算、风险和最低 ROI；可用 /profile 查看当前偏好。",
+            "2. 用投资/倒卖扫描找候选，只看利润、ROI、流动性和历史复盘表现。",
+            "3. 每天复查价格和在线订单，达到目标价再手动执行交易。",
+            "4. 完成后用 /review done OPID 实际利润 good|bad 记录结果。",
+            "",
+        ]
+        if pending:
+            lines.extend([
+                "我也可以把它创建成长期跟踪目标。当前理解为:",
+                f"- {pending.summary}",
+                "是否创建？回复“确认创建”即可保存；回复“取消”则不保存。",
+                "",
+            ])
+        else:
+            lines.extend([
+                "如果要创建长期跟踪目标，请补充目标金额、周期或预算后确认。",
+                "",
+            ])
+        lines.append(f"需要跟踪目标时可以使用: /goal set {hint}")
+        return "\n".join(lines)
+
+    def _build_pending_goal_confirmation(self, description: str) -> PendingGoalConfirmation | None:
+        goal_type, criteria, summary = self._goal_payload_from_description(description)
+        if not self._goal_criteria_has_user_signal(criteria):
+            return None
+        return PendingGoalConfirmation(
+            description=description,
+            goal_type=goal_type,
+            criteria=criteria,
+            summary=summary,
+        )
+
+    def _try_agent_plan_confirmation_response(self, message: str) -> str | None:
+        compact = re.sub(r"\s+", "", message.strip().lower())
+        if not compact:
+            return None
+        if self._is_agent_plan_confirmation_cancel(compact):
+            if self._pending_agent_plan_confirmation:
+                self._pending_agent_plan_confirmation = None
+                return "已取消待确认的计划执行。"
+            return "当前没有待取消的计划确认。"
+        if not self._is_agent_plan_confirmation_accept(compact):
+            return None
+        pending = self._pending_agent_plan_confirmation
+        if not pending:
+            return "当前没有待确认的计划执行。请先让我生成一个被软拦截的只读计划。"
+        self._pending_agent_plan_confirmation = None
+        candidate_tools = set(pending.candidate_tools) if pending.candidate_tools else None
+        result = self._try_react_loop(
+            pending.original_message,
+            candidate_tools=candidate_tools,
+            plan_confirmation_token=pending.confirmation_token,
+        )
+        if result:
+            return result
+        return "计划确认后仍无法执行；我没有执行任何步骤。请重新发起计划。"
+
+    @staticmethod
+    def _is_agent_plan_confirmation_accept(compact: str) -> bool:
+        return compact in {"确认执行", "执行计划", "确认计划", "继续执行", "确认运行"}
+
+    @staticmethod
+    def _is_agent_plan_confirmation_cancel(compact: str) -> bool:
+        return compact in {"取消执行", "取消计划", "不执行", "不执行计划", "放弃执行"}
+
+    def _capture_agent_plan_confirmation(
+        self,
+        original_message: str,
+        candidate_tools: set[str] | None,
+        result: str,
+        trace,
+    ) -> str:
+        token_match = re.search(r"confirmation_token=(plan_confirm_[0-9a-f]+)", result)
+        reason_match = re.search(r"confirmable_reason=([a-z_]+)", result)
+        if not token_match or not reason_match or reason_match.group(1) != "missing_verification":
+            return result
+        plan = getattr(trace, "plan", None)
+        review = getattr(plan, "review", None) if plan is not None else None
+        if getattr(review, "blocked_reason", "") != "missing_verification":
+            return result
+        self._pending_agent_plan_confirmation = PendingAgentPlanConfirmation(
+            original_message=original_message,
+            confirmation_token=token_match.group(1),
+            blocked_reason="missing_verification",
+            candidate_tools=tuple(sorted(candidate_tools)) if candidate_tools else None,
+        )
+        return self._format_agent_plan_confirmation_prompt(plan)
+
+    @staticmethod
+    def _format_agent_plan_confirmation_prompt(plan) -> str:
+        goal = getattr(plan, "goal", "") or "未命名计划"
+        steps = getattr(plan, "steps", []) or []
+        tool_names = [getattr(step, "tool_name", "") for step in steps if getattr(step, "tool_name", "")]
+        lines = [
+            "计划已暂停，原因是缺少步骤验证说明。",
+            f"目标: {goal}",
+        ]
+        if tool_names:
+            lines.append(f"只读步骤: {', '.join(tool_names[:6])}")
+        lines.extend([
+            "这类计划只允许在你确认后重新审查并执行。",
+            "回复“确认执行”继续；回复“取消执行”不执行。",
+        ])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _goal_payload_from_description(description: str) -> tuple[str, dict, str]:
+        from .goals import format_goal_criteria_summary, parse_goal_description_criteria
+
+        criteria = parse_goal_description_criteria(description)
+        goal_type = "earn_platinum" if criteria.get("target_amount") is not None else "maximize_profit"
+        summary = format_goal_criteria_summary(criteria)
+        return goal_type, criteria, summary
+
+    @staticmethod
+    def _goal_criteria_has_user_signal(criteria: dict) -> bool:
+        defaults = {"budget": 500, "min_roi": 10}
+        return any(criteria.get(key) != value for key, value in defaults.items()) or any(
+            key in criteria for key in ("target_profit", "target_amount", "timeframe_days", "risk")
+        )
+
+    def _try_goal_confirmation_response(self, message: str) -> str | None:
+        compact = re.sub(r"\s+", "", message.strip().lower())
+        if not compact:
+            return None
+        if self._is_goal_confirmation_cancel(compact):
+            if self._pending_goal_confirmation:
+                self._pending_goal_confirmation = None
+                return "已取消创建目标。"
+            return "当前没有待取消的目标确认。"
+        if self._is_goal_confirmation_accept(compact):
+            pending = self._pending_goal_confirmation
+            if not pending:
+                return "当前没有待确认的目标。你可以先说“帮我制定一周赚500p的计划”。"
+            self._pending_goal_confirmation = None
+            return self._create_goal_from_description(pending.description)
+        return None
+
+    def _try_review_done_confirmation_response(self, message: str) -> str | None:
+        compact = re.sub(r"\s+", "", message.strip().lower())
+        if not compact:
+            return None
+        pending = self._pending_review_done_confirmation
+        if not pending:
+            return None
+        if self._is_goal_confirmation_cancel(compact):
+            self._pending_review_done_confirmation = None
+            return "已取消机会复盘记录。"
+        if compact in {"确认", "确认复盘", "确认记录", "记录", "复盘", "可以", "好的", "好", "yes", "y", "ok", "okay"}:
+            self._pending_review_done_confirmation = None
+            return self._handle_review_record_command([
+                pending.lookup_id,
+                str(pending.actual_profit),
+                pending.feedback,
+            ])
+        return None
+
+    def _try_review_done_intent(self, message: str) -> str | None:
+        intent = _parse_natural_language_review_done(message)
+        if not intent:
+            return None
+        if not self.trading_memory_db:
+            return "暂无机会复盘数据。"
+        detail = self.opportunity_lookup_store.get(intent.lookup_id)
+        if detail is None:
+            return opportunity_not_found_message(intent.lookup_id)
+        safe_summary = self._opportunity_review_safe_summary(detail)
+        item_id = str(safe_summary.get("item_id") or detail.item_id or "")
+        expected_profit = self._safe_int(safe_summary.get("profit", 0))
+        pending = PendingReviewDoneConfirmation(
+            lookup_id=intent.lookup_id,
+            actual_profit=intent.actual_profit,
+            feedback=intent.feedback,
+            item_id=item_id,
+            expected_profit=expected_profit,
+        )
+        self._pending_review_done_confirmation = pending
+        return self._format_review_done_confirmation_prompt(pending)
+
+    @staticmethod
+    def _format_review_done_confirmation_prompt(pending: PendingReviewDoneConfirmation) -> str:
+        return "\n".join([
+            "我理解为要记录一次机会复盘：",
+            f"机会 ID: {pending.lookup_id}",
+            f"物品: {pending.item_id}",
+            f"预期利润: {pending.expected_profit}p",
+            f"实际利润: {pending.actual_profit}p",
+            f"反馈: {pending.feedback}",
+            "回复“确认复盘”写入；回复“取消”不记录。",
+        ])
+
+    def _try_fissure_alert_confirmation_response(self, message: str) -> str | None:
+        compact = re.sub(r"\s+", "", message.strip().lower())
+        if not compact:
+            return None
+        pending = self._pending_fissure_alert_confirmation
+        if not pending:
+            return None
+        if self._is_goal_confirmation_cancel(compact):
+            self._pending_fissure_alert_confirmation = None
+            return "已取消裂缝提醒变更。"
+        if self._is_fissure_alert_confirmation_accept(compact, pending.action):
+            self._pending_fissure_alert_confirmation = None
+            if pending.action == "remove":
+                if pending.index is None:
+                    return "缺少要取消的裂缝订阅序号。"
+                return self._remove_fissure_alert([str(pending.index)])
+            return self._add_fissure_alert(pending.tokens)
+        return None
+
+    @staticmethod
+    def _is_fissure_alert_confirmation_accept(compact: str, action: str) -> bool:
+        generic = {"确认", "可以", "好的", "好", "同意", "yes", "y", "ok", "okay"}
+        if compact in generic:
+            return True
+        if action == "add":
+            return compact in {"确认订阅", "订阅", "保存订阅", "创建订阅"}
+        if action == "remove":
+            return compact in {"确认取消", "取消订阅", "删除", "移除", "确认删除", "确认移除"}
+        return False
+
+    def _try_fissure_alert_intent(self, message: str) -> str | None:
+        intent = _parse_natural_language_fissure_alert(message)
+        if not intent:
+            return None
+        if intent.action == "remove":
+            index = intent.index or 0
+            if index < 1 or index > len(self.memory.fissure_alerts):
+                return f"未找到第 {index} 条裂缝订阅，当前共有 {len(self.memory.fissure_alerts)} 条。"
+            alert = self.memory.fissure_alerts[index - 1]
+            pending = PendingFissureAlertConfirmation(
+                action="remove",
+                tokens=[],
+                index=index,
+                note=alert.note or "全部裂缝",
+            )
+            self._pending_fissure_alert_confirmation = pending
+            return self._format_fissure_alert_remove_confirmation_prompt(pending)
+
+        pending = PendingFissureAlertConfirmation(
+            action="add",
+            tokens=list(intent.tokens),
+            note=intent.note or "全部裂缝",
+        )
+        self._pending_fissure_alert_confirmation = pending
+        return self._format_fissure_alert_add_confirmation_prompt(pending)
+
+    @staticmethod
+    def _format_fissure_alert_add_confirmation_prompt(pending: PendingFissureAlertConfirmation) -> str:
+        return "\n".join([
+            "我理解为要订阅裂缝提醒：",
+            f"过滤条件: {pending.note or '全部裂缝'}",
+            "回复“确认订阅”写入；回复“取消”不更改。",
+        ])
+
+    @staticmethod
+    def _format_fissure_alert_remove_confirmation_prompt(pending: PendingFissureAlertConfirmation) -> str:
+        return "\n".join([
+            "我理解为要取消裂缝提醒：",
+            f"订阅序号: {pending.index}",
+            f"当前条件: {pending.note or '全部裂缝'}",
+            "回复“确认取消”移除；回复“取消”不更改。",
+        ])
+
+    def _try_goal_status_confirmation_response(self, message: str) -> str | None:
+        compact = re.sub(r"\s+", "", message.strip().lower())
+        if not compact:
+            return None
+        pending = self._pending_goal_status_confirmation
+        if not pending:
+            return None
+        if self._is_goal_confirmation_cancel(compact):
+            self._pending_goal_status_confirmation = None
+            return "已取消目标状态更新。"
+        if self._is_goal_status_confirmation_accept(compact, pending.action):
+            self._pending_goal_status_confirmation = None
+            return self._apply_goal_status_update(pending.goal_id, pending.action)
+        return None
+
+    @staticmethod
+    def _is_goal_status_confirmation_accept(compact: str, action: str) -> bool:
+        generic = {"确认", "可以", "好的", "好", "同意", "yes", "y", "ok", "okay"}
+        if compact in generic:
+            return True
+        if action == "complete":
+            return compact in {"确认完成", "完成", "完成目标", "标记完成"}
+        if action == "drop":
+            return compact in {"确认放弃", "放弃", "放弃目标"}
+        return False
+
+    def _try_goal_status_intent(self, message: str) -> str | None:
+        intent = _parse_natural_language_goal_status(message)
+        if not intent:
+            return None
+        from .goals import GoalTracker
+
+        tracker = GoalTracker()
+        goal, error = self._resolve_goal_status_target(intent, tracker)
+        if error:
+            return error
+        if goal is None:
+            return None
+        target_status = "achieved" if intent.action == "complete" else "abandoned"
+        pending = PendingGoalStatusConfirmation(
+            action=intent.action,
+            goal_id=goal.goal_id,
+            description=goal.description,
+            target_status=target_status,
+        )
+        self._pending_goal_status_confirmation = pending
+        return self._format_goal_status_confirmation_prompt(pending)
+
+    @staticmethod
+    def _resolve_goal_status_target(intent: GoalStatusIntent, tracker):
+        active_goals = tracker.get_active_goals()
+        if not active_goals:
+            return None, "当前没有活跃的交易目标。"
+        if intent.selector_type == "index":
+            index = int(intent.selector) - 1
+            if index < 0 or index >= len(active_goals):
+                return None, f"未找到第 {intent.selector} 个活跃目标。"
+            return active_goals[index], None
+        if intent.selector_type == "id":
+            matches = [goal for goal in active_goals if goal.goal_id.startswith(intent.selector)]
+        else:
+            selector = intent.selector.strip()
+            matches = [
+                goal for goal in active_goals
+                if selector in goal.description or goal.description in selector
+            ]
+        if len(matches) == 1:
+            return matches[0], None
+        if len(matches) > 1:
+            lines = ["匹配到多个活跃目标，请使用目标 ID 再试："]
+            for goal in matches[:5]:
+                lines.append(f"- {goal.description} [{goal.goal_id[:6]}]")
+            return None, "\n".join(lines)
+        return None, f"未找到匹配的活跃目标: {intent.selector}"
+
+    @staticmethod
+    def _format_goal_status_confirmation_prompt(pending: PendingGoalStatusConfirmation) -> str:
+        action_label = "完成" if pending.action == "complete" else "放弃"
+        status_label = "achieved" if pending.action == "complete" else "abandoned"
+        return "\n".join([
+            f"我理解为要{action_label}目标：{pending.description}",
+            f"目标 ID: {pending.goal_id[:6]}",
+            f"将变更为: {status_label}",
+            f"回复“确认{action_label}”执行；回复“取消”不更改。",
+        ])
+
+    def _apply_goal_status_update(self, goal_id: str, action: str) -> str:
+        from .goals import GoalTracker
+
+        tracker = GoalTracker()
+        matches = [goal for goal in tracker.goals if goal.goal_id == goal_id]
+        if not matches:
+            return f"未找到 ID 为 {goal_id[:6]} 的目标。"
+        goal = matches[0]
+        if action == "complete":
+            tracker.update_goal_status(goal.goal_id, "achieved")
+            review = tracker.generate_review(goal.goal_id)
+            return f"目标已标记为完成：\n\n{review}"
+        tracker.update_goal_status(goal.goal_id, "abandoned")
+        return f"已放弃目标: {goal.description}"
+
+    @staticmethod
+    def _is_goal_confirmation_accept(compact: str) -> bool:
+        return compact in {
+            "确认", "确认创建", "创建", "创建目标", "保存", "保存目标",
+            "可以", "好的", "好", "同意", "就这个", "yes", "y", "ok", "okay",
+        }
+
+    @staticmethod
+    def _is_goal_confirmation_cancel(compact: str) -> bool:
+        return compact in {
+            "取消", "取消创建", "不创建", "先不创建", "不要创建", "算了", "不用了", "no", "n",
+        }
+
+    def _create_goal_from_description(self, description: str) -> str:
+        from .goals import GoalTracker, create_goal
+
+        goal_type, criteria, summary = self._goal_payload_from_description(description)
+        goal = create_goal(
+            goal_type=goal_type,
+            description=description,
+            target="all",
+            criteria=criteria,
+        )
+        GoalTracker().add_goal(goal)
+        lines = [f"已创建目标: {description}", f"目标 ID: {goal.goal_id[:6]}"]
+        if summary:
+            lines.append(f"已解析: {summary}")
+        lines.append("使用 /goal 查看进度")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _planning_goal_hint(message: str) -> str:
+        compact = re.sub(r"\s+", " ", message.strip())
+        compact = re.sub(r"(不要直接买|不要下单|顺便给攻略视频|顺便找攻略视频|攻略视频)", "", compact)
+        compact = compact.strip(" ，,。")
+        return compact[:80] or "一周内赚500p"
+
+    def _known_guide_item_label(self, message: str) -> str | None:
+        normalized_message = normalize_lookup_key(message)
+        for aliases in (
+            getattr(self.resolver, "aliases", {}) or {},
+            getattr(self.resolver, "generated_aliases", {}) or {},
+        ):
+            for alias_key, _item_id in sorted(aliases.items(), key=lambda entry: -len(entry[0])):
+                if alias_key and alias_key in normalized_message:
+                    return alias_key
+        for token in _message_tokens(message):
+            try:
+                result = self.resolver.resolve(token)
+            except (LookupError, ValueError):
+                continue
+            if result.source in {"alias", "dictionary", "generated_alias"}:
+                return result.matched_name or token
+        return None
 
     def _build_bilibili_recommendations(self, message: str, *, empty_message: bool = False) -> str:
         try:
@@ -715,6 +1822,8 @@ class ChatAgent:
             return "暂未收录相关 B 站视频。" if empty_message and is_bilibili_recommendation_intent(message) else ""
 
     def _append_bilibili_recommendations(self, message: str, answer: str) -> str:
+        if _classify_chat_mode(message).mode != "guide_video":
+            return answer
         recommendations = self._build_bilibili_recommendations(message)
         if not recommendations:
             return answer
@@ -911,6 +2020,46 @@ class ChatAgent:
             self._log_answer(message, result)
             yield result
             return
+        agent_plan_confirmation = self._try_agent_plan_confirmation_response(message)
+        if agent_plan_confirmation:
+            self._log_answer(message, agent_plan_confirmation)
+            yield agent_plan_confirmation
+            return
+        review_confirmation = self._try_review_done_confirmation_response(message)
+        if review_confirmation:
+            self._log_answer(message, review_confirmation)
+            yield review_confirmation
+            return
+        fissure_confirmation = self._try_fissure_alert_confirmation_response(message)
+        if fissure_confirmation:
+            self._log_answer(message, fissure_confirmation)
+            yield fissure_confirmation
+            return
+        goal_status_confirmation = self._try_goal_status_confirmation_response(message)
+        if goal_status_confirmation:
+            self._log_answer(message, goal_status_confirmation)
+            yield goal_status_confirmation
+            return
+        goal_confirmation = self._try_goal_confirmation_response(message)
+        if goal_confirmation:
+            self._log_answer(message, goal_confirmation)
+            yield goal_confirmation
+            return
+        goal_status_intent = self._try_goal_status_intent(message)
+        if goal_status_intent:
+            self._log_answer(message, goal_status_intent)
+            yield goal_status_intent
+            return
+        review_intent = self._try_review_done_intent(message)
+        if review_intent:
+            self._log_answer(message, review_intent)
+            yield review_intent
+            return
+        fissure_intent = self._try_fissure_alert_intent(message)
+        if fissure_intent:
+            self._log_answer(message, fissure_intent)
+            yield fissure_intent
+            return
         opportunity_control = self._try_opportunity_control(message)
         if opportunity_control:
             self._log_answer(message, opportunity_control)
@@ -927,13 +2076,22 @@ class ChatAgent:
             self._log_answer(message, cycle_result)
             yield cycle_result
             return
-        self._remember_common_question(message)
-        direct_bilibili = self._try_direct_bilibili_recommendations(message)
-        if direct_bilibili:
-            self.session.add_exchange(message, direct_bilibili)
-            self._log_answer(message, direct_bilibili)
-            yield direct_bilibili
+        price_alert_intent = self._try_price_alert_intent(message)
+        if price_alert_intent:
+            self._log_answer(message, price_alert_intent)
+            yield price_alert_intent
             return
+        favorite_intent = self._try_favorite_intent(message)
+        if favorite_intent:
+            self._log_answer(message, favorite_intent)
+            yield favorite_intent
+            return
+        preference_intent = self._try_preference_intent(message)
+        if preference_intent:
+            self._log_answer(message, preference_intent)
+            yield preference_intent
+            return
+        self._remember_common_question(message)
         baro_followup = self._try_baro_order_followup(message)
         baro_followup_display = self._tool_result_display_text(baro_followup)
         if baro_followup_display:
@@ -977,10 +2135,45 @@ class ChatAgent:
             self._log_answer(message, prime_direct)
             yield prime_direct
             return
+        planning_answer = self._try_planning_intent(message)
+        if planning_answer:
+            self.session.add_exchange(message, planning_answer)
+            self._log_answer(message, planning_answer)
+            yield planning_answer
+            return
+        direct_bilibili = self._try_direct_bilibili_recommendations(message)
+        if direct_bilibili:
+            self.session.add_exchange(message, direct_bilibili)
+            self._log_answer(message, direct_bilibili)
+            yield direct_bilibili
+            return
+        relic_value_intent = _is_relic_value_intent(message)
+        relic_farming_intent = _is_relic_farming_intent(message)
+        if relic_value_intent or relic_farming_intent:
+            relic_tools = set()
+            if relic_value_intent:
+                relic_tools.add("relic_value")
+            if relic_farming_intent:
+                relic_tools.add("farming_route")
+            routed = self._try_router_result(message, candidate_tools=relic_tools)
+            routed_display = self._tool_result_display_text(routed)
+            if routed_display:
+                self.session.add_exchange(message, self._tool_result_history_text(routed))
+                self._log_answer(message, routed_display)
+                yield routed_display
+                return
+            if relic_value_intent:
+                fallback = "暂时无法计算这个遗物的收益，请提供具体遗物名，例如 Lith B1。"
+            else:
+                fallback = "暂时无法规划这个遗物/部件的刷取路线，请提供具体遗物名或部件名。"
+            self.session.add_exchange(message, fallback)
+            self._log_answer(message, fallback)
+            yield fallback
+            return
         # 事件类/交易工具类查询直接走路由器，避免物品匹配误触发交易流程
         if _is_event_query(message) or _is_trading_tool_query(message):
             if _is_event_query(message) and not _is_specific_event_list_query(message):
-                result = self._handle_limited_event_query()
+                result = self._handle_limited_event_query(message)
                 self.session.add_exchange(message, result)
                 self._log_answer(message, result)
                 yield result
@@ -1001,7 +2194,7 @@ class ChatAgent:
                 yield fallback
                 return
             if _is_event_query(message):
-                result = self._handle_limited_event_query()
+                result = self._handle_limited_event_query(message)
                 self.session.add_exchange(message, result)
                 self._log_answer(message, result)
                 yield result
@@ -1043,6 +2236,12 @@ class ChatAgent:
             self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
             self._log_answer(message, deterministic_answer, contexts)
             yield deterministic_answer
+            return
+        if _classify_chat_mode(message).mode == "market_analysis":
+            result = fallback_answer(message, contexts)
+            self.session.add_exchange(message, safe_query_price_context_from_contexts(contexts))
+            self._log_answer(message, result, contexts)
+            yield result
             return
         current_ids = [ctx.item_id for ctx in contexts]
         market_ctx = build_system_context(self.knowledge, self.event_tracker, memory=self.memory, game_data=self.game_data, current_item_ids=current_ids)
@@ -1107,6 +2306,10 @@ class ChatAgent:
             return self._handle_alert_command(tokens[1:])
         if command == "/pref":
             return self._handle_preference_command(tokens[1:])
+        if command in {"/profile", "/画像"}:
+            return self._handle_profile_command()
+        if command in {"/review", "/复盘"}:
+            return self._handle_review_command(tokens[1:])
         if command == "/push":
             return self._handle_push_command(tokens[1:])
         if command == "/scan":
@@ -1141,6 +2344,10 @@ class ChatAgent:
             "/pref platform pc",
             "/pref crossplay on",
             "/pref max 5",
+            "/pref risk low | /pref budget 30-150 | /pref categories mod,arcane",
+            "/profile           查看个人交易画像",
+            "/review [status]   查看机会复盘记录",
+            "/review done OPID 实际利润 [good|bad|neutral|ignored]  记录机会复盘",
             "/push opportunity off|on  暂停/开启交易机会推送",
             "/push opportunity filter mod|arcane|all  设置交易机会检测范围",
             "/opp 机会ID       查看推送机会的市场链接和游戏内私聊命令",
@@ -1196,6 +2403,43 @@ class ChatAgent:
         self._persist_memory()
         label = {"all": "全部", "mod": "仅 MOD", "arcane": "仅赋能"}[opportunity_filter]
         return f"已设置交易机会检测范围：{label}。价格提醒、关注推送和每日报告不受影响。"
+
+    def _try_price_alert_intent(self, message: str) -> str | None:
+        intent = _parse_natural_language_price_alert(message)
+        if not intent:
+            return None
+        item_id = self._resolve_item_id_for_command(intent.item_name)
+        if not item_id:
+            return f"找不到物品: {intent.item_name}，请尝试输入完整的 item_id"
+
+        threshold_text = "低于" if intent.direction == "below" else "高于"
+        if intent.action == "add":
+            note = f"{display_item_name(item_id)} {threshold_text} {intent.price}p 提醒"
+            self.memory = self.memory.with_price_alert(item_id, intent.direction, intent.price, note)
+            self._persist_memory()
+            return f"已添加提醒: {note}"
+
+        before_count = len(self.memory.price_alerts)
+        self.memory = self.memory.without_price_alert(item_id, intent.direction, intent.price)
+        if len(self.memory.price_alerts) == before_count:
+            return f"未找到对应提醒: {display_item_name(item_id)} {threshold_text} {intent.price}p"
+        self._persist_memory()
+        return f"已移除提醒: {display_item_name(item_id)} {threshold_text} {intent.price}p"
+
+    def _try_favorite_intent(self, message: str) -> str | None:
+        intent = _parse_natural_language_favorite(message)
+        if not intent:
+            return None
+        return self._handle_favorite_command([intent.action, intent.item_name])
+
+    def _try_preference_intent(self, message: str) -> str | None:
+        intent = _parse_natural_language_preference(message)
+        if not intent:
+            return None
+        self.memory = self.memory.with_updated_preferences(**intent.updates)
+        self._persist_memory()
+        summary = "，".join(intent.summary_parts)
+        return f"已更新偏好: {summary}。使用 /profile 查看个人交易画像。"
 
     def _handle_opportunity_lookup(self, args: list[str]) -> str:
         if not args:
@@ -1330,19 +2574,27 @@ class ChatAgent:
     def _handle_preference_command(self, args: list[str]) -> str:
         if not args or (len(args) == 1 and args[0].lower() in {"list", "列表", "show", "查看"}):
             p = self.memory.preferences
+            categories = ",".join(p.preferred_categories) or "未设置"
+            budget = f"{p.budget_min}-{p.budget_max}p" if p.budget_min or p.budget_max else "未设置"
             lines = [
                 "当前偏好设置:",
                 f"  平台: {p.platform}",
                 f"  跨平台: {'开' if p.crossplay else '关'}",
                 f"  最大结果数: {p.max_results}",
+                f"  风险偏好: {p.risk_appetite}",
+                f"  预算区间: {budget}",
+                f"  偏好品类: {categories}",
+                f"  可接受周转: {p.max_turnaround_days} 天",
+                f"  最低 ROI: {p.min_roi_pct}%",
                 "",
-                "修改: /pref platform pc | /pref crossplay on | /pref max 5",
+                "修改: /pref platform pc | /pref crossplay on | /pref max 5 | /pref risk low | /pref budget 30-150 | /pref categories mod,arcane | /pref turnaround 3 | /pref min_roi 30",
             ]
             return "\n".join(lines)
         if len(args) < 2:
-            return "用法: /pref platform pc | /pref crossplay on | /pref max 5"
+            return "用法: /pref platform pc | /pref crossplay on | /pref max 5 | /pref risk low | /pref budget 30-150 | /pref categories mod,arcane"
         key = args[0].lower()
-        value = args[1].lower()
+        raw_value = " ".join(args[1:]).strip()
+        value = raw_value.lower()
         if key == "platform":
             self.memory = self.memory.with_updated_preferences(platform=value)
             self._persist_memory()
@@ -1364,7 +2616,170 @@ class ChatAgent:
             self.memory = self.memory.with_updated_preferences(max_results=max_results)
             self._persist_memory()
             return f"已设置最大结果数: {max_results}"
-        return "不支持的偏好设置，可选: platform / crossplay / max"
+        if key in {
+            "risk",
+            "risk_appetite",
+            "budget",
+            "budget_range",
+            "categories",
+            "preferred_categories",
+            "turnaround",
+            "max_turnaround_days",
+            "min_roi",
+            "min_roi_pct",
+        }:
+            updated = self.memory.set_preference(key, raw_value)
+            if updated == self.memory:
+                return "偏好格式不正确。示例: /pref risk low | /pref budget 30-150 | /pref categories mod,arcane"
+            self.memory = updated
+            self._persist_memory()
+            return "已更新偏好。使用 /profile 查看个人交易画像。"
+        return "不支持的偏好设置，可选: platform / crossplay / max / risk / budget / categories / turnaround / min_roi"
+
+    def _handle_profile_command(self) -> str:
+        from .personal_profile import format_personal_profile
+
+        return format_personal_profile(self._build_personal_profile())
+
+    def _profile_opportunity_outcomes(self, limit: int = 100) -> list:
+        if not self.trading_memory_db:
+            return []
+        try:
+            return self.trading_memory_db.get_opportunity_outcomes(limit=limit)
+        except Exception as exc:
+            logger.debug("机会复盘画像读取失败: %s", exc)
+            return []
+
+    def _build_personal_profile(self):
+        from .personal_profile import build_personal_profile
+
+        return build_personal_profile(
+            self.memory,
+            opportunity_outcomes=self._profile_opportunity_outcomes(),
+        )
+
+    def _handle_review_command(self, args: list[str]) -> str:
+        if args and args[0].strip().lower() in {"done", "complete", "完成", "记录"}:
+            return self._handle_review_record_command(args[1:])
+        if not self.trading_memory_db:
+            return "暂无机会复盘数据。"
+        status = args[0].strip().lower() if args else None
+        records = self.trading_memory_db.get_opportunity_outcomes(status=status, limit=10)
+        if not records:
+            return "暂无机会复盘记录。"
+        lines = ["机会复盘"]
+        for record in records:
+            metadata = record.metadata or {}
+            safe_summary = metadata.get("safe_summary")
+            if not isinstance(safe_summary, dict):
+                safe_summary = metadata
+            roi = safe_summary.get("roi_pct", "")
+            risk = safe_summary.get("risk_level", "")
+            detail = (
+                f"- {record.opportunity_id} {record.item_name}: {record.status}, "
+                f"预期 {record.expected_profit}p, 实际 {record.actual_profit}p, 反馈 {record.user_feedback}"
+            )
+            if roi != "":
+                detail += f", ROI {roi}%"
+            if risk:
+                detail += f", 风险 {risk}"
+            lines.append(detail)
+        return "\n".join(lines)
+
+    def _handle_review_record_command(self, args: list[str]) -> str:
+        if not self.trading_memory_db:
+            return "暂无机会复盘数据。"
+        if len(args) < 2:
+            return "用法：/review done OP8K3A2Q 实际利润 [good|bad|neutral|ignored]"
+        lookup_id = normalize_opportunity_lookup_id(args[0])
+        if not is_opportunity_lookup_id(lookup_id):
+            return "机会 ID 格式不正确。请使用类似 OP8K3A2Q 的 ID。"
+        try:
+            actual_profit = int(args[1])
+        except ValueError:
+            return "实际利润必须是整数，例如：/review done OP8K3A2Q 45 good"
+        feedback = (
+            self._normalize_review_feedback(args[2])
+            if len(args) >= 3
+            else self._default_feedback_for_profit(actual_profit)
+        )
+        detail = self.opportunity_lookup_store.get(lookup_id)
+        if detail is None:
+            return opportunity_not_found_message(lookup_id)
+        plan = detail.content if isinstance(detail.content, dict) else {}
+        safe_summary = self._opportunity_review_safe_summary(detail)
+        item_id = str(safe_summary.get("item_id") or detail.item_id or plan.get("item_id") or "")
+        source = str(safe_summary.get("source") or plan.get("source") or "unknown")
+        strategy = str(safe_summary.get("strategy") or plan.get("strategy") or source)
+        expected_profit = self._safe_int(safe_summary.get("profit", plan.get("profit", 0)))
+        self.trading_memory_db.record_opportunity_outcome(
+            lookup_id,
+            item_id,
+            source,
+            strategy,
+            "completed",
+            expected_profit,
+            actual_profit,
+            feedback,
+            {"safe_summary": safe_summary},
+        )
+        return (
+            f"已记录机会复盘：{lookup_id} {item_id}，"
+            f"预期 {expected_profit}p，实际 {actual_profit}p，反馈 {feedback}。"
+        )
+
+    @staticmethod
+    def _default_feedback_for_profit(actual_profit: int) -> str:
+        if actual_profit > 0:
+            return "good"
+        if actual_profit < 0:
+            return "bad"
+        return "neutral"
+
+    @staticmethod
+    def _normalize_review_feedback(value: str) -> str:
+        normalized = str(value or "neutral").strip().lower()
+        allowed = {"good", "bad", "ignored", "neutral", "accepted", "rejected"}
+        return normalized if normalized in allowed else "neutral"
+
+    @staticmethod
+    def _safe_int(value, default: int = 0) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _opportunity_review_safe_summary(detail) -> dict:
+        plan = detail.content if isinstance(detail.content, dict) else {}
+        raw = plan.get("safe_summary")
+        if not isinstance(raw, dict):
+            raw = plan
+        allowed = {
+            "source",
+            "strategy",
+            "item_id",
+            "required_quantity",
+            "total_cost",
+            "total_revenue",
+            "profit",
+            "roi_pct",
+            "risk_level",
+            "profit_bucket",
+            "plan_signature",
+            "turnaround_days",
+            "budget_spent",
+            "quantity",
+            "confidence",
+        }
+        summary = {}
+        for key in allowed:
+            value = raw.get(key)
+            if value is not None:
+                summary[key] = value
+        if "item_id" not in summary and detail.item_id:
+            summary["item_id"] = detail.item_id
+        return summary
 
     def _handle_scan_command(self) -> str:
         lines = ["扫描结果："]
@@ -1401,23 +2816,16 @@ class ChatAgent:
         return "\n".join(lines)
 
     def _handle_goal_command(self, args: list[str]) -> str:
-        from .goals import GoalTracker, create_goal
-        tracker = GoalTracker()
+        from .goals import GoalTracker
         if not args:
-            return tracker.format_goals_status()
+            return GoalTracker().format_goals_status()
         sub = args[0].lower()
         if sub in ("set", "add", "新建"):
             desc = " ".join(args[1:]) if len(args) > 1 else ""
             if not desc:
                 return "请指定目标描述，例如: /goal set 一周内赚500p"
-            goal = create_goal(
-                goal_type="maximize_profit",
-                description=desc,
-                target="all",
-                criteria={"budget": 500, "min_roi": 10},
-            )
-            tracker.add_goal(goal)
-            return f"已创建目标: {desc}\n目标 ID: {goal.goal_id[:6]}\n使用 /goal 查看进度"
+            return self._create_goal_from_description(desc)
+        tracker = GoalTracker()
         if sub in ("done", "完成"):
             gid = args[1] if len(args) > 1 else ""
             if not gid:
@@ -2007,6 +3415,8 @@ class ChatAgent:
         )
         if not is_baro_order_detail_request(message):
             return None
+        if self._baro_followup_conflicts_with_direct_market_query(message):
+            return None
         recommendation = find_baro_recommendation(self._last_baro_recommendations, message)
         if not recommendation:
             return None
@@ -2015,27 +3425,52 @@ class ChatAgent:
         model_context = format_baro_order_details_for_model(recommendation, seller_limit=seller_limit, buyer_limit=buyer_limit)
         return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
 
+    def _baro_followup_conflicts_with_direct_market_query(self, message: str) -> bool:
+        lowered = message.lower()
+        if any(word in lowered for word in ("baro", "虚空商人", "奸商")):
+            return False
+        for rec in self._last_baro_recommendations:
+            rec_names = (rec.market_id, display_item_name(rec.market_id), rec.item_name)
+            if any(name and name.lower() in lowered for name in rec_names):
+                return False
+        return self._resolve_direct_market_item_id(message) is not None
+
     def _try_router(self, message: str) -> str | None:
         result = self._try_router_result(message)
         return self._tool_result_display_text(result)
 
-    def _try_router_result(self, message: str) -> str | ToolResult | None:
-        result = self._try_react_loop(message)
+    def _try_router_result(self, message: str, candidate_tools: set[str] | None = None) -> str | ToolResult | None:
+        try:
+            result = self._try_react_loop(message, candidate_tools=candidate_tools)
+        except TypeError:
+            if candidate_tools is not None:
+                raise
+            result = self._try_react_loop(message)
         if result:
             return result
-        return self._try_router_legacy_result(message)
+        return self._try_router_legacy_result(message, candidate_tools=candidate_tools)
 
-    def _try_react_loop(self, message: str) -> str | None:
+    def _try_react_loop(
+        self,
+        message: str,
+        candidate_tools: set[str] | None = None,
+        plan_confirmation_token: str | None = None,
+    ) -> str | None:
         from .tool_router import AgentTrace, react_loop
         trace = AgentTrace()
         self.last_agent_trace = trace
         try:
-            return react_loop(
+            result = react_loop(
                 message=message,
                 tool_executor=lambda tc: self._run_tool_call(tc, message),
                 model_call=self._react_model_call,
+                candidate_tools=candidate_tools,
                 trace=trace,
+                plan_confirmation_token=plan_confirmation_token,
             )
+            if isinstance(result, str):
+                return self._capture_agent_plan_confirmation(message, candidate_tools, result, trace)
+            return result
         except Exception as exc:
             logger.debug("ReAct 循环失败: %s", exc)
             self.last_agent_trace = trace
@@ -2055,13 +3490,13 @@ class ChatAgent:
         result = self._try_router_legacy_result(message)
         return self._tool_result_display_text(result)
 
-    def _try_router_legacy_result(self, message: str) -> ToolResult | None:
+    def _try_router_legacy_result(self, message: str, candidate_tools: set[str] | None = None) -> ToolResult | None:
         caller = self.router_call or self.model_call
         try:
-            candidate_tools = select_candidate_tools(message)
-            router_prompt = build_router_prompt(message, candidate_tools=candidate_tools)
+            selected_tools = candidate_tools or select_candidate_tools(message)
+            router_prompt = build_router_prompt(message, candidate_tools=selected_tools)
             raw = caller(router_prompt).strip()
-            tool_call = parse_tool_call(raw, valid_names=candidate_tools)
+            tool_call = parse_tool_call(raw, valid_names=selected_tools)
             if not tool_call:
                 return None
             result = self._run_tool_call(tool_call, message)
@@ -2186,6 +3621,7 @@ class ChatAgent:
         for prefix in ("/relic value", "/relic 估值", "/relic 价值"):
             if relic_name.lower().startswith(prefix):
                 relic_name = relic_name[len(prefix):].strip()
+        target_part = (args.get("target_part") or "").strip()
         if not relic_name:
             return ToolResult(ok=False, error="缺少遗物名称")
         db = get_relic_db()
@@ -2195,7 +3631,7 @@ class ChatAgent:
             return ToolResult(ok=False, error=f"未找到与 '{relic_name}' 相关的遗物。")
         game_data = GameDataStore()
         report = analyze_relic_value(info, self.order_fetcher, game_data)
-        display = format_relic_value_for_display(report)
+        display = format_relic_value_for_display(report, target_part=target_part or None)
         model_context = format_relic_value_for_model(report)
         return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
 
@@ -2255,12 +3691,14 @@ class ChatAgent:
         from .scout import scout_mod_candidates
         min_profit = int(args.get("min_profit", 5))
         limit = int(args.get("limit", 20))
+        personal_profile = self._build_personal_profile()
         results = scan_all_mod_flips(
             self.warframe_items or [],
             self.order_fetcher,
             min_profit=min_profit,
             limit=limit,
             scout_fn=scout_mod_candidates,
+            personal_profile=personal_profile,
         )
         model_context = format_mod_flip_results_for_model(results, min_profit=min_profit, limit=limit)
         if not results:
@@ -2288,12 +3726,14 @@ class ChatAgent:
         from .scout import scout_set_candidates
         min_profit = int(args.get("min_profit", 5))
         limit = int(args.get("limit", 20))
+        personal_profile = self._build_personal_profile()
         results = scan_all_set_profits(
             self.warframe_items or [],
             self.order_fetcher,
             min_profit=min_profit,
             limit=limit,
             scout_fn=scout_set_candidates,
+            personal_profile=personal_profile,
         )
         model_context = format_set_profit_results_for_model(results, min_profit=min_profit, limit=limit)
         if not results:
@@ -2315,11 +3755,19 @@ class ChatAgent:
         return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
 
     def _tool_investment_advisor(self, args: dict) -> ToolResult:
-        from .investment import format_prime_investment_results_for_model, scan_prime_investments
+        from .investment import format_prime_investment_results_for_model, resolve_investment_preference_defaults, scan_prime_investments
         from .scout import scout_investment_candidates
-        budget = int(args.get("budget", 1000))
-        min_roi = float(args.get("min_roi", 10))
+        requested_budget = int(args["budget"]) if args.get("budget") not in (None, "") else None
+        requested_min_roi = float(args["min_roi"]) if args.get("min_roi") not in (None, "") else None
+        budget, min_roi = resolve_investment_preference_defaults(
+            self.memory,
+            budget=requested_budget,
+            min_roi_pct=requested_min_roi,
+            fallback_budget=1000,
+            fallback_min_roi_pct=10.0,
+        )
         limit = int(args.get("limit", 15))
+        personal_profile = self._build_personal_profile()
         results = scan_prime_investments(
             self.warframe_items or [],
             self.order_fetcher,
@@ -2327,6 +3775,7 @@ class ChatAgent:
             min_roi_pct=min_roi,
             limit=limit,
             scout_fn=lambda groups: scout_investment_candidates(groups, budget=budget),
+            personal_profile=personal_profile,
         )
         model_context = format_prime_investment_results_for_model(results, budget=budget, min_roi_pct=min_roi, limit=limit)
         if not results:
@@ -2347,7 +3796,7 @@ class ChatAgent:
 
     def _tool_query_events(self, args: dict) -> ToolResult:
         event_type = args.get("type")
-        display, model_context = self._query_events_result(event_type=event_type)
+        display, model_context = self._query_events_result(event_type=event_type, source_query=args.get("__message"))
         return ToolResult(ok=True, content=display, display_content=display, model_context=model_context)
 
     def _tool_deep_analysis(self, args: dict) -> str | None:
@@ -2382,7 +3831,7 @@ class ChatAgent:
     def _tool_riven_search(self, args: dict) -> ToolResult:
         return self._handle_riven_search(args)
 
-    def _handle_limited_event_query(self) -> str:
+    def _handle_limited_event_query(self, source_query: str | None = None) -> str:
         from .events import EventTracker
         try:
             tracker = self.event_tracker or EventTracker()
@@ -2393,6 +3842,11 @@ class ChatAgent:
             logger.debug("限时活动查询失败: %s", exc)
             return "暂时无法获取限时活动信息。"
 
+        requested_labels = _limited_activity_labels_from_query(source_query)
+        if requested_labels:
+            events = _filter_limited_events_for_query(events, source_query)
+            if not events:
+                return f"当前没有检测到{'、'.join(requested_labels)}。"
         if not events:
             return "当前没有检测到热美亚裂缝、兽之腹等限时活动。"
         lines = ["当前限时活动:"]
@@ -2400,11 +3854,25 @@ class ChatAgent:
             lines.append(f"- {event.description}")
         return "\n".join(lines)
 
-    def _query_events_result(self, event_type: str | None = None) -> tuple[str, str]:
+    def _query_events_result(self, event_type: str | None = None, source_query: str | None = None) -> tuple[str, str]:
         from .events import EventTracker, format_events_for_display, format_events_for_model, is_supported_query_event_type
         normalized_type = _normalize_query_event_type_arg(event_type)
         if not is_supported_query_event_type(normalized_type):
             return format_events_for_display([], normalized_type), format_events_for_model([], normalized_type)
+        if normalized_type == "void_fissure":
+            try:
+                tracker = self.event_tracker or EventTracker()
+                if not self.event_tracker:
+                    tracker.load_cache()
+                fissures = tracker.get_active_fissures()
+            except Exception as exc:
+                logger.debug("虚空裂缝查询失败: %s", exc)
+                fissures = []
+            if fissures:
+                return (
+                    _format_void_fissures_for_chat(fissures, source_query),
+                    _format_void_fissures_for_model(fissures, source_query),
+                )
         try:
             tracker = self.event_tracker or EventTracker()
             if not self.event_tracker:
@@ -2417,7 +3885,7 @@ class ChatAgent:
         return format_events_for_display(events, normalized_type), format_events_for_model(events, normalized_type)
 
     def _handle_specific_event_query(self, message: str) -> str:
-        display, _ = self._query_events_result(event_type=_event_type_from_message(message) or message)
+        display, _ = self._query_events_result(event_type=_event_type_from_message(message) or message, source_query=message)
         return display
 
     def _try_deterministic_riven(self, message: str) -> ToolResult | None:
@@ -2829,9 +4297,14 @@ class ChatAgent:
         self._persist_memory()
 
     def _persist_memory(self) -> None:
-        self.memory.save(self.memory_path)
+        try:
+            self.memory.save(self.memory_path)
+        except OSError as exc:
+            logger.debug("记忆持久化失败，继续回答: %s", exc)
 
     def _reload_memory(self) -> None:
+        if not Path(self.memory_path).exists():
+            return
         disk = AgentMemory.load(self.memory_path)
         self.memory = replace(
             disk,
@@ -3432,7 +4905,22 @@ _EVENT_KEYWORDS = {
     "重生", "返厂", "prime重生", "prime 重生", "resurgence", "prime resurgence", "prime vault",
     "午夜电波", "电波", "nightwave", "仲裁", "arbitration", "突击", "sortie",
     "darvo", "每日特惠", "每日优惠", "扎里曼", "zariman", "赏金", "bounty",
+    "热美亚", "thermia", "兽之腹", "jade shadows", "jadeshadows",
+    "尸鬼", "ghoul", "利刃豺狼", "razorback", "巨人战舰", "fomorian",
 }
+
+_LIMITED_ACTIVITY_KEYWORDS = (
+    "热美亚", "thermia", "兽之腹", "jade shadows", "jadeshadows",
+    "尸鬼", "ghoul", "利刃豺狼", "razorback", "巨人战舰", "fomorian",
+)
+
+_LIMITED_ACTIVITY_FILTERS = (
+    ("热美亚裂缝", ("热美亚", "thermia")),
+    ("兽之腹", ("兽之腹", "jade shadows", "jadeshadows")),
+    ("尸鬼净化", ("尸鬼", "ghoul")),
+    ("利刃豺狼舰队", ("利刃豺狼", "razorback")),
+    ("巨人战舰", ("巨人战舰", "fomorian")),
+)
 
 
 def _is_prime_resurgence_query(message: str) -> bool:
@@ -3461,14 +4949,188 @@ def _is_event_query(message: str) -> bool:
     return any(kw in lower for kw in _EVENT_KEYWORDS)
 
 
+def _is_limited_activity_query(message: str) -> bool:
+    lower = message.lower()
+    compact = re.sub(r"\s+", "", lower)
+    return any(kw in lower or re.sub(r"\s+", "", kw) in compact for kw in _LIMITED_ACTIVITY_KEYWORDS)
+
+
+def _limited_activity_labels_from_query(message: str | None) -> list[str]:
+    return [
+        label
+        for label, aliases in _LIMITED_ACTIVITY_FILTERS
+        if _query_contains_any(message, aliases)
+    ]
+
+
+def _filter_limited_events_for_query(events: Iterable, query: str | None = None) -> list:
+    labels = _limited_activity_labels_from_query(query)
+    selected = list(events)
+    if not labels:
+        return selected
+    return [
+        event
+        for event in selected
+        if any(label in getattr(event, "description", "") for label in labels)
+    ]
+
+
+def _is_relic_value_intent(message: str) -> bool:
+    lower = message.lower()
+    has_relic = any(kw in lower for kw in (
+        "遗物", "核桃", "relic", "lith", "meso", "neo", "axi", "requiem",
+        "古纪", "前纪", "中纪", "后纪", "遗珍",
+    ))
+    has_value = any(kw in lower for kw in (
+        "收益", "价值", "估值", "期望", "值不值得", "值得开", "效率",
+        "杜卡德", "杜卡", "ducat",
+    ))
+    return has_relic and has_value
+
+
+def _is_relic_farming_intent(message: str) -> bool:
+    lower = message.lower()
+    has_relic = any(kw in lower for kw in (
+        "遗物", "核桃", "relic", "lith", "meso", "neo", "axi", "requiem",
+        "古纪", "前纪", "中纪", "后纪", "遗珍",
+    ))
+    has_route = any(kw in lower for kw in (
+        "去哪刷", "哪里刷", "怎么刷", "刷取", "掉落", "来源",
+        "哪个裂缝", "适合开", "开这个核桃", "开这个遗物",
+    ))
+    return has_relic and has_route
+
+
 def _is_specific_event_list_query(message: str) -> bool:
     from .events import unsupported_event_type_label
+    if _is_limited_activity_query(message):
+        return False
     return _event_type_from_message(message) is not None or bool(unsupported_event_type_label(message)) or any(kw in message.lower() for kw in ("警报", "alert"))
 
 
 def _event_type_from_message(message: str) -> str | None:
     from .events import normalize_query_event_type
+    if _is_limited_activity_query(message):
+        return None
+    if _is_void_fissure_detail_query(message):
+        return "void_fissure"
     return normalize_query_event_type(message)
+
+
+_VOID_FISSURE_TIER_FILTERS = (
+    ("VoidT1", ("古纪", "lith", "voidt1", "t1")),
+    ("VoidT2", ("前纪", "meso", "voidt2", "t2")),
+    ("VoidT3", ("中纪", "neo", "voidt3", "t3")),
+    ("VoidT4", ("后纪", "axi", "voidt4", "t4")),
+    ("VoidT5", ("遗珍", "requiem", "voidt5", "t5")),
+    ("VoidT6", ("仲裁", "arbitration", "voidt6", "t6")),
+)
+_VOID_FISSURE_MISSION_FILTERS = (
+    ("MT_EXTERMINATION", ("歼灭", "exterminate", "extermination", "mt_extermination")),
+    ("MT_CAPTURE", ("捕获", "capture", "mt_capture")),
+    ("MT_DEFENSE", ("防御", "defense", "mt_defense")),
+    ("MT_SURVIVAL", ("生存", "survival", "mt_survival")),
+    ("MT_RESCUE", ("救援", "rescue", "mt_rescue")),
+    ("MT_SABOTAGE", ("破坏", "sabotage", "mt_sabotage")),
+    ("MT_MOBILE_DEFENSE", ("移动防御", "mobile defense", "mobiledefense", "mt_mobile_defense")),
+    ("MT_INTEL", ("间谍", "spy", "intel", "mt_intel", "mt_spy")),
+    ("MT_SPY", ("间谍", "spy", "mt_spy")),
+    ("MT_TERRITORY", ("拦截", "interception", "territory", "mt_territory")),
+    ("MT_ARTIFACT", ("挖掘", "excavation", "artifact", "mt_artifact")),
+    ("MT_ALCHEMY", ("炼金", "alchemy", "mt_alchemy")),
+    ("MT_DISRUPTION", ("中断", "disruption", "mt_disruption")),
+    ("MT_ASSASSINATION", ("刺杀", "assassination", "mt_assassination")),
+)
+
+
+def _is_void_fissure_detail_query(message: str) -> bool:
+    has_mission = any(_query_contains_any(message, aliases) for _, aliases in _VOID_FISSURE_MISSION_FILTERS)
+    has_tier = any(_query_contains_any(message, aliases) for _, aliases in _VOID_FISSURE_TIER_FILTERS)
+    has_mode = _query_contains_any(message, ("钢铁", "钢铁之路", "steel", "steel path", "steelpath", "普通", "normal"))
+    has_fissure = _query_contains_any(message, ("裂缝", "裂隙", "fissure", "虚空裂缝", "虚空裂隙"))
+    return has_mission and (has_mode or has_tier or has_fissure)
+
+
+def _query_contains_any(query: str | None, aliases: Iterable[str]) -> bool:
+    lowered = str(query or "").lower()
+    compact = re.sub(r"\s+", "", lowered)
+    for alias in aliases:
+        alias_lower = alias.lower()
+        alias_compact = re.sub(r"\s+", "", alias_lower)
+        if alias_lower in lowered or alias_compact in compact:
+            return True
+    return False
+
+
+def _filter_void_fissures_for_query(fissures: Iterable, query: str | None = None) -> list:
+    selected = list(fissures)
+    tier_filters = {
+        tier
+        for tier, aliases in _VOID_FISSURE_TIER_FILTERS
+        if _query_contains_any(query, aliases)
+    }
+    mission_filters = {
+        mission
+        for mission, aliases in _VOID_FISSURE_MISSION_FILTERS
+        if _query_contains_any(query, aliases)
+    }
+    mode_filter: bool | None = None
+    if _query_contains_any(query, ("钢铁", "钢铁之路", "steel", "steel path", "steelpath")):
+        mode_filter = True
+    elif _query_contains_any(query, ("普通", "normal")):
+        mode_filter = False
+
+    if tier_filters:
+        selected = [fissure for fissure in selected if getattr(fissure, "tier", "") in tier_filters]
+    if mission_filters:
+        selected = [fissure for fissure in selected if getattr(fissure, "mission_type", "") in mission_filters]
+    if mode_filter is not None:
+        selected = [fissure for fissure in selected if bool(getattr(fissure, "hard", False)) is mode_filter]
+    return selected
+
+
+def _format_void_fissures_for_chat(fissures: Iterable, query: str | None = None, limit: int = 20) -> str:
+    from .events import _format_worldstate_time
+
+    selected = _filter_void_fissures_for_query(fissures, query)[:limit]
+    lines = ["当前虚空裂缝/裂隙:"]
+    if not selected:
+        lines.append("暂无匹配裂缝。")
+        return "\n".join(lines)
+    for fissure in selected:
+        mode = "钢铁" if getattr(fissure, "hard", False) else "普通"
+        line = (
+            f"- {getattr(fissure, 'tier_display', '')} "
+            f"{getattr(fissure, 'mission_display', '')} "
+            f"{mode} @ {getattr(fissure, 'node_display', '')}"
+        )
+        expiry = getattr(fissure, "expiry", "")
+        if expiry:
+            line += f" | 结束: {_format_worldstate_time(expiry)}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _format_void_fissures_for_model(fissures: Iterable, query: str | None = None, limit: int = 20) -> str:
+    selected = _filter_void_fissures_for_query(fissures, query)[:limit]
+    parts = [
+        "tool=query_events",
+        "type=void_fissure",
+        f"count={len(selected)}",
+    ]
+    for fissure in selected:
+        mode = "steel" if getattr(fissure, "hard", False) else "normal"
+        node = wrap_untrusted_model_text("worldstate", str(getattr(fissure, "node_display", "")), max_chars=80, max_lines=1)
+        parts.append(
+            " | ".join([
+                f"tier={getattr(fissure, 'tier_display', '')}",
+                f"mission={getattr(fissure, 'mission_display', '')}",
+                f"mode={mode}",
+                f"node={node}",
+                f"expiry={getattr(fissure, 'expiry', '')}",
+            ])
+        )
+    return "\n".join(parts)
 
 
 def _normalize_query_event_type_arg(event_type: object) -> str | None:
@@ -3492,6 +5154,63 @@ def _is_trading_tool_query(message: str) -> bool:
     """判断消息是否为交易工具查询（应直接走路由器，跳过物品匹配）。"""
     lower = message.lower()
     return any(kw in lower for kw in _TRADING_TOOL_KEYWORDS)
+
+
+def _classify_chat_mode(message: str) -> ChatModeDecision:
+    if _message_has_direct_market_intent(message):
+        return ChatModeDecision("trade_execution", "direct_market")
+    if _message_has_planning_intent(message):
+        return ChatModeDecision("planning", "planning_keywords")
+    if _is_event_query(message):
+        return ChatModeDecision("event", "event_keywords")
+    if _is_trading_tool_query(message):
+        return ChatModeDecision("trading_tool", "trading_tool_keywords")
+    if _message_has_market_analysis_intent(message):
+        return ChatModeDecision("market_analysis", "market_keywords")
+    if _message_has_guide_video_intent(message):
+        return ChatModeDecision("guide_video", "guide_keywords")
+    return ChatModeDecision("general", "fallback")
+
+
+def _message_has_direct_market_intent(message: str) -> bool:
+    lowered = message.lower()
+    direct_terms = (
+        "市场链接", "链接", "url", "warframe.market", "market",
+        "最便宜卖家", "最低卖家", "最低价卖家", "便宜卖家",
+        "砍价", "讲价", "还价", "压价",
+    )
+    return any(term in lowered or term in message for term in direct_terms)
+
+
+def _message_has_planning_intent(message: str) -> bool:
+    lowered = message.lower()
+    normalized = normalize_lookup_key(message)
+    planning_terms = ("计划", "规划", "目标", "步骤", "安排", "路线图", "roadmap", "plan")
+    horizon_terms = ("一周", "本周", "今天开始", "长期", "短期", "每天", "阶段")
+    profit_goal_terms = ("赚", "盈利", "利润目标", "目标利润", "500p", "1000p")
+    has_plan = any(term in lowered or normalize_lookup_key(term) in normalized for term in planning_terms)
+    has_horizon_goal = any(term in lowered or term in message for term in horizon_terms) and any(
+        term in lowered or term in message for term in profit_goal_terms
+    )
+    return has_plan or has_horizon_goal
+
+
+def _message_has_market_analysis_intent(message: str) -> bool:
+    lowered = message.lower()
+    normalized = normalize_lookup_key(message)
+    market_terms = (
+        "多少钱", "价格", "买价", "卖价", "白金", "价差", "会涨", "会跌",
+        "涨吗", "跌吗", "趋势", "走势", "行情", "能不能买", "能不能卖",
+        "我要买", "我要卖", "我想买", "我想卖", "最高收", "最低卖",
+        "最高收价", "最低卖价", "有人收吗", "卖给谁",
+    )
+    return any(term in lowered or normalize_lookup_key(term) in normalized for term in market_terms)
+
+
+def _message_has_guide_video_intent(message: str) -> bool:
+    lowered = message.lower()
+    guide_terms = ("配卡", "攻略", "视频", "教程", "b站", "bilibili", "build")
+    return any(term in lowered or term in message for term in guide_terms)
 
 
 def _self_check(answer: str, contexts: list[ItemContext]) -> str | None:

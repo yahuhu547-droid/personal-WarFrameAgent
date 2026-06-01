@@ -122,7 +122,7 @@ def analyze_relic_value(
     )
 
 
-def format_relic_value_for_display(report: RelicValueReport) -> str:
+def format_relic_value_for_display(report: RelicValueReport, target_part: str | None = None) -> str:
     tier_cn = TIER_MAP.get(report.tier, report.tier)
     vaulted = " (已Vault)" if report.is_vaulted else ""
     lines = [
@@ -133,6 +133,20 @@ def format_relic_value_for_display(report: RelicValueReport) -> str:
         "",
         "奖励价值:",
     ]
+    normalized_target = (target_part or "").strip().lower()
+    if normalized_target:
+        matched = [
+            reward for reward in report.reward_values
+            if normalized_target in reward.part_name.lower() or normalized_target in reward.market_id.lower()
+        ]
+        if matched:
+            reward = matched[0]
+            value = f"{reward.valuation_price}p" if reward.valuation_price is not None else "未知"
+            lines.insert(5, f"目标部件: {reward.part_name}，掉率 {reward.drop_rate * 100:.2f}%，估值 {value}")
+            lines.insert(6, "")
+        else:
+            lines.insert(5, f"目标部件: 未找到目标部件 {target_part}")
+            lines.insert(6, "")
     for reward in report.reward_values:
         price = f"估值 {reward.valuation_price}p" if reward.valuation_price is not None else "估值未知"
         ducat = f"杜卡德 {reward.ducat_value}" if reward.ducat_value is not None else "杜卡德未知"

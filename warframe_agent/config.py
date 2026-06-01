@@ -93,6 +93,9 @@ SCOUT_MODELS = {
     "mod_flipper": os.getenv("SCOUT_MOD_MODEL", "kimi-k2.6"),
     "set_profit":  os.getenv("SCOUT_SET_MODEL", "glm-5.1"),
     "investment":  os.getenv("SCOUT_INV_MODEL", "gpt-5.5"),
+    "bilibili_title_review": os.getenv("BILIBILI_TITLE_REVIEW_MODEL", os.getenv("BILIBILI_REVIEW_MODEL", CLOUD_MODEL)),
+    "bilibili_category_review": os.getenv("BILIBILI_CATEGORY_REVIEW_MODEL", os.getenv("BILIBILI_REVIEW_MODEL", CLOUD_MODEL)),
+    "bilibili_alias_review": os.getenv("BILIBILI_ALIAS_REVIEW_MODEL", os.getenv("BILIBILI_REVIEW_MODEL", CLOUD_MODEL)),
 }
 SCOUT_CACHE_TTL = 600  # 预筛选结果缓存 10 分钟
 SCOUT_MAX_CANDIDATES = {

@@ -5,13 +5,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from warframe_agent.chat import ChatAgent, build_chat_messages, build_item_context, is_chat_exit, _self_check
+from warframe_agent.chat import ChatAgent, build_chat_messages, build_item_context, is_chat_exit, _classify_chat_mode, _self_check
 from warframe_agent.dictionary import ResolveResult
 from warframe_agent.events import EventTracker, GameEvent, PrimeResurgenceRotation, PrimeResurgenceItem, WorldCycle
 from warframe_agent.memory import AgentMemory
 from warframe_agent.opportunity_lookup import OpportunityLookupStore
 from warframe_agent.push import PushConfig
 from warframe_agent.relics import RelicDrop, RelicInfo
+from warframe_agent.tool_registry import ToolResult
 from warframe_agent.trading_memory import TradingMemoryDB
 
 
@@ -125,6 +126,156 @@ class ChatTests(unittest.TestCase):
         self.assertTrue(is_chat_exit("quit"))
         self.assertTrue(is_chat_exit("退出"))
         self.assertFalse(is_chat_exit("充沛现在能买吗"))
+
+    def test_chat_mode_classifier_prioritizes_market_over_video_words(self):
+        self.assertEqual(_classify_chat_mode("充沛多少钱，顺便给攻略视频").mode, "market_analysis")
+        self.assertEqual(_classify_chat_mode("给我 充沛 的市场链接 攻略视频").mode, "trade_execution")
+        self.assertEqual(_classify_chat_mode("推荐几个近战配卡视频").mode, "guide_video")
+        self.assertEqual(_classify_chat_mode("有什么 mod 可以翻转赚钱").mode, "trading_tool")
+        self.assertEqual(_classify_chat_mode("现在有什么活动").mode, "event")
+        self.assertEqual(_classify_chat_mode("帮我制定一周倒卖充沛赚500p的计划，不要直接买").mode, "planning")
+        self.assertEqual(_classify_chat_mode("给我 充沛 的市场链接，顺便做个计划").mode, "trade_execution")
+        self.assertEqual(_classify_chat_mode("帮我做一个充沛赚500p目标计划，顺便找攻略视频").mode, "planning")
+
+    def test_agent_plan_confirmation_prompt_does_not_show_token_or_execute(self):
+        order_calls = []
+
+        def router(prompt):
+            return (
+                '{"tool": "plan", "args": {"goal": "compare", "steps": ['
+                '{"tool": "query_price", "args": {"item_name": "arcane_energize"}}'
+                ']}}'
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: order_calls.append(item_id) or SAMPLE_ORDERS,
+                model_call=lambda prompt: "unused",
+                router_call=router,
+                rag_search=lambda msg: [],
+                memory_path=Path(tmp) / "memory.json",
+            )
+
+            reply = agent.answer("对比两个市场信号")
+
+        self.assertIn("确认执行", reply)
+        self.assertIn("取消执行", reply)
+        self.assertNotIn("plan_confirm_", reply)
+        self.assertEqual(order_calls, [])
+
+    def test_agent_plan_confirmation_executes_after_user_confirms(self):
+        order_calls = []
+        plan_response = (
+            '{"tool": "plan", "args": {"goal": "compare", "steps": ['
+            '{"tool": "query_price", "args": {"item_name": "arcane_energize"}}'
+            ']}}'
+        )
+        responses = iter([plan_response, plan_response, "confirmed final answer"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: order_calls.append(item_id) or SAMPLE_ORDERS,
+                model_call=lambda prompt: "unused",
+                router_call=lambda prompt: next(responses),
+                rag_search=lambda msg: [],
+                memory_path=Path(tmp) / "memory.json",
+            )
+
+            prompt = agent.answer("对比两个市场信号")
+            reply = agent.answer("确认执行")
+
+        self.assertIn("确认执行", prompt)
+        self.assertEqual(reply, "confirmed final answer")
+        self.assertEqual(order_calls, ["arcane_energize"])
+
+    def test_agent_plan_confirmation_cancel_clears_pending_plan(self):
+        order_calls = []
+        plan_response = (
+            '{"tool": "plan", "args": {"goal": "compare", "steps": ['
+            '{"tool": "query_price", "args": {"item_name": "arcane_energize"}}'
+            ']}}'
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: order_calls.append(item_id) or SAMPLE_ORDERS,
+                model_call=lambda prompt: "unused",
+                router_call=lambda prompt: plan_response,
+                rag_search=lambda msg: [],
+                memory_path=Path(tmp) / "memory.json",
+            )
+
+            prompt = agent.answer("对比两个市场信号")
+            cancel = agent.answer("取消执行")
+            confirm = agent.answer("确认执行")
+
+        self.assertIn("确认执行", prompt)
+        self.assertIn("已取消", cancel)
+        self.assertIn("没有待确认", confirm)
+        self.assertEqual(order_calls, [])
+
+    def test_agent_plan_confirmation_does_not_capture_side_effect_plan(self):
+        order_calls = []
+
+        def router(prompt):
+            return (
+                '{"tool": "plan", "args": {"goal": "set alert", "steps": ['
+                '{"tool": "set_alert", "args": {"item_name": "arcane_energize", "threshold": 50}, "purpose": "write alert"}'
+                ']}}'
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: order_calls.append(item_id) or SAMPLE_ORDERS,
+                model_call=lambda prompt: "unused",
+                router_call=router,
+                rag_search=lambda msg: [],
+                memory_path=Path(tmp) / "memory.json",
+            )
+
+            blocked = agent.answer("对比两个市场信号")
+            confirm = agent.answer("确认执行")
+
+        self.assertIn("side_effect_tool", blocked)
+        self.assertNotIn("确认执行", blocked)
+        self.assertIn("没有待确认", confirm)
+        self.assertEqual(order_calls, [])
+
+    def test_agent_plan_confirmation_stream_executes_after_user_confirms(self):
+        async def consume(agent, message):
+            chunks = []
+            async for chunk in agent.answer_stream(message):
+                chunks.append(chunk)
+            return "".join(chunks)
+
+        order_calls = []
+        plan_response = (
+            '{"tool": "plan", "args": {"goal": "compare", "steps": ['
+            '{"tool": "query_price", "args": {"item_name": "arcane_energize"}}'
+            ']}}'
+        )
+        responses = iter([plan_response, plan_response, "confirmed final answer"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: order_calls.append(item_id) or SAMPLE_ORDERS,
+                model_call=lambda prompt: "unused",
+                router_call=lambda prompt: next(responses),
+                rag_search=lambda msg: [],
+                memory_path=Path(tmp) / "memory.json",
+            )
+
+            prompt = agent.answer("对比两个市场信号")
+            reply = asyncio.run(consume(agent, "确认执行"))
+
+        self.assertIn("确认执行", prompt)
+        self.assertEqual(reply, "confirmed final answer")
+        self.assertEqual(order_calls, ["arcane_energize"])
 
     def test_item_context_includes_veteran_market_details(self):
         context = build_item_context("arcane_energize", SAMPLE_ORDERS)
@@ -274,12 +425,17 @@ class ChatTests(unittest.TestCase):
                 memory_path=Path(tmp) / "agent_memory.json",
             )
             answer = agent.answer("/relic value Lith B1")
-            result = agent.tool_registry.execute("relic_value", {"relic_name": "Lith B1"})
+            result = agent.tool_registry.execute(
+                "relic_value",
+                {"relic_name": "Lith B1", "target_part": "Braton Prime Blueprint"},
+            )
 
         self.assertIn("Lith B1", answer)
         self.assertIn("期望白金", answer)
         self.assertIn("期望杜卡德", answer)
         self.assertTrue(result.ok)
+        self.assertIn("目标部件", result.display_content)
+        self.assertIn("Braton Prime Blueprint", result.display_content)
         self.assertIn("tool=relic_value", result.model_context)
         self.assertNotIn("RAW_ORDER_SENTINEL", result.model_context)
         self.assertNotIn("/w", result.model_context)
@@ -328,6 +484,57 @@ class ChatTests(unittest.TestCase):
         self.assertIn("tool=farming_route", result.model_context)
         self.assertNotIn("Buyer_RAW_ROUTE", result.model_context)
         self.assertNotIn("/w", result.model_context)
+
+    def test_relic_value_question_uses_router_before_limited_event_fallback(self):
+        calls = []
+
+        def router(prompt):
+            calls.append(prompt)
+            return '{"tool":"relic_value","args":{"relic_name":"Lith B1"}}'
+
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = ChatAgent(
+                router_call=router,
+                model_call=router,
+                rag_search=lambda message: [],
+                memory_path=Path(tmp) / "agent_memory.json",
+            )
+            agent._try_react_loop = lambda message, candidate_tools=None: None
+            agent.tool_registry.with_handler(
+                "relic_value",
+                lambda args: ToolResult(
+                    ok=True,
+                    content="Lith B1 期望白金 3.2p",
+                    display_content="Lith B1 期望白金 3.2p",
+                ),
+            )
+            answer = agent.answer("这个遗物收益怎么样")
+
+        self.assertIn("期望白金", answer)
+        self.assertTrue(calls)
+        self.assertNotIn("当前限时活动", answer)
+
+    def test_relic_value_question_rejects_event_tool_from_router(self):
+        def router(prompt):
+            return '{"tool":"query_events","args":{"type":"void_fissure"}}'
+
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = ChatAgent(
+                router_call=router,
+                model_call=router,
+                rag_search=lambda message: [],
+                memory_path=Path(tmp) / "agent_memory.json",
+            )
+            agent._try_react_loop = lambda message, candidate_tools=None: None
+            agent.tool_registry.with_handler(
+                "query_events",
+                lambda args: ToolResult(ok=True, content="EVENT_SENTINEL", display_content="EVENT_SENTINEL"),
+            )
+            answer = agent.answer("这个遗物收益怎么样")
+
+        self.assertIn("暂时无法计算这个遗物的收益", answer)
+        self.assertNotIn("EVENT_SENTINEL", answer)
+        self.assertNotIn("当前虚空裂缝", answer)
 
     def test_market_link_intent_returns_warframe_market_url(self):
         agent = ChatAgent(
@@ -398,6 +605,52 @@ class ChatTests(unittest.TestCase):
         self.assertIn("https://warframe.market/items/arcane_energize", answer)
         self.assertEqual(fetched, [])
 
+    def test_direct_market_intent_takes_precedence_over_bilibili_video_words_when_market_requested(self):
+        fetched = []
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_path = Path(tmp) / "bilibili_recommendations.json"
+            rec_path.write_text("[]", encoding="utf-8")
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: fetched.append(item_id) or SAMPLE_ORDERS,
+                model_call=lambda prompt: "unused",
+                memory_path=Path(tmp) / "agent_memory.json",
+                warframe_items=PRIME_ITEMS,
+            )
+            agent.bilibili_recommendations_path = rec_path
+            answer = agent.answer("给我 充沛 的市场链接 攻略视频")
+
+        self.assertIn("https://warframe.market/items/arcane_energize", answer)
+        self.assertNotIn("暂未收录", answer)
+        self.assertEqual(fetched, [])
+
+    def test_price_mode_wins_over_explicit_bilibili_video_words(self):
+        fetched = []
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_path = Path(tmp) / "bilibili_recommendations.json"
+            rec_path.write_text(json.dumps([{
+                "id": "energize-guide",
+                "title": "充沛赋能攻略视频",
+                "url": "https://www.bilibili.com/video/BVENERGIZE/",
+                "aliases": ["充沛攻略", "充沛赋能攻略"],
+                "topics": ["攻略"],
+            }], ensure_ascii=False), encoding="utf-8")
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: fetched.append(item_id) or SAMPLE_ORDERS,
+                model_call=lambda prompt: "unused",
+                memory_path=Path(tmp) / "agent_memory.json",
+            )
+            agent.bilibili_recommendations_path = rec_path
+
+            answer = agent.answer("充沛多少钱，顺便给攻略视频")
+
+        self.assertIn("最低卖价", answer)
+        self.assertIn("5p", answer)
+        self.assertNotIn("参考视频", answer)
+        self.assertNotIn("BVENERGIZE", answer)
+        self.assertEqual(fetched, ["arcane_energize"])
+
     def test_generic_cheapest_seller_intent_returns_whisper_and_link(self):
         agent = ChatAgent(
             resolver=FakeResolver(),
@@ -412,6 +665,47 @@ class ChatTests(unittest.TestCase):
         self.assertIn("5p", answer)
         self.assertIn('/w Seller Hi! I want to buy: "Arcane Energize" for 5 platinum. (warframe.market)', answer)
         self.assertIn("https://warframe.market/items/arcane_energize", answer)
+
+    def test_generic_cheapest_seller_intent_wins_when_link_is_also_requested(self):
+        fetched = []
+        agent = ChatAgent(
+            resolver=FakeResolver(),
+            order_fetcher=lambda item_id: fetched.append(item_id) or SAMPLE_ORDERS,
+            model_call=lambda prompt: "unused",
+            warframe_items=PRIME_ITEMS,
+        )
+
+        answer = agent.answer("充沛 最便宜卖家和市场链接")
+
+        self.assertIn("最低卖家: Seller", answer)
+        self.assertIn("5p", answer)
+        self.assertIn('/w Seller Hi! I want to buy: "Arcane Energize" for 5 platinum. (warframe.market)', answer)
+        self.assertIn("https://warframe.market/items/arcane_energize", answer)
+        self.assertEqual(fetched, ["arcane_energize"])
+
+    def test_direct_market_answer_conversation_log_uses_safe_summary(self):
+        import warframe_agent.conversation_log as conversation_log
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old_log_path = conversation_log.LOG_PATH
+            conversation_log.LOG_PATH = Path(tmp) / "conversation_logs.jsonl"
+            try:
+                agent = ChatAgent(
+                    resolver=FakeResolver(),
+                    order_fetcher=lambda item_id: SAMPLE_ORDERS if item_id == "arcane_energize" else [],
+                    model_call=lambda prompt: "unused",
+                    memory_path=Path(tmp) / "agent_memory.json",
+                    warframe_items=PRIME_ITEMS,
+                )
+                answer = agent.answer("充沛 最便宜卖家 token=secret-token")
+                raw = conversation_log.LOG_PATH.read_text(encoding="utf-8")
+            finally:
+                conversation_log.LOG_PATH = old_log_path
+
+        self.assertIn("最低卖家: Seller", answer)
+        self.assertIn("/w Seller", answer)
+        for forbidden in ["Seller", "/w", "secret-token", "warframe.market/items", "token="]:
+            self.assertNotIn(forbidden, raw)
 
     def test_generic_bargain_intent_returns_negotiation_script_and_fallback(self):
         agent = ChatAgent(
@@ -429,6 +723,135 @@ class ChatTests(unittest.TestCase):
         self.assertIn("Arcane Energize", answer)
         self.assertIn('/w Seller Hi! I want to buy: "Arcane Energize" for 5 platinum. (warframe.market)', answer)
         self.assertIn("https://warframe.market/items/arcane_energize", answer)
+
+    def test_answer_stream_generic_market_link_intent_returns_url_without_fetching_orders(self):
+        async def consume(agent):
+            chunks = []
+            async for chunk in agent.answer_stream("给我 充沛 的市场链接"):
+                chunks.append(chunk)
+            return "".join(chunks)
+
+        fetched = []
+        agent = ChatAgent(
+            resolver=FakeResolver(),
+            order_fetcher=lambda item_id: fetched.append(item_id) or SAMPLE_ORDERS,
+            model_call=lambda prompt: "unused",
+            warframe_items=PRIME_ITEMS,
+        )
+
+        answer = asyncio.run(consume(agent))
+
+        self.assertIn("https://warframe.market/items/arcane_energize", answer)
+        self.assertEqual(fetched, [])
+
+    def test_answer_stream_generic_cheapest_seller_intent_returns_whisper_and_link(self):
+        async def consume(agent):
+            chunks = []
+            async for chunk in agent.answer_stream("充沛 最便宜卖家"):
+                chunks.append(chunk)
+            return "".join(chunks)
+
+        agent = ChatAgent(
+            resolver=FakeResolver(),
+            order_fetcher=lambda item_id: SAMPLE_ORDERS if item_id == "arcane_energize" else [],
+            model_call=lambda prompt: "unused",
+            warframe_items=PRIME_ITEMS,
+        )
+
+        answer = asyncio.run(consume(agent))
+
+        self.assertIn("最低卖家: Seller", answer)
+        self.assertIn("5p", answer)
+        self.assertIn('/w Seller Hi! I want to buy: "Arcane Energize" for 5 platinum. (warframe.market)', answer)
+        self.assertIn("https://warframe.market/items/arcane_energize", answer)
+
+    def test_answer_stream_price_mode_wins_over_explicit_bilibili_video_words(self):
+        async def consume(agent):
+            chunks = []
+            async for chunk in agent.answer_stream("充沛多少钱，顺便给攻略视频"):
+                chunks.append(chunk)
+            return "".join(chunks)
+
+        fetched = []
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_path = Path(tmp) / "bilibili_recommendations.json"
+            rec_path.write_text(json.dumps([{
+                "id": "energize-guide",
+                "title": "充沛赋能攻略视频",
+                "url": "https://www.bilibili.com/video/BVENERGIZE/",
+                "aliases": ["充沛攻略", "充沛赋能攻略"],
+                "topics": ["攻略"],
+            }], ensure_ascii=False), encoding="utf-8")
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: fetched.append(item_id) or SAMPLE_ORDERS,
+                model_call=lambda prompt: "unused",
+                memory_path=Path(tmp) / "agent_memory.json",
+            )
+            agent.bilibili_recommendations_path = rec_path
+
+            answer = asyncio.run(consume(agent))
+
+        self.assertIn("最低卖价", answer)
+        self.assertIn("5p", answer)
+        self.assertNotIn("参考视频", answer)
+        self.assertNotIn("BVENERGIZE", answer)
+        self.assertEqual(fetched, ["arcane_energize"])
+
+    def test_natural_language_planning_mode_does_not_execute_trade_or_bilibili(self):
+        fetched = []
+        model_prompts = []
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_path = Path(tmp) / "bilibili_recommendations.json"
+            rec_path.write_text(json.dumps([{
+                "id": "energize-guide",
+                "title": "充沛赋能攻略视频",
+                "url": "https://www.bilibili.com/video/BVENERGIZE/",
+                "aliases": ["充沛攻略", "充沛赋能攻略"],
+                "topics": ["攻略"],
+            }], ensure_ascii=False), encoding="utf-8")
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: fetched.append(item_id) or SAMPLE_ORDERS,
+                model_call=lambda prompt: model_prompts.append(prompt) or "unused",
+                router_call=lambda prompt: (_ for _ in ()).throw(AssertionError("router should not be called")),
+                memory_path=Path(tmp) / "agent_memory.json",
+            )
+            agent.bilibili_recommendations_path = rec_path
+
+            answer = agent.answer("帮我制定一周倒卖充沛赚500p的计划，不要直接买，顺便给攻略视频")
+
+        self.assertIn("计划草案", answer)
+        self.assertIn("/goal set", answer)
+        self.assertIn("不会直接下单", answer)
+        self.assertNotIn("/w Seller", answer)
+        self.assertNotIn("BVENERGIZE", answer)
+        self.assertEqual(fetched, [])
+        self.assertEqual(model_prompts, [])
+
+    def test_answer_stream_natural_language_planning_mode_matches_answer_priority(self):
+        async def consume(agent):
+            chunks = []
+            async for chunk in agent.answer_stream("帮我制定一周倒卖充沛赚500p的计划，不要直接买"):
+                chunks.append(chunk)
+            return "".join(chunks)
+
+        fetched = []
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: fetched.append(item_id) or SAMPLE_ORDERS,
+                model_call=lambda prompt: "unused",
+                router_call=lambda prompt: (_ for _ in ()).throw(AssertionError("router should not be called")),
+                memory_path=Path(tmp) / "agent_memory.json",
+            )
+
+            answer = asyncio.run(consume(agent))
+
+        self.assertIn("计划草案", answer)
+        self.assertIn("/goal set", answer)
+        self.assertNotIn("/w Seller", answer)
+        self.assertEqual(fetched, [])
 
     def test_answer_uses_safe_market_context_for_model_prompt(self):
         import tempfile
@@ -481,6 +904,59 @@ class ChatTests(unittest.TestCase):
         self.assertIn("https://www.bilibili.com/video/BV1pZr5YREtY/", answer)
         self.assertNotIn("没有找到匹配的物品", answer)
 
+    def test_answer_returns_deterministic_guide_gap_for_known_alias(self):
+        class GuideResolver(FakeResolver):
+            aliases = {"猴子": "wukong_prime_set"}
+            generated_aliases = {}
+
+            def resolve(self, name):
+                if name == "猴子":
+                    return ResolveResult("wukong_prime_set", "alias", name)
+                raise LookupError(name)
+
+        fetched = []
+        model_prompts = []
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_path = Path(tmp) / "bilibili_recommendations.json"
+            rec_path.write_text("[]", encoding="utf-8")
+            agent = ChatAgent(
+                resolver=GuideResolver(),
+                order_fetcher=lambda item_id: fetched.append(item_id) or SAMPLE_ORDERS,
+                model_call=lambda prompt: model_prompts.append(prompt) or "unused",
+                router_call=lambda prompt: (_ for _ in ()).throw(AssertionError("router should not be called")),
+                rag_search=lambda message: [],
+                memory_path=Path(tmp) / "agent_memory.json",
+            )
+            agent.bilibili_recommendations_path = rec_path
+            answer = agent.answer("猴子该怎么配卡")
+
+        self.assertIn("暂未收录", answer)
+        self.assertIn("猴子", answer)
+        self.assertIn("配卡/攻略 B 站视频", answer)
+        self.assertEqual(fetched, [])
+        self.assertEqual(model_prompts, [])
+
+    def test_explicit_bilibili_video_request_without_match_returns_empty_message(self):
+        fetched = []
+        model_prompts = []
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_path = Path(tmp) / "bilibili_recommendations.json"
+            rec_path.write_text("[]", encoding="utf-8")
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: fetched.append(item_id) or SAMPLE_ORDERS,
+                model_call=lambda prompt: model_prompts.append(prompt) or "unused",
+                router_call=lambda prompt: (_ for _ in ()).throw(AssertionError("router should not be called")),
+                rag_search=lambda message: [],
+                memory_path=Path(tmp) / "agent_memory.json",
+            )
+            agent.bilibili_recommendations_path = rec_path
+            answer = agent.answer("有没有完全不存在的攻略视频")
+
+        self.assertEqual(answer, "暂未收录相关 B 站视频。")
+        self.assertEqual(fetched, [])
+        self.assertEqual(model_prompts, [])
+
     def test_answer_returns_bilibili_recommendations_for_category_questions(self):
         with tempfile.TemporaryDirectory() as tmp:
             rec_path = Path(tmp) / "bilibili_recommendations.json"
@@ -519,6 +995,47 @@ class ChatTests(unittest.TestCase):
         self.assertNotIn("伯斯顿-步枪救星", answer)
         self.assertNotIn("没有找到匹配的物品", answer)
 
+    def test_answer_returns_bilibili_recommendations_for_warframe_questions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_path = Path(tmp) / "bilibili_recommendations.json"
+            rec_path.write_text(json.dumps([
+                {
+                    "id": "volt",
+                    "title": "伏特Volt最新配卡攻略",
+                    "url": "https://www.bilibili.com/video/BVVOLT2025/",
+                    "warframes": ["Volt"],
+                    "aliases": ["伏特配卡", "电男攻略", "Volt build"],
+                    "topics": ["配卡", "攻略"],
+                    "category": "warframe",
+                    "priority": 80,
+                },
+                {
+                    "id": "warframe-generic",
+                    "title": "战甲配卡合集",
+                    "url": "https://www.bilibili.com/video/BVWARFRAME/",
+                    "warframes": ["战甲"],
+                    "aliases": ["战甲配卡", "战甲攻略"],
+                    "topics": ["配卡", "攻略"],
+                    "category": "warframe",
+                    "priority": 40,
+                },
+            ], ensure_ascii=False), encoding="utf-8")
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: SAMPLE_ORDERS,
+                model_call=lambda prompt: "没有找到匹配的物品",
+                memory_path=Path(tmp) / "agent_memory.json",
+            )
+            agent.bilibili_recommendations_path = rec_path
+            specific_answer = agent.answer("电男攻略视频")
+            category_answer = agent.answer("推荐战甲攻略视频")
+
+        self.assertIn("伏特Volt最新配卡攻略", specific_answer)
+        self.assertIn("https://www.bilibili.com/video/BVVOLT2025/", specific_answer)
+        self.assertNotIn("战甲配卡合集", specific_answer)
+        self.assertIn("战甲配卡合集", category_answer)
+        self.assertIn("类型：战甲", category_answer)
+
     def test_answer_does_not_append_bilibili_recommendations_for_price_questions(self):
         with tempfile.TemporaryDirectory() as tmp:
             rec_path = Path(tmp) / "bilibili_recommendations.json"
@@ -536,6 +1053,28 @@ class ChatTests(unittest.TestCase):
             )
             agent.bilibili_recommendations_path = rec_path
             answer = agent.answer("充沛多少钱")
+
+        self.assertNotIn("参考视频", answer)
+
+    def test_answer_does_not_use_bilibili_for_generic_how_to_play_question(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_path = Path(tmp) / "bilibili_recommendations.json"
+            rec_path.write_text(json.dumps([{
+                "id": "torid",
+                "title": "托里德-射线荣光的继承者",
+                "url": "https://www.bilibili.com/video/BV1pZr5YREtY/",
+                "weapons": ["托里德"],
+                "aliases": ["托里德配卡"],
+                "topics": ["配卡"],
+            }], ensure_ascii=False), encoding="utf-8")
+            agent = ChatAgent(
+                resolver=FakeResolver(),
+                order_fetcher=lambda item_id: SAMPLE_ORDERS,
+                model_call=lambda prompt: "没有找到匹配的物品",
+                memory_path=Path(tmp) / "agent_memory.json",
+            )
+            agent.bilibili_recommendations_path = rec_path
+            answer = agent.answer("托里德怎么玩")
 
         self.assertNotIn("参考视频", answer)
 
@@ -579,6 +1118,25 @@ class ChatTests(unittest.TestCase):
 
         self.assertIn("充沛赋能 / Arcane Energize / arcane_energize", answer)
         self.assertIn("最低卖价: 5p", prompts[0])
+
+    def test_memory_persist_failure_does_not_abort_answer(self):
+        prompts = []
+
+        def model_call(prompt):
+            prompts.append(prompt)
+            return "充沛赋能 / Arcane Energize / arcane_energize：可以观望。"
+
+        agent = ChatAgent(
+            resolver=FakeResolver(),
+            order_fetcher=lambda item_id: SAMPLE_ORDERS,
+            model_call=model_call,
+        )
+
+        with patch.object(AgentMemory, "save", side_effect=PermissionError("readonly memory")):
+            answer = agent.answer("充沛现在能买吗")
+
+        self.assertIn("充沛赋能", answer)
+        self.assertTrue(prompts)
 
     def test_system_prompt_does_not_include_fake_seller_whisper_example(self):
         memory = AgentMemory.default()
@@ -1043,6 +1601,82 @@ def test_specific_fissure_query_still_returns_fissures():
     assert "当前虚空裂缝/裂隙" in answer
     assert "虚空裂缝" in answer
     assert "兽之腹" not in answer
+
+
+def test_void_fissure_query_filters_by_tier_and_mode():
+    tracker = EventTracker()
+    tracker._last_fetch = 9999999999.0
+    tracker._world_state = {
+        "Goals": [{"Tag": "JadeShadowsEvent", "Node": "SolNode723"}],
+        "ActiveMissions": [
+            {
+                "Modifier": "VoidT1",
+                "MissionType": "MT_CAPTURE",
+                "Node": "SolNode1",
+                "Expiry": "1777921200000",
+            },
+            {
+                "Modifier": "VoidT4",
+                "MissionType": "MT_SURVIVAL",
+                "Node": "SolNode742",
+                "Hard": True,
+                "Expiry": "1777924800000",
+            },
+        ],
+    }
+    tracker._events = tracker.parse_events(tracker._world_state)
+    agent = ChatAgent(event_tracker=tracker, model_call=lambda prompt: "unused")
+
+    lith = agent.answer("古纪裂缝有哪些")
+    steel_axi = agent.answer("钢铁后纪裂缝有哪些")
+
+    assert "当前虚空裂缝/裂隙" in lith
+    assert "古纪 (Lith)" in lith
+    assert "捕获" in lith
+    assert "地球 - E Prime" in lith
+    assert "后纪 (Axi)" not in lith
+    assert "钢铁" not in lith
+
+    assert "当前虚空裂缝/裂隙" in steel_axi
+    assert "后纪 (Axi)" in steel_axi
+    assert "生存" in steel_axi
+    assert "钢铁" in steel_axi
+    assert "虚空 - Mot" in steel_axi
+    assert "古纪 (Lith)" not in steel_axi
+
+
+def test_void_fissure_query_returns_structured_details_without_limited_events():
+    tracker = EventTracker()
+    tracker._last_fetch = 9999999999.0
+    tracker._world_state = {
+        "Goals": [
+            {"Tag": "JadeShadowsEvent", "Node": "SolNode723"},
+            {"Tag": "ThermiaFractures", "Node": "VenusHUB"},
+        ],
+        "ActiveMissions": [
+            {
+                "Modifier": "VoidT4",
+                "MissionType": "MT_SURVIVAL",
+                "Node": "SolNode742",
+                "Hard": True,
+                "Expiry": "1777924800000",
+            },
+        ],
+    }
+    tracker._events = tracker.parse_events(tracker._world_state)
+    agent = ChatAgent(event_tracker=tracker, model_call=lambda prompt: "unused")
+
+    answer = agent.answer("现在有什么虚空裂缝")
+
+    assert "当前虚空裂缝/裂隙" in answer
+    assert "后纪 (Axi)" in answer
+    assert "生存" in answer
+    assert "钢铁" in answer
+    assert "虚空 - Mot" in answer
+    assert "结束:" in answer
+    assert "当前限时活动" not in answer
+    assert "兽之腹" not in answer
+    assert "热美亚裂缝" not in answer
 
 
 def test_chinese_activity_aliases_use_direct_event_answers():

@@ -9,6 +9,7 @@
 ### 支持的交互类型
 
 - 直接问价：例如某个物品当前最低卖价、最高收价、成交统计。
+- 直接交易辅助：普通物品和 Prime 物品都可问“市场链接”“最低卖家”“帮我砍价”；如果同一句里混入“B站/视频/攻略”，明确的市场请求优先，流式回答也保持一致。
 - Prime 查询：整套、部件、缺件、补齐成本、套装套利；套利结果包含 ROI、流动性、风险等级和机会分数。
 - 紫卡查询：武器名、正负属性、无负、价格上限、分页追问；结果会显示属性评分、价格位置、置信度，并提示仅为当前挂牌参考、不代表真实成交价。
 - Baro 查询：当前库存、推荐购买、某个条目的买家/卖家详情。
@@ -27,7 +28,9 @@
 | `/memory` | 查看长期记忆摘要。 |
 | `/fav` | 管理收藏物品。 |
 | `/alert` | 管理价格提醒。 |
-| `/pref` | 设置交易偏好。 |
+| `/pref` | 设置交易偏好；支持 `/pref risk low`、`/pref budget 30-150`、`/pref categories mod,arcane`、`/pref turnaround 3` 和 `/pref min_roi 30`。预算上限和最低 ROI 会作为投资顾问默认扫描参数。 |
+| `/profile`、`/画像` | 查看个人交易画像，包括风险、预算、偏好品类、行为推断、最低 ROI、周转和历史复盘摘要。 |
+| `/review`、`/复盘` | 查看机会复盘记录；`/review done OP8K3A2Q 45 good` 可把真实推送机会记录为 completed 复盘，只显示和保存安全摘要，不展示玩家名、profile 链接或 `/w` 私聊命令。 |
 | `/push` | 暂停/开启交易机会推送，或设置交易机会检测范围。 |
 | `/scan` | 执行扫描或查看扫描结果。 |
 | `/goal` | 管理交易目标。 |
@@ -77,10 +80,10 @@
 - 飞书配置。
 - 交易记忆面板：市场快照、推荐记录、推送历史和召回 Trace。
 - 工具观测面板：从更多功能菜单打开，查看最近工具调用历史、成功率、耗时统计和按工具过滤结果。
-- 交易机会面板：Mod/赋能翻转、Prime 套装利润和投资顾问优先渲染 `trade_plan` 卡片；赋能机会显示聚合买够满级所需 R0 的卖家 quantity、单价、小计和满级买家；Prime 多部件机会展示 ROI、机会分数、流动性和风险等级，只展示当前盈利策略需要的买卖路径，不混入另一条亏损路径；复制按钮只复制后端提供的 whisper。
+- 交易机会面板：Mod/赋能翻转、Prime 套装利润和投资顾问优先渲染 `trade_plan` 卡片；赋能机会显示聚合买够满级所需 R0 的卖家 quantity、单价、小计和满级买家；Prime 多部件机会展示 ROI、机会分数、流动性和风险等级，只展示当前盈利策略需要的买卖路径，不混入另一条亏损路径；投资顾问默认入口不强制发送 `budget=500/min_roi=10`，而是让后端读取个人偏好，缺省时汇总区显示“偏好预算”，用户在预算输入框显式扫描时才覆盖预算；复制按钮只复制后端提供的 whisper。
 - 主动交易机会 WebSocket：`proactive_push` 可携带 `trade_plan` 和 `safe_summary`；前端聊天区会把机会渲染为同样的可执行卡片，而不是只显示纯文本摘要。
 - Dashboard / 图表。
-- 运行态状态展示：侧栏状态点会轮询 `/api/runtime/status`，显示在线、检查中、部分异常或连接错误；点击状态点可打开运行态详情，查看 scheduler jobs、后台任务、最近工具调用、Feishu、WxPusher 和日报安全摘要。
+- 运行态状态展示：侧栏状态点会轮询 `/api/runtime/status`，显示在线、检查中、部分异常或连接错误；点击状态点可打开运行态详情，查看 safety policy、ToolRegistry 聚合安全分布、scheduler jobs、后台任务、最近工具调用、Agent Trace、AgentPlan 只读快照、Feishu、WxPusher 和日报安全摘要。安全策略只显示能力默认模式和启用布尔值，工具安全分布只显示总数和 `skill`/`safety_level`/`context_policy` 计数，说明 shell、通用文件写入、浏览器私网和任意调度器默认不可用；Agent Trace 只显示 `status`、`termination_reason`、开始/结束时间、最大轮次、迭代次数、工具名、耗时、`has_result`、`result_chars`、`error_present` 和安全参数摘要；AgentPlan 只显示 goal 是否存在、最多 10 个步骤、工具名、purpose、状态、耗时和安全参数摘要，不显示 `final_answer` 原文、`raw_arguments`、完整 `result_summary` 或工具错误正文。
 - 价格历史、交易历史、推荐和扫描结果入口。
 
 ## 3. FastAPI Web 服务
@@ -164,4 +167,10 @@ API 详情见 `04-web-api-reference.md`。
 | 用户展示 | 玩家名、profile 链接、`/w` 私聊命令、订单详情、交易机会的市场链接、买卖步骤、quantity、subtotal、total cost/revenue。 | API Key、内部 token。 |
 | 模型上下文 | 价格、数量、趋势、统计、匿名化摘要、机会来源、策略、总成本、总收入、利润和 ROI；紫卡只含匿名属性、评分、价格位置和置信度。 | 玩家名、profile 链接、私聊命令、市场 URL、auction id、敏感字段。 |
 
-运行态详情、工具观测和记忆 trace 面板只展示安全摘要，不显示密钥、chat_id、完整消息内容、profile 或模型不应见的私聊命令。Riven、Baro、专家分析尤其需要遵守这个边界。
+运行态详情、工具观测和记忆 trace 面板只展示安全摘要，不显示密钥、chat_id、完整消息内容、profile 或模型不应见的私聊命令。`safety_policy` 是只读边界快照，不是开关面板；其中 ToolRegistry 部分只展示聚合统计，不展示单个工具参数、handler 或模型上下文。Riven、Baro、专家分析尤其需要遵守这个边界。
+
+## 2026-05-26 追加：AgentPlan Web 运行态面板
+
+Web 运行态详情现在会在 Agent Trace 之后显示 Agent Plan 只读面板：摘要卡包含 `present`、`plan_status`、`goal_present` 和 `plan_steps`，详情列表展示已脱敏 goal、步骤序号、工具名、purpose、状态、耗时、`result_present` 和 `error_present`。该面板只消费 `/api/runtime/status.agent_trace.plan` 的安全快照，不直接遍历原始 plan 对象。
+
+前端同时对运行态 `args_summary` 做兜底过滤：敏感键如 token、secret、chat_id、app_secret、profile、whisper、raw、result_summary、final_answer 会被跳过，包含 Bearer、`/w`、secret-token、PlayerSecret 等可疑文本的值会被替换为 `[REDACTED]`。Agent Trace 里 `termination_reason="final_answer"` 会显示为 `reason=answered`，只显示 `answer_present=true/false`，不显示 final answer 原文或 `final_answer` 字面字段。

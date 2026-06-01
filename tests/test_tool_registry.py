@@ -2,6 +2,7 @@ from datetime import datetime
 
 import pytest
 
+from warframe_agent.safety_policy import build_runtime_safety_policy, summarize_tool_registry_safety
 from warframe_agent.tool_registry import ToolRegistry, ToolResult, ToolSpec, create_default_tool_registry
 
 
@@ -543,3 +544,144 @@ def test_external_side_effect_tools_are_not_candidates_by_default():
 
     assert "query_price" in candidate_names
     assert "send_push" not in candidate_names
+
+
+def test_tool_registry_safety_summary_counts_metadata_without_exposing_handlers_or_parameters():
+    registry = ToolRegistry()
+    registry.register(ToolSpec(
+        name="safe_price",
+        description="safe",
+        parameters={"secret_param": {"type": "string"}},
+        skill="market_price",
+        safety_level="read_only",
+        context_policy="safe_aggregate_only",
+        handler=lambda args: "should not leak",
+    ))
+    registry.register(ToolSpec(
+        name="push_message",
+        description="push",
+        parameters={},
+        skill="monitoring",
+        safety_level="external_side_effect",
+        side_effect=True,
+        expose_schema=False,
+    ))
+
+    summary = summarize_tool_registry_safety(registry)
+
+    assert summary["tool_count"] == 2
+    assert summary["exposed_schema_count"] == 1
+    assert summary["private_schema_count"] == 1
+    assert summary["side_effect_count"] == 1
+    assert summary["read_only_candidate_count"] == 1
+    assert summary["safety_levels"] == {"external_side_effect": 1, "read_only": 1}
+    assert summary["skills"] == {"market_price": 1, "monitoring": 1}
+    assert summary["context_policies"] == {"default": 1, "safe_aggregate_only": 1}
+    serialized = str(summary)
+    for forbidden in [
+        "handler",
+        "should not leak",
+        "secret_param",
+        "parameters",
+        "safe_price",
+        "push_message",
+        "description",
+        "ToolResult",
+        "model_context",
+        "message_context",
+        "hidden",
+    ]:
+        assert forbidden not in serialized
+
+
+def test_runtime_safety_policy_embeds_tool_registry_summary_without_tool_details():
+    registry = ToolRegistry()
+    registry.register(ToolSpec(
+        name="safe_price",
+        description="safe",
+        parameters={"api_key": {"type": "string"}},
+        skill="market_price",
+        safety_level="read_only",
+        handler=lambda args: "secret result",
+    ))
+
+    policy = build_runtime_safety_policy(tool_registry=registry)
+
+    summary = policy["tool_registry"]
+    assert summary["tool_count"] == 1
+    assert summary["exposed_schema_count"] == 1
+    assert summary["private_schema_count"] == 0
+    assert summary["safety_levels"] == {"read_only": 1}
+    browser_policy = policy["browser_gui_policy"]
+    assert browser_policy["default_mode"] == "read_only"
+    assert browser_policy["automation_enabled"] is False
+    assert browser_policy["human_takeover_required"] is True
+    assert browser_policy["decision_counts"]["blocked"] >= 1
+    assert "browser_gui_automation" in policy["capabilities"]
+    assert policy["capabilities"]["browser_gui_automation"]["default"] == "disabled"
+    companion_policy = policy["companion_experience_policy"]
+    assert companion_policy["default_mode"] == "text_only"
+    assert companion_policy["voice_enabled"] is False
+    assert companion_policy["live2d_enabled"] is False
+    assert companion_policy["microphone_enabled"] is False
+    assert companion_policy["recording_enabled"] is False
+    assert companion_policy["background_listening_enabled"] is False
+    assert companion_policy["decision_counts"]["blocked_unavailable_runtime"] >= 1
+    assert "voice_companion_experience" in policy["capabilities"]
+    assert policy["capabilities"]["voice_companion_experience"]["default"] == "disabled"
+    gateway_policy = policy["gateway_policy"]
+    assert gateway_policy["default_mode"] == "explicit_gateway_only"
+    assert gateway_policy["automatic_inbound_execution_enabled"] is False
+    assert gateway_policy["anonymous_inbound_enabled"] is False
+    assert gateway_policy["decision_counts"]["allow_interactive_chat"] >= 1
+    assert gateway_policy["decision_counts"]["blocked_public_or_anonymous_inbound"] >= 1
+    assert "multi_channel_gateway" in policy["capabilities"]
+    assert policy["capabilities"]["multi_channel_gateway"]["default"] == "restricted"
+    plugin_policy = policy["plugin_policy"]
+    assert plugin_policy["default_mode"] == "guidance_only"
+    assert plugin_policy["plugin_runtime_enabled"] is False
+    assert plugin_policy["connector_runtime_enabled"] is False
+    assert plugin_policy["automatic_tool_install_enabled"] is False
+    assert plugin_policy["decision_counts"]["allow_guidance_only"] >= 1
+    assert plugin_policy["decision_counts"]["blocked_high_risk_capability"] >= 1
+    assert "skills_plugin_ecosystem" in policy["capabilities"]
+    assert policy["capabilities"]["skills_plugin_ecosystem"]["default"] == "guidance_only"
+    future_policy = policy["future_capability_policy"]
+    assert future_policy["default_mode"] == "design_required_before_runtime"
+    assert future_policy["runtime_enablement_allowed"] is False
+    assert future_policy["decision_counts"]["requires_new_stage_design"] >= 1
+    assert future_policy["decision_counts"]["blocked_uncontrolled_runtime"] >= 1
+    assert "future_capability_admission" in policy["capabilities"]
+    assert policy["capabilities"]["future_capability_admission"]["default"] == "design_required"
+    assert policy["capabilities"]["future_capability_admission"]["enabled"] is False
+    assert policy["capabilities"]["future_capability_admission"]["scope"] == "future_high_risk_features_policy_only"
+    serialized = str(policy)
+    for forbidden in [
+        "api_key",
+        "safe_price",
+        "handler",
+        "secret result",
+        "parameters",
+        "ToolResult",
+        "model_context",
+        "message_context",
+        "127.0.0.1",
+        "secret-token",
+        "SecretSeller",
+        "/w",
+        "profile/",
+        "raw_message",
+        "microphone_path",
+        "audio_url",
+        "SellerGateway",
+        "oc_gateway",
+        "raw_payload",
+        "account_id",
+        "raw_manifest",
+        "user-123",
+        "raw_payload",
+        "handler",
+        "params",
+        "Player",
+    ]:
+        assert forbidden not in serialized

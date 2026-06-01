@@ -29,19 +29,30 @@ if (typeof marked !== 'undefined') {
     });
 }
 
+function stripUnsafeInlineHtml(text) {
+    return String(text || '')
+        .replace(/<\s*(script|style|iframe|object|embed|img)\b[^>]*>/gi, '')
+        .replace(/<\s*\/\s*(script|style|iframe|object|embed)\s*>/gi, '');
+}
+
+function safeChatRawText(text) {
+    return stripUnsafeInlineHtml(text);
+}
+
 function renderMarkdown(text) {
+    const safeText = safeChatRawText(text);
     if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
         try {
-            const html = marked.parse(text);
+            const html = marked.parse(safeText);
             return DOMPurify.sanitize(html, {
                 FORBID_TAGS: ['img'],
-                FORBID_ATTR: ['onerror', 'onload', 'onclick']
+                FORBID_ATTR: ['onerror', 'onload', 'onclick', 'data-xss']
             });
         } catch (e) {
-            return escapeHtml(text);
+            return escapeHtml(safeText);
         }
     }
-    return escapeHtml(text).replace(/\n/g, '<br>');
+    return escapeHtml(safeText).replace(/\n/g, '<br>');
 }
 
 function escapeHtml(text) {
@@ -120,8 +131,9 @@ function addChatMessage(role, text, animate = true) {
     content.className = 'message-content';
 
     if (role === 'agent') {
-        content.setAttribute('data-raw', text);
-        content.innerHTML = renderMarkdown(text);
+        const safeText = safeChatRawText(text);
+        content.setAttribute('data-raw', safeText);
+        content.innerHTML = renderMarkdown(safeText);
         detectWhisperCommands(content);
     } else {
         content.textContent = text;
@@ -351,8 +363,46 @@ function scrollMessageIntoView(messageEl) {
 
 // ===== WebSocket 流式对话 =====
 
+function getChatErrorMessage(data, fallback = '错误: 请求处理失败') {
+    if (!data || typeof data !== 'object') return '';
+    if (data.ok !== false && data.status !== 'error' && !data.error) return '';
+    const message = data.display_error || data.message || data.detail || data.error || fallback;
+    return String(message);
+}
+
+function renderCurrentStreamError(message) {
+    if (!currentStreamMsg) return;
+    const content = currentStreamMsg.querySelector('.message-content');
+    if (content) {
+        content.setAttribute('data-raw', safeChatRawText(message));
+        content.textContent = message;
+    }
+    scrollMessageIntoView(currentStreamMsg);
+    isTyping = false;
+    currentStreamMsg = null;
+    saveChatHistory();
+}
+
+function chatWsState(name, fallback) {
+    return typeof WebSocket !== 'undefined' && typeof WebSocket[name] === 'number'
+        ? WebSocket[name]
+        : fallback;
+}
+
+function isChatWsOpen(ws) {
+    return Boolean(ws && ws.readyState === chatWsState('OPEN', 1));
+}
+
+function isChatWsConnecting(ws) {
+    return Boolean(ws && ws.readyState === chatWsState('CONNECTING', 0));
+}
+
+function isChatWsClosed(ws) {
+    return Boolean(ws && ws.readyState === chatWsState('CLOSED', 3));
+}
+
 function ensureChatWs() {
-    if (chatWs && (chatWs.readyState === WebSocket.OPEN || chatWs.readyState === WebSocket.CONNECTING)) return chatWs;
+    if (chatWs && (isChatWsOpen(chatWs) || isChatWsConnecting(chatWs))) return chatWs;
 
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     chatWs = new WebSocket(`${wsProto}//${location.host}/ws/chat`);
@@ -371,6 +421,12 @@ function ensureChatWs() {
             return;
         }
 
+        const errorMessage = getChatErrorMessage(data);
+        if (errorMessage) {
+            renderCurrentStreamError(errorMessage);
+            return;
+        }
+
         if (data.status === 'processing') {
             if (currentStreamMsg) {
                 const loading = currentStreamMsg.querySelector('.loading');
@@ -383,7 +439,7 @@ function ensureChatWs() {
             const content = currentStreamMsg.querySelector('.message-content');
             if (content) {
                 const current = content.getAttribute('data-raw') || '';
-                const updated = current + data.token;
+                const updated = safeChatRawText(current + data.token);
                 content.setAttribute('data-raw', updated);
                 content.innerHTML = renderMarkdown(updated);
             }
@@ -396,11 +452,14 @@ function ensureChatWs() {
             if (content) {
                 // 检测物品未找到
                 const query = currentStreamMsg.getAttribute('data-query') || '';
-                if (isItemNotFoundResponse(data.reply) && query) {
+                const reply = typeof data.reply === 'string' ? data.reply : '';
+                if (isItemNotFoundResponse(reply) && query) {
                     currentStreamMsg.remove();
                     showItemNotFound(query);
                 } else {
-                    content.innerHTML = renderMarkdown(data.reply);
+                    const safeReply = safeChatRawText(reply);
+                    content.setAttribute('data-raw', safeReply);
+                    content.innerHTML = renderMarkdown(safeReply);
                     detectWhisperCommands(content);
                 }
             }
@@ -410,15 +469,18 @@ function ensureChatWs() {
             return;
         }
 
-        if (data.reply && currentStreamMsg) {
+        const directReply = typeof data.reply === 'string' ? data.reply : '';
+        if (directReply && currentStreamMsg) {
             const content = currentStreamMsg.querySelector('.message-content');
             if (content) {
                 const query = currentStreamMsg.getAttribute('data-query') || '';
-                if (isItemNotFoundResponse(data.reply) && query) {
+                if (isItemNotFoundResponse(directReply) && query) {
                     currentStreamMsg.remove();
                     showItemNotFound(query);
                 } else {
-                    content.innerHTML = renderMarkdown(data.reply);
+                    const safeReply = safeChatRawText(directReply);
+                    content.setAttribute('data-raw', safeReply);
+                    content.innerHTML = renderMarkdown(safeReply);
                     detectWhisperCommands(content);
                 }
             }
@@ -442,6 +504,24 @@ function ensureChatWs() {
     };
 
     return chatWs;
+}
+
+function waitForChatWsOpen(ws, timeoutMs = 300) {
+    return new Promise(resolve => {
+        const started = Date.now();
+        const check = () => {
+            if (!ws || isChatWsOpen(ws)) {
+                resolve(isChatWsOpen(ws));
+                return;
+            }
+            if (isChatWsClosed(ws) || Date.now() - started >= timeoutMs) {
+                resolve(false);
+                return;
+            }
+            setTimeout(check, 10);
+        };
+        check();
+    });
 }
 
 // ===== 发送消息 =====
@@ -479,7 +559,10 @@ async function handleSend() {
 
     try {
         const ws = ensureChatWs();
-        if (ws.readyState === WebSocket.OPEN) {
+        if (isChatWsConnecting(ws)) {
+            await waitForChatWsOpen(ws);
+        }
+        if (isChatWsOpen(ws)) {
             ws.send(JSON.stringify({ message }));
         } else {
             // 回退到 REST
@@ -490,11 +573,18 @@ async function handleSend() {
                         const c = currentStreamMsg.querySelector('.message-content');
                         const q = currentStreamMsg.getAttribute('data-query') || '';
                         if (c) {
-                            if (isItemNotFoundResponse(data.reply) && q) {
+                            const errorMessage = getChatErrorMessage(data);
+                            const reply = typeof data.reply === 'string' ? data.reply : '';
+                            if (errorMessage) {
+                                c.setAttribute('data-raw', safeChatRawText(errorMessage));
+                                c.textContent = errorMessage;
+                            } else if (isItemNotFoundResponse(reply) && q) {
                                 currentStreamMsg.remove();
                                 showItemNotFound(q);
                             } else {
-                                c.innerHTML = renderMarkdown(data.reply);
+                                const safeReply = safeChatRawText(reply);
+                                c.setAttribute('data-raw', safeReply);
+                                c.innerHTML = renderMarkdown(safeReply);
                                 detectWhisperCommands(c);
                             }
                         }
@@ -521,6 +611,7 @@ window.handleSend = handleSend;
 // ===== 物品未找到检测 =====
 
 function isItemNotFoundResponse(text) {
+    if (typeof text !== 'string') return false;
     const patterns = ['没有找到', '未找到', '找不到', '无法找到', '未识别', '不认识'];
     return patterns.some(p => text.includes(p)) && text.includes('物品');
 }

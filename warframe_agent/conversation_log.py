@@ -1,13 +1,51 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict
+import re
+from dataclasses import dataclass, asdict, replace
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from . import config
 
 LOG_PATH = config.DATA_DIR / "conversation_logs.jsonl"
+_SAFE_CONTEXT_RE = re.compile(r"^[a-z0-9][a-z0-9_]{1,80}$")
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+_SENSITIVE_KV_RE = re.compile(
+    r"(?i)\b(password|token|secret|api[_-]?key|apikey|authorization|cookie|app_secret|chat_id)\b\s*[:=]\s*([^\s\r\n,;]+)"
+)
+_WHISPER_RE = re.compile(r"(?i)/w\s+\S+[^\r\n]*")
+_MARKET_URL_RE = re.compile(r"https?://(?:www\.)?warframe\.market/\S+")
+_PLAYER_LABEL_RE = re.compile(r"(最低卖家|当前最低卖家|最低买家|当前最高买家|卖家|买家|购买私聊|出售私聊)\s*[:：]\s*[^，,\r\n]+")
+_INTERNAL_TOOL_KEYS = {
+    "__message",
+    "message_context",
+    "prompt",
+    "raw_chat",
+    "raw_arguments",
+    "arguments",
+    "content",
+    "display_content",
+    "model_context",
+    "result_summary",
+    "final_answer",
+    "assistant_reply",
+    "user_message",
+    "context",
+}
+_SENSITIVE_KEY_TOKENS = (
+    "password",
+    "token",
+    "secret",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "app_secret",
+    "chat_id",
+)
 
 
 @dataclass
@@ -23,11 +61,11 @@ class ConversationEntry:
 
 def log_conversation(entry: ConversationEntry) -> None:
     """追加一条对话记录到 JSONL 文件。"""
-    if not entry.timestamp:
-        entry.timestamp = datetime.now().isoformat()
+    timestamp = entry.timestamp or datetime.now().isoformat()
+    safe_entry = _safe_conversation_entry(entry, timestamp=timestamp)
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with LOG_PATH.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(asdict(entry), ensure_ascii=False) + "\n")
+        f.write(json.dumps(asdict(safe_entry), ensure_ascii=False) + "\n")
 
 
 def load_conversations(limit: int = 0) -> list[ConversationEntry]:
@@ -137,6 +175,101 @@ def query_tool_call_stats(
         for name, bucket in sorted(buckets.items(), key=lambda item: (-item[1]["total_calls"], item[0]))
     ]
     return stats
+
+
+def _safe_conversation_entry(entry: ConversationEntry, *, timestamp: str) -> ConversationEntry:
+    return replace(
+        entry,
+        user_message=_safe_text_summary("user", entry.user_message),
+        assistant_reply=_safe_text_summary("assistant", entry.assistant_reply),
+        tool_calls=_safe_tool_calls(entry.tool_calls),
+        contexts=_safe_contexts(entry.contexts),
+        timestamp=timestamp,
+    )
+
+
+def _safe_text_summary(role: str, text: str, *, max_chars: int = 500, max_lines: int = 8) -> str:
+    sanitized = _sanitize_text(text)
+    lines = sanitized.splitlines()[:max_lines]
+    compact = "\n".join(line.strip() for line in lines if line.strip())
+    if len(compact) > max_chars:
+        compact = compact[:max_chars].rstrip() + " [TRUNCATED]"
+    return f"summary:v1 role={role} {compact}" if compact else f"summary:v1 role={role} empty"
+
+
+def _sanitize_text(value: Any) -> str:
+    text = _CONTROL_CHAR_RE.sub(" ", str(value or ""))
+    text = _WHISPER_RE.sub("[REDACTED_WHISPER]", text)
+    text = _MARKET_URL_RE.sub("[REDACTED_MARKET_URL]", text)
+    text = _BEARER_RE.sub("Bearer [REDACTED]", text)
+    text = _SENSITIVE_KV_RE.sub("[REDACTED_SECRET]", text)
+    text = _PLAYER_LABEL_RE.sub(lambda match: f"{match.group(1)}: [REDACTED_PLAYER]", text)
+    return text
+
+
+def _safe_contexts(contexts: list[str] | None) -> list[str] | None:
+    if not isinstance(contexts, list):
+        return None
+    safe = []
+    for context in contexts:
+        value = str(context or "").strip().lower()
+        if not _SAFE_CONTEXT_RE.match(value):
+            continue
+        if _contains_sensitive_text(value):
+            continue
+        safe.append(value)
+    return safe or None
+
+
+def _safe_tool_calls(tool_calls: list[dict] | None) -> list[dict] | None:
+    if not isinstance(tool_calls, list):
+        return None
+    safe_calls = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        safe_call = _safe_mapping(call)
+        if safe_call:
+            safe_calls.append(safe_call)
+    return safe_calls or None
+
+
+def _safe_mapping(mapping: dict[str, Any]) -> dict[str, Any]:
+    safe = {}
+    for key, value in mapping.items():
+        key_text = str(key)
+        if key_text in _INTERNAL_TOOL_KEYS:
+            continue
+        if _is_sensitive_key(key_text):
+            safe[key_text] = "[REDACTED]"
+            continue
+        safe[key_text] = _safe_value(value)
+    return safe
+
+
+def _safe_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _safe_mapping(value)
+    if isinstance(value, list):
+        return [_safe_value(item) for item in value if not _should_drop_value(item)]
+    if isinstance(value, str):
+        return _sanitize_text(value)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _sanitize_text(value)
+
+
+def _should_drop_value(value: Any) -> bool:
+    return isinstance(value, str) and _contains_sensitive_text(value)
+
+
+def _is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(token in lowered for token in _SENSITIVE_KEY_TOKENS)
+
+
+def _contains_sensitive_text(text: str) -> bool:
+    return bool(_WHISPER_RE.search(text) or _MARKET_URL_RE.search(text) or _SENSITIVE_KV_RE.search(text) or _BEARER_RE.search(text))
 
 
 def _empty_tool_call_stats() -> dict:

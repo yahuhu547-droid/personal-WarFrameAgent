@@ -8,8 +8,11 @@ from warframe_agent.investment import (
     _assess_risk,
     analyze_prime_investment,
     format_prime_investment_results_for_model,
+    resolve_investment_preference_defaults,
     scan_prime_investments,
 )
+from warframe_agent.memory import AgentMemory
+from warframe_agent.personal_profile import build_personal_profile
 from warframe_agent.warframes import PrimeGroup
 
 
@@ -295,6 +298,63 @@ def test_format_prime_investment_results_for_model_includes_metadata_and_top_row
     assert "part_count=3" in text
 
 
+def test_resolve_investment_preference_defaults_uses_memory_when_missing():
+    memory = AgentMemory.default().with_updated_preferences(
+        budget_min=20,
+        budget_max=180,
+        min_roi_pct=35,
+    )
+
+    budget, min_roi = resolve_investment_preference_defaults(
+        memory,
+        budget=None,
+        min_roi_pct=None,
+        fallback_budget=500,
+        fallback_min_roi_pct=10.0,
+    )
+
+    assert budget == 180
+    assert min_roi == 35.0
+
+
+def test_resolve_investment_preference_defaults_preserves_explicit_values():
+    memory = AgentMemory.default().with_updated_preferences(
+        budget_min=20,
+        budget_max=180,
+        min_roi_pct=35,
+    )
+
+    budget, min_roi = resolve_investment_preference_defaults(
+        memory,
+        budget=75,
+        min_roi_pct=12.5,
+        fallback_budget=500,
+        fallback_min_roi_pct=10.0,
+    )
+
+    assert budget == 75
+    assert min_roi == 12.5
+
+
+def test_resolve_investment_preference_defaults_preserves_explicit_zero_values():
+    memory = AgentMemory.default().with_updated_preferences(
+        budget_min=20,
+        budget_max=180,
+        min_roi_pct=35,
+    )
+
+    budget, min_roi = resolve_investment_preference_defaults(
+        memory,
+        budget=0,
+        min_roi_pct=0,
+        fallback_budget=500,
+        fallback_min_roi_pct=10.0,
+    )
+
+    assert budget == 0
+    assert min_roi == 0.0
+
+
 def test_investment_model_context_excludes_players_links_whispers():
     result = _make_investment(1)
     result = PrimeInvestment(
@@ -394,3 +454,117 @@ def test_scan_filters_non_warframe_weapon(mock_stats):
     # 只有 volt_prime 应该出现，carrier_prime 被排除
     base_ids = [r.base_id for r in results]
     assert "volt_prime" in base_ids or len(results) == 0  # 可能因为价格原因没有结果
+
+
+def test_scan_prime_investments_applies_personal_profile_sorting(monkeypatch):
+    safe_fit = _make_investment(1, roi_pct=35, risk_level="low")
+    risky_market = _make_investment(2, roi_pct=90, risk_level="high")
+    groups = {
+        "risky_prime": PrimeGroup(
+            base_id="risky_prime",
+            items={"set": "risky_prime_set", "blueprint": "risky_prime_blueprint"},
+            tags={"prime", "warframe", "set"},
+            en_title="Risky Prime",
+        ),
+        "safe_prime": PrimeGroup(
+            base_id="safe_prime",
+            items={"set": "safe_prime_set", "blueprint": "safe_prime_blueprint"},
+            tags={"prime", "warframe", "set"},
+            en_title="Safe Prime",
+        ),
+    }
+    monkeypatch.setattr("warframe_agent.investment.build_prime_groups", lambda items: groups)
+
+    def fake_analyze(group, order_fetcher, budget):
+        return risky_market if group.base_id == "risky_prime" else safe_fit
+
+    monkeypatch.setattr("warframe_agent.investment.analyze_prime_investment", fake_analyze)
+    memory = AgentMemory.default().with_updated_preferences(
+        risk_appetite="low",
+        budget_min=1,
+        budget_max=100,
+        preferred_categories=["prime_set"],
+        min_roi_pct=20,
+    )
+    profile = build_personal_profile(memory)
+
+    results = scan_prime_investments(
+        [{}],
+        _mock_order_fetcher,
+        budget=500,
+        min_roi_pct=10,
+        limit=2,
+        personal_profile=profile,
+    )
+
+    assert [result.base_id for result in results] == ["test_prime_1", "test_prime_2"]
+    assert results[0].personal_score > results[1].personal_score
+
+
+def test_prime_investment_can_carry_personal_score():
+    result = PrimeInvestment(
+        base_id="gauss_prime",
+        display_name="Gauss Prime",
+        strategy="buy_parts_sell_set",
+        buy_cost=100,
+        sell_price=130,
+        profit_per_set=30,
+        roi_pct=30.0,
+        sets_affordable=1,
+        total_profit=30,
+        volume_48h=20,
+        risk_level="low",
+        part_details=[],
+        set_item_id="gauss_prime_set",
+        personal_score=86.0,
+        personal_reasons=["ROI 达标"],
+    )
+
+    assert result.personal_score == 86.0
+    assert result.personal_reasons == ["ROI 达标"]
+
+def test_scan_prime_investments_considers_candidates_after_first_30(monkeypatch):
+    groups = {
+        f"item_{index}_prime": PrimeGroup(
+            base_id=f"item_{index}_prime",
+            items={
+                "set": f"item_{index}_prime_set",
+                "blueprint": f"item_{index}_prime_blueprint",
+            },
+            tags={"prime", "warframe", "set"},
+            en_title=f"Item {index} Prime",
+        )
+        for index in range(30)
+    }
+    groups["late_item_prime"] = PrimeGroup(
+        base_id="late_item_prime",
+        items={"set": "late_item_prime_set", "blueprint": "late_item_prime_blueprint"},
+        tags={"prime", "warframe", "set"},
+        en_title="Late Item Prime",
+    )
+    monkeypatch.setattr("warframe_agent.investment.build_prime_groups", lambda items: groups)
+
+    def fake_analyze(group, order_fetcher, budget):
+        if group.base_id != "late_item_prime":
+            return None
+        return PrimeInvestment(
+            base_id="late_item_prime",
+            display_name="Late Item Prime",
+            strategy="buy_parts_sell_set",
+            buy_cost=100,
+            sell_price=150,
+            profit_per_set=50,
+            roi_pct=50.0,
+            sets_affordable=5,
+            total_profit=250,
+            volume_48h=20,
+            risk_level="low",
+            part_details=[],
+            set_item_id="late_item_prime_set",
+        )
+
+    monkeypatch.setattr("warframe_agent.investment.analyze_prime_investment", fake_analyze)
+
+    results = scan_prime_investments([{}], lambda item_id: [], budget=500, min_roi_pct=10, limit=5)
+
+    assert [result.base_id for result in results] == ["late_item_prime"]
